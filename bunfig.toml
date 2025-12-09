@@ -1,0 +1,13 @@
+# Bun configuration for hedgesync
+
+[install]
+# Use exact versions for reproducibility
+exact = true
+
+[run]
+# Silence Bun's startup messages
+silent = false
+
+[test]
+# Test configuration
+coverage = false

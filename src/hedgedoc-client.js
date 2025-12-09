@@ -251,12 +251,16 @@ export class HedgeDocClient extends EventEmitter {
       // First, get a session cookie if we don't have one
       const cookie = await this._getSessionCookie();
       
+      // Detect if we're running in Bun
+      const isBun = typeof Bun !== 'undefined';
+      
       const socketOptions = {
         query: {
           noteId: this.noteId
         },
-        // Use polling first - it handles custom headers better for auth
-        transports: ['polling', 'websocket'],
+        // Bun doesn't support XHR polling well, use websocket only
+        // Node.js/browsers can use polling first for better auth handling
+        transports: isBun ? ['websocket'] : ['polling', 'websocket'],
         withCredentials: true,
         extraHeaders: {
           Cookie: cookie

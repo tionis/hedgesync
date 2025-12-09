@@ -1,6 +1,6 @@
 # hedgesync
 
-A Node.js library to programmatically connect to a running [HedgeDoc](https://hedgedoc.org/) server and make live edits to documents using Operational Transformation (OT).
+A library and CLI to programmatically connect to a running [HedgeDoc](https://hedgedoc.org/) server and make live edits to documents using Operational Transformation (OT).
 
 ## Features
 
@@ -18,15 +18,122 @@ A Node.js library to programmatically connect to a running [HedgeDoc](https://he
 - 🔁 **Auto-reconnection** - exponential backoff with operation queuing
 - 📦 **Batch operations** - combine multiple edits into one
 - ↩️ **Undo/Redo** - track edit history with grouping
+- 💻 **CLI tool** - command-line interface for scripting
 
 ## Installation
 
 ```bash
 cd hedgesync
+bun install
+```
+
+Or with npm:
+
+```bash
 npm install
 ```
 
-## Quick Start
+## CLI Usage
+
+The `hedgesync` CLI provides quick access to HedgeDoc documents from the command line.
+
+### Commands
+
+```bash
+# Get document content
+hedgesync get https://md.example.com/abc123
+
+# Set document content from stdin
+echo "# Hello World" | hedgesync set https://md.example.com/abc123
+
+# Set document content from file
+hedgesync set https://md.example.com/abc123 -f document.md
+
+# Append text to document
+hedgesync append https://md.example.com/abc123 "New content at the end"
+
+# Prepend text to document
+hedgesync prepend https://md.example.com/abc123 "New content at the start"
+
+# Insert at position
+hedgesync insert https://md.example.com/abc123 10 "inserted text"
+
+# Search and replace (literal)
+hedgesync replace https://md.example.com/abc123 "old text" "new text"
+
+# Search and replace (regex)
+hedgesync replace https://md.example.com/abc123 "\\d+" "NUMBER" --regex --all
+
+# Get/set specific line (0-indexed)
+hedgesync line https://md.example.com/abc123 0           # Get line 0
+hedgesync line https://md.example.com/abc123 0 "# Title" # Set line 0
+
+# Watch for changes
+hedgesync watch https://md.example.com/abc123
+
+# Get note info
+hedgesync info https://md.example.com/abc123
+
+# List online users
+hedgesync users https://md.example.com/abc123
+
+# Transform with pandoc
+hedgesync transform https://md.example.com/abc123 --demote  # Demote headers
+hedgesync transform https://md.example.com/abc123 --to html # Convert to HTML
+```
+
+### Options
+
+```
+-u, --url      Full HedgeDoc URL
+-s, --server   HedgeDoc server URL
+-n, --note     Note ID
+-c, --cookie   Session cookie for authentication
+-f, --file     Read content from file
+-o, --output   Write output to file
+-q, --quiet    Suppress non-essential output
+--json         Output in JSON format
+--regex, -r    Treat search pattern as regex
+--all, -a, -g  Replace all occurrences
+```
+
+### Environment Variables
+
+```bash
+export HEDGEDOC_SERVER=https://md.example.com
+export HEDGEDOC_NOTE=abc123
+export HEDGEDOC_COOKIE='connect.sid=...'
+
+# Now you can omit the URL
+hedgesync get
+hedgesync set -f document.md
+```
+
+### Scripting Examples
+
+```bash
+# Backup a document
+hedgesync get https://md.example.com/abc123 > backup.md
+
+# Update timestamp in document
+hedgesync replace https://md.example.com/abc123 \
+  "Last updated:.*" \
+  "Last updated: $(date)" \
+  --regex
+
+# Append log entry
+echo "- $(date): Automated entry" | hedgesync append https://md.example.com/abc123
+
+# Watch and log changes
+hedgesync watch https://md.example.com/abc123 --json | while read line; do
+  echo "$line" >> changes.log
+done
+
+# Pipe through pandoc
+hedgesync get https://md.example.com/abc123 | pandoc -f markdown -t html > doc.html
+```
+
+## Library Quick Start
 
 ```javascript
 import { HedgeDocClient } from 'hedgesync';
@@ -58,29 +165,35 @@ client.disconnect();
 
 ## Examples
 
-Run the examples with:
+Run the examples with Bun:
 
 ```bash
 # Basic usage - connect, read, and optionally edit
-node examples/basic-usage.js https://your-hedgedoc.com note-id
+bun run examples/basic-usage.js https://your-hedgedoc.com note-id
 
 # Watch a document for changes
-node examples/watch-document.js https://your-hedgedoc.com note-id
+bun run examples/watch-document.js https://your-hedgedoc.com note-id
 
 # Programmatic editing demo
-node examples/edit-document.js https://your-hedgedoc.com note-id
+bun run examples/edit-document.js https://your-hedgedoc.com note-id
 
 # Regex search and replace
-node examples/regex-replace.js
+bun run examples/regex-replace.js
 
 # Line-based operations
-node examples/line-operations.js
+bun run examples/line-operations.js
 
 # Pandoc AST transformations (requires pandoc)
-node examples/pandoc-transform.js
+bun run examples/pandoc-transform.js
 
 # Macro auto-expansion system
-node examples/macro-system.js
+bun run examples/macro-system.js
+```
+
+Or with Node.js (still compatible):
+
+```bash
+node examples/basic-usage.js https://your-hedgedoc.com note-id
 ```
 
 ## API Reference
@@ -534,7 +647,7 @@ You can get the session cookie from your browser's developer tools after logging
 ## Compatibility
 
 - **HedgeDoc**: Tested with HedgeDoc 1.x (uses OT-based real-time sync)
-- **Node.js**: Requires Node.js 18+ (uses native `fetch`)
+- **Runtime**: Bun (recommended) or Node.js 18+
 - **HedgeDoc 2.x**: Not compatible (uses Y.js instead of OT)
 
 ## License
