@@ -1,0 +1,53 @@
+{
+  "macros": [
+    {
+      "type": "text",
+      "trigger": "::sig",
+      "replacement": "— Signed by Bot"
+    },
+    {
+      "type": "text",
+      "trigger": "::shrug",
+      "replacement": "¯\\_(ツ)_/¯"
+    },
+    {
+      "type": "regex",
+      "pattern": "/TODO/gi",
+      "replacement": "DONE"
+    },
+    {
+      "type": "regex",
+      "pattern": "/\\bfoo\\b/gi",
+      "replacement": "bar"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::calc\\s+(.+?)::/gi",
+      "command": "echo {1} | bc -l"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::echo\\s+(.+?)::/gi",
+      "command": "echo {1}"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::uptime::/gi",
+      "command": "uptime -p"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::uuid::/gi",
+      "command": "uuidgen"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::weather\\s+(.+?)::/gi",
+      "command": "curl -s 'wttr.in/{1}?format=3'"
+    },
+    {
+      "type": "builtin",
+      "name": "date"
+    }
+  ]
+}

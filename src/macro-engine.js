@@ -229,6 +229,7 @@ class MacroEngine {
       let replacement;
       let replaceIndex;
       let replaceLength;
+      let originalMatch = m.match;
 
       try {
         if (macro.type === 'text') {
@@ -239,40 +240,69 @@ class MacroEngine {
           
           replaceIndex = m.index + triggerIndex;
           replaceLength = macro.trigger.length;
-          replacement = macro.replacement(macro.trigger);
+          replacement = await Promise.resolve(macro.replacement(macro.trigger));
+          originalMatch = macro.trigger;
           
-          this.client.replace(replaceIndex, replaceLength, replacement);
-          matches.push({ trigger: macro.trigger, replacement, index: replaceIndex });
-          changed = true;
         } else if (macro.type === 'regex') {
-          replacement = macro.handler(m.match, ...m.groups);
-          if (replacement !== m.match && replacement !== null && replacement !== undefined) {
-            replaceIndex = m.index;
-            replaceLength = m.match.length;
-            this.client.replace(replaceIndex, replaceLength, replacement);
-            matches.push({ match: m.match, replacement, index: replaceIndex });
-            changed = true;
+          replacement = await Promise.resolve(macro.handler(m.match, ...m.groups));
+          if (replacement === m.match || replacement === null || replacement === undefined) {
+            continue; // No change needed
           }
+          replaceIndex = m.index;
+          replaceLength = m.match.length;
+          
         } else if (macro.type === 'template') {
           const content = m.groups[0];
-          replacement = macro.handler(content);
-          if (replacement !== null && replacement !== undefined) {
-            replaceIndex = m.index;
-            replaceLength = m.match.length;
-            this.client.replace(replaceIndex, replaceLength, replacement);
-            matches.push({ template: m.match, content, replacement, index: replaceIndex });
-            changed = true;
+          replacement = await Promise.resolve(macro.handler(content));
+          if (replacement === null || replacement === undefined) {
+            continue; // No change needed
           }
+          replaceIndex = m.index;
+          replaceLength = m.match.length;
+        }
+
+        // Re-fetch current document state after async operation
+        // The document may have changed during the async handler
+        const currentDocument = this.client.getDocument();
+        
+        // Re-locate the match in the current document
+        // The position may have shifted due to other edits
+        const currentTextAtPos = currentDocument.substring(replaceIndex, replaceIndex + replaceLength);
+        
+        if (currentTextAtPos !== originalMatch) {
+          // Match has moved or been modified, try to find it again
+          const newIndex = currentDocument.indexOf(originalMatch);
+          if (newIndex === -1) {
+            // Match no longer exists, skip it
+            console.error(`Macro ${macro.name || macro.trigger}: match "${originalMatch}" no longer found, skipping`);
+            continue;
+          }
+          replaceIndex = newIndex;
         }
         
-        // Update our local copy of the document to reflect the change
-        // This is necessary because rate limiting may queue the actual operation
-        if (changed && replacement !== undefined) {
-          updatedDocument = 
-            updatedDocument.substring(0, replaceIndex) +
-            replacement +
-            updatedDocument.substring(replaceIndex + replaceLength);
+        // Verify the position is valid
+        if (replaceIndex < 0 || replaceIndex + replaceLength > currentDocument.length) {
+          console.error(`Macro ${macro.name || macro.trigger}: position out of bounds, skipping`);
+          continue;
         }
+        
+        this.client.replace(replaceIndex, replaceLength, replacement);
+        
+        if (macro.type === 'text') {
+          matches.push({ trigger: macro.trigger, replacement, index: replaceIndex });
+        } else if (macro.type === 'regex') {
+          matches.push({ match: m.match, replacement, index: replaceIndex });
+        } else if (macro.type === 'template') {
+          matches.push({ template: m.match, content: m.groups[0], replacement, index: replaceIndex });
+        }
+        changed = true;
+        
+        // Update our local copy of the document to reflect the change
+        updatedDocument = 
+          currentDocument.substring(0, replaceIndex) +
+          replacement +
+          currentDocument.substring(replaceIndex + replaceLength);
+          
       } catch (err) {
         console.error(`Macro ${macro.name || macro.trigger} error:`, err);
       }

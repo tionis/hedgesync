@@ -80,6 +80,21 @@ hedgesync users https://md.example.com/abc123
 # Transform with pandoc
 hedgesync transform https://md.example.com/abc123 --demote  # Demote headers
 hedgesync transform https://md.example.com/abc123 --to html # Convert to HTML
+
+# Get document authors/contributors
+hedgesync authors https://md.example.com/abc123          # List authors
+hedgesync authors https://md.example.com/abc123 -v       # Verbose with timestamps
+hedgesync authors https://md.example.com/abc123 --json   # JSON output
+
+# Run macros (text replacement)
+hedgesync macro https://md.example.com/abc123 --text '::date' "$(date)"
+hedgesync macro https://md.example.com/abc123 --regex '/TODO/gi' 'DONE'
+hedgesync macro https://md.example.com/abc123 --built-in date
+hedgesync macro https://md.example.com/abc123 --config macros.json --watch
+
+# Execute shell commands via macros
+hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l'
+hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' --watch
 ```
 
 ### Options
@@ -639,6 +654,91 @@ MacroEngine.builtins.counterMacro('::n', 1)  // 1, 2, 3, ...
 // Snippet macro
 MacroEngine.builtins.snippetMacro('::todo', '- [ ] ')
 ```
+
+### CLI Macro Command
+
+The `macro` command provides command-line access to the macro system:
+
+```bash
+# Text macro: replace literal text
+hedgesync macro <url> --text '::date' "$(date +%Y-%m-%d)"
+hedgesync macro <url> --text '::sig' 'Signed by Bot'
+
+# Regex macro: replace patterns
+hedgesync macro <url> --regex '/TODO/gi' 'DONE'
+hedgesync macro <url> --regex '/\bfoo\b/gi' 'bar'
+
+# Built-in macros
+hedgesync macro <url> --built-in date      # Replace ::date with current date
+hedgesync macro <url> --built-in uuid      # Replace ::uuid with UUID
+hedgesync macro <url> --built-in counter   # Replace ::n with incrementing numbers
+hedgesync macro <url> --built-in snippet   # Replace ::todo with '- [ ] '
+
+# Config file with multiple macros
+hedgesync macro <url> --config macros.json
+
+# Watch mode: continuously apply macros
+hedgesync macro <url> --built-in date --watch
+```
+
+#### Exec Macros (Shell Command Execution)
+
+Execute shell commands when patterns match, with regex capture groups as arguments:
+
+```bash
+# Format: --exec '/pattern/flags:command'
+# Placeholders: {0} = full match, {1} = first capture, {2} = second capture, etc.
+
+# Calculator: ::calc 2+2:: → 4
+hedgesync macro <url> --exec '/::calc\s+(.+?)::/gi:echo {1} | bc -l'
+
+# Echo: ::echo hello world:: → hello world
+hedgesync macro <url> --exec '/::echo\s+(.+?)::/gi:echo {1}'
+
+# System info: ::uptime:: → up 2 days, 3 hours
+hedgesync macro <url> --exec '/::uptime::/gi:uptime -p'
+
+# Date formatting: ::date YYYY-MM-DD:: → formatted date
+hedgesync macro <url> --exec '/::date\s+(.+?)::/gi:date +{1}'
+
+# External API: ::weather London:: → weather data
+hedgesync macro <url> --exec '/::weather\s+(.+?)::/gi:curl -s wttr.in/{1}?format=3'
+
+# Combine with watch mode for live updates
+hedgesync macro <url> --exec '/::uptime::/gi:uptime -p' --watch
+```
+
+**Security Note:** Exec macros execute arbitrary shell commands. Only use on documents you trust, and be careful with user-provided content.
+
+#### Macro Config File Format
+
+```json
+{
+  "macros": [
+    {
+      "type": "text",
+      "trigger": "::sig",
+      "replacement": "— Signed by Bot"
+    },
+    {
+      "type": "regex",
+      "pattern": "/TODO/gi",
+      "replacement": "DONE"
+    },
+    {
+      "type": "exec",
+      "pattern": "/::calc\\s+(.+?)::/gi",
+      "command": "echo {1} | bc -l"
+    },
+    {
+      "type": "builtin",
+      "name": "date"
+    }
+  ]
+}
+```
+
+See `examples/macros.json` for more examples.
 
 ## Permissions
 
