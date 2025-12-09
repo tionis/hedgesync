@@ -14,9 +14,10 @@
  *   watch    - Watch document for changes
  *   info     - Get note metadata
  *   users    - List online users
+ *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine } from '../src/index.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -148,6 +149,7 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'info')}        Get note metadata
   ${c('green', 'users')}       List online users
   ${c('green', 'transform')}   Transform document with pandoc
+  ${c('green', 'macro')}       Run macros on document (expand triggers, watch mode)
   ${c('green', 'help')}        Show this help message
 
 ${c('yellow', 'ARGUMENTS:')}
@@ -190,6 +192,15 @@ ${c('yellow', 'EXAMPLES:')}
   
   # Set line 5
   hedgesync line https://md.example.com/abc123 5 "New line content"
+  
+  # Run macros once (expand all triggers)
+  hedgesync macro https://md.example.com/abc123 --text "::date::=\\$(date -I)"
+  
+  # Run macros in watch mode (continuously expand triggers)
+  hedgesync macro https://md.example.com/abc123 --watch --text "::date::=\\$(date -I)"
+  
+  # Load macros from config file
+  hedgesync macro https://md.example.com/abc123 --config macros.json --watch
   
   # With authentication cookie
   hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
@@ -700,6 +711,233 @@ async function cmdTransform(args) {
   }
 }
 
+// Command: macro (run macros on document)
+async function cmdMacro(args) {
+  const client = await connect(args);
+  
+  const quiet = args.options.quiet || args.options.q;
+  const json = args.options.json;
+  const watchMode = args.options.watch || args.options.w;
+  const configFile = args.options.config || args.options.C;
+  const textMacros = [].concat(args.options.text || args.options.t || []);
+  const regexMacros = [].concat(args.options.regex || args.options.r || []);
+  
+  // Create macro engine
+  const engine = new MacroEngine(client);
+  
+  // Built-in macros
+  if (args.options['built-in'] || args.options.b) {
+    // Date macro: ::date:: -> YYYY-MM-DD
+    engine.addTextMacro('::date::', () => new Date().toISOString().split('T')[0]);
+    
+    // Time macro: ::time:: -> HH:MM:SS
+    engine.addTextMacro('::time::', () => new Date().toTimeString().split(' ')[0]);
+    
+    // DateTime macro: ::datetime:: -> ISO datetime
+    engine.addTextMacro('::datetime::', () => new Date().toISOString());
+    
+    // Timestamp macro: ::ts:: -> Unix timestamp
+    engine.addTextMacro('::ts::', () => String(Date.now()));
+    
+    if (!quiet) {
+      console.error(c('cyan', 'Loaded built-in macros: ::date::, ::time::, ::datetime::, ::ts::'));
+    }
+  }
+  
+  // Load macros from config file
+  if (configFile) {
+    try {
+      const configPath = resolve(process.cwd(), configFile);
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      
+      // Text macros from config
+      if (config.text) {
+        for (const [trigger, replacement] of Object.entries(config.text)) {
+          if (replacement.startsWith('$')) {
+            // Shell command replacement
+            const cmd = replacement.slice(1);
+            engine.addTextMacro(trigger, async () => {
+              const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe' });
+              const text = await new Response(proc.stdout).text();
+              return text.trim();
+            });
+          } else {
+            engine.addTextMacro(trigger, replacement);
+          }
+        }
+      }
+      
+      // Regex macros from config
+      if (config.regex) {
+        for (const [pattern, replacement] of Object.entries(config.regex)) {
+          const regex = new RegExp(pattern, 'g');
+          if (replacement.startsWith('$')) {
+            // Shell command replacement
+            const cmd = replacement.slice(1);
+            engine.addRegexMacro(pattern, regex, async (match, ...groups) => {
+              const env = { MATCH: match };
+              groups.forEach((g, i) => env[`GROUP${i + 1}`] = g || '');
+              const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', env: { ...process.env, ...env } });
+              const text = await new Response(proc.stdout).text();
+              return text.trim();
+            });
+          } else {
+            engine.addRegexMacro(pattern, regex, (match, ...groups) => {
+              let result = replacement;
+              groups.forEach((g, i) => {
+                result = result.replace(new RegExp(`\\$${i + 1}`, 'g'), g || '');
+              });
+              result = result.replace(/\$&/g, match);
+              return result;
+            });
+          }
+        }
+      }
+      
+      if (!quiet) {
+        console.error(c('cyan', `Loaded macros from ${configFile}`));
+      }
+    } catch (err) {
+      console.error(c('red', `Error loading config: ${err.message}`));
+      process.exit(1);
+    }
+  }
+  
+  // Add text macros from command line: --text "::trigger::=replacement"
+  for (const macro of textMacros) {
+    const match = macro.match(/^(.+?)=(.+)$/);
+    if (!match) {
+      console.error(c('red', `Invalid text macro format: ${macro}`));
+      console.error('Expected format: "::trigger::=replacement"');
+      process.exit(1);
+    }
+    
+    const [, trigger, replacement] = match;
+    if (replacement.startsWith('$(') && replacement.endsWith(')')) {
+      // Shell command replacement
+      const cmd = replacement.slice(2, -1);
+      engine.addTextMacro(trigger, async () => {
+        const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe' });
+        const text = await new Response(proc.stdout).text();
+        return text.trim();
+      });
+    } else {
+      engine.addTextMacro(trigger, replacement);
+    }
+  }
+  
+  // Add regex macros from command line: --regex "/pattern/=replacement"
+  for (const macro of regexMacros) {
+    const match = macro.match(/^\/(.+?)\/([gimsuy]*)=(.+)$/);
+    if (!match) {
+      console.error(c('red', `Invalid regex macro format: ${macro}`));
+      console.error('Expected format: "/pattern/flags=replacement"');
+      process.exit(1);
+    }
+    
+    const [, pattern, flags, replacement] = match;
+    const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
+    
+    if (replacement.startsWith('$(') && replacement.endsWith(')')) {
+      // Shell command replacement
+      const cmd = replacement.slice(2, -1);
+      engine.addRegexMacro(pattern, regex, async (m, ...groups) => {
+        const env = { MATCH: m };
+        groups.forEach((g, i) => env[`GROUP${i + 1}`] = g || '');
+        const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', env: { ...process.env, ...env } });
+        const text = await new Response(proc.stdout).text();
+        return text.trim();
+      });
+    } else {
+      engine.addRegexMacro(pattern, regex, (m, ...groups) => {
+        let result = replacement;
+        groups.forEach((g, i) => {
+          result = result.replace(new RegExp(`\\$${i + 1}`, 'g'), g || '');
+        });
+        result = result.replace(/\$&/g, m);
+        return result;
+      });
+    }
+  }
+  
+  // Check if any macros were registered
+  const macroList = engine.listMacros();
+  if (macroList.length === 0) {
+    console.error(c('red', 'Error: No macros defined'));
+    console.error('Use --text, --regex, --config, or --built-in to define macros');
+    process.exit(1);
+  }
+  
+  if (!quiet) {
+    console.error(c('cyan', `Registered ${macroList.length} macro(s):`));
+    for (const m of macroList) {
+      console.error(c('dim', `  ${m.type}: ${m.trigger || m.name}`));
+    }
+  }
+  
+  if (watchMode) {
+    // Watch mode - continuously expand macros on remote changes
+    if (!quiet) {
+      console.error(c('cyan', '\nWatching for changes... (Ctrl+C to stop)'));
+    }
+    
+    engine.start();
+    
+    // Log expansions
+    if (!quiet || json) {
+      const origProcess = engine._processDocument.bind(engine);
+      engine._processDocument = async function() {
+        const results = await origProcess();
+        if (results.length > 0) {
+          if (json) {
+            console.log(JSON.stringify({
+              type: 'expansion',
+              timestamp: new Date().toISOString(),
+              results
+            }));
+          } else {
+            for (const r of results) {
+              console.error(c('green', `✓ Expanded ${r.macro}: ${r.matches.length} match(es)`));
+            }
+          }
+        }
+        return results;
+      };
+    }
+    
+    // Keep running until interrupted
+    process.on('SIGINT', () => {
+      engine.stop();
+      client.disconnect();
+      process.exit(0);
+    });
+    
+    await new Promise(() => {});
+  } else {
+    // One-shot mode - expand once and exit
+    try {
+      const results = await engine.expand();
+      
+      if (json) {
+        console.log(JSON.stringify({ results }, null, 2));
+      } else {
+        if (results.length === 0) {
+          if (!quiet) console.error(c('yellow', 'No macros expanded'));
+        } else {
+          for (const r of results) {
+            console.error(c('green', `✓ Expanded ${r.macro}: ${r.matches.length} match(es)`));
+          }
+        }
+      }
+      
+      // Wait for operations to sync
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } finally {
+      client.disconnect();
+    }
+  }
+}
+
 // Command: exec (run a script)
 async function cmdExec(args) {
   const scriptPath = args.positional[1];
@@ -781,6 +1019,9 @@ async function main() {
         break;
       case 'transform':
         await cmdTransform(args);
+        break;
+      case 'macro':
+        await cmdMacro(args);
         break;
       case 'exec':
         await cmdExec(args);
