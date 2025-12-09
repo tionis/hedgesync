@@ -16,6 +16,7 @@ class MacroEngine {
     this.enabled = true;
     this._processing = false;
     this._changeHandler = null;
+    this._debounceTimer = null;
   }
 
   /**
@@ -113,9 +114,18 @@ class MacroEngine {
         return;
       }
       
-      // Process on any change (local or remote)
-      // The change event has type: 'local' or 'remote'
-      await this._processDocument();
+      // Only process on REMOTE changes to avoid infinite loops
+      // (our own replacements are local changes)
+      if (event.type === 'remote') {
+        // Debounce to avoid rapid processing
+        if (this._debounceTimer) {
+          clearTimeout(this._debounceTimer);
+        }
+        this._debounceTimer = setTimeout(async () => {
+          this._debounceTimer = null;
+          await this._processDocument();
+        }, 100);
+      }
     };
 
     this.client.on('change', this._changeHandler);
@@ -125,10 +135,15 @@ class MacroEngine {
    * Stop listening for document changes
    */
   stop() {
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
     if (this._changeHandler) {
       this.client.off('change', this._changeHandler);
       this._changeHandler = null;
     }
+    this._processingExpansion = false;
   }
 
   /**
@@ -188,6 +203,7 @@ class MacroEngine {
   async _applyMacro(document, macro) {
     const matches = [];
     let changed = false;
+    let updatedDocument = document;
 
     // Reset regex lastIndex
     macro.pattern.lastIndex = 0;
@@ -211,6 +227,8 @@ class MacroEngine {
     for (let i = allMatches.length - 1; i >= 0; i--) {
       const m = allMatches[i];
       let replacement;
+      let replaceIndex;
+      let replaceLength;
 
       try {
         if (macro.type === 'text') {
@@ -219,27 +237,41 @@ class MacroEngine {
           const triggerIndex = m.match.indexOf(macro.trigger);
           if (triggerIndex === -1) continue;
           
-          const actualIndex = m.index + triggerIndex;
+          replaceIndex = m.index + triggerIndex;
+          replaceLength = macro.trigger.length;
           replacement = macro.replacement(macro.trigger);
           
-          await this.client.replace(actualIndex, macro.trigger.length, replacement);
-          matches.push({ trigger: macro.trigger, replacement, index: actualIndex });
+          this.client.replace(replaceIndex, replaceLength, replacement);
+          matches.push({ trigger: macro.trigger, replacement, index: replaceIndex });
           changed = true;
         } else if (macro.type === 'regex') {
           replacement = macro.handler(m.match, ...m.groups);
           if (replacement !== m.match && replacement !== null && replacement !== undefined) {
-            await this.client.replace(m.index, m.match.length, replacement);
-            matches.push({ match: m.match, replacement, index: m.index });
+            replaceIndex = m.index;
+            replaceLength = m.match.length;
+            this.client.replace(replaceIndex, replaceLength, replacement);
+            matches.push({ match: m.match, replacement, index: replaceIndex });
             changed = true;
           }
         } else if (macro.type === 'template') {
           const content = m.groups[0];
           replacement = macro.handler(content);
           if (replacement !== null && replacement !== undefined) {
-            await this.client.replace(m.index, m.match.length, replacement);
-            matches.push({ template: m.match, content, replacement, index: m.index });
+            replaceIndex = m.index;
+            replaceLength = m.match.length;
+            this.client.replace(replaceIndex, replaceLength, replacement);
+            matches.push({ template: m.match, content, replacement, index: replaceIndex });
             changed = true;
           }
+        }
+        
+        // Update our local copy of the document to reflect the change
+        // This is necessary because rate limiting may queue the actual operation
+        if (changed && replacement !== undefined) {
+          updatedDocument = 
+            updatedDocument.substring(0, replaceIndex) +
+            replacement +
+            updatedDocument.substring(replaceIndex + replaceLength);
         }
       } catch (err) {
         console.error(`Macro ${macro.name || macro.trigger} error:`, err);
@@ -252,7 +284,7 @@ class MacroEngine {
     return {
       changed,
       matches,
-      document: this.client.getDocument()
+      document: updatedDocument
     };
   }
 
