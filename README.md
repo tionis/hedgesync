@@ -14,6 +14,10 @@ A Node.js library to programmatically connect to a running [HedgeDoc](https://he
 - 📝 **Line operations** - manipulate documents by line number
 - 🔄 **Pandoc integration** - AST-based transformations
 - 🤖 **Macro system** - auto-expand triggers as you type
+- ⏱️ **Rate limiting** - prevent overwhelming the server
+- 🔁 **Auto-reconnection** - exponential backoff with operation queuing
+- 📦 **Batch operations** - combine multiple edits into one
+- ↩️ **Undo/Redo** - track edit history with grouping
 
 ## Installation
 
@@ -92,7 +96,29 @@ const client = new HedgeDocClient({
   serverUrl: 'https://hedgedoc.example.com',  // Required
   noteId: 'my-note-id',                        // Required
   cookie: 'connect.sid=...',                   // Optional: session cookie for auth
-  operationTimeout: 5000                       // Optional: timeout for operations (ms)
+  operationTimeout: 5000,                      // Optional: timeout for operations (ms)
+  
+  // Rate limiting options
+  rateLimit: {
+    enabled: true,       // Enable rate limiting (default: true)
+    minInterval: 50,     // Min ms between operations (default: 50)
+    maxBurst: 10,        // Max operations per burst window (default: 10)
+    burstWindow: 1000    // Burst window in ms (default: 1000)
+  },
+  
+  // Reconnection options
+  reconnect: {
+    enabled: true,       // Enable auto-reconnection (default: true)
+    maxAttempts: 10,     // Max reconnection attempts (default: 10)
+    initialDelay: 1000,  // Initial delay in ms (default: 1000)
+    maxDelay: 30000,     // Max delay in ms (default: 30000)
+    backoffFactor: 2     // Exponential backoff multiplier (default: 2)
+  },
+  
+  // Undo/Redo options
+  trackUndo: true,         // Enable undo tracking (default: true)
+  undoMaxSize: 100,        // Max undo stack size (default: 100)
+  undoGroupInterval: 500   // Group rapid edits within this window (ms, default: 500)
 });
 ```
 
@@ -102,6 +128,7 @@ const client = new HedgeDocClient({
 |--------|-------------|
 | `connect()` | Connect to the server. Returns a Promise. |
 | `disconnect()` | Disconnect from the server. |
+| `reconnect()` | Manually trigger a reconnection. |
 | `getDocument()` | Get the current document content as a string. |
 | `getRevision()` | Get the current revision number. |
 | `getNoteInfo()` | Get note metadata (title, permission, authors, etc.). |
@@ -111,16 +138,29 @@ const client = new HedgeDocClient({
 | `delete(position, length)` | Delete characters starting at a position. |
 | `replace(position, length, text)` | Replace a range with new text. |
 | `setContent(content)` | Replace the entire document content. |
+| `updateContent(content)` | Smart update using minimal diff operations. |
 | `applyOperation(op)` | Apply a raw `TextOperation`. |
 | `refresh()` | Request updated note metadata. |
 | `requestOnlineUsers()` | Request the online users list. |
 | `replaceRegex(pattern, replacement)` | Replace first regex match. |
 | `replaceAllRegex(pattern, replacement)` | Replace all regex matches. |
-| `getLine(lineNumber)` | Get content of a specific line (1-indexed). |
+| `getLine(lineNumber)` | Get content of a specific line (0-indexed). |
 | `getLines()` | Get all lines as an array. |
-| `replaceLine(lineNumber, content)` | Replace a specific line. |
-| `setLines(lines)` | Replace entire document with line array. |
-| `computeDiff(oldStr, newStr)` | Compute minimal TextOperation between strings. |
+| `setLine(lineNumber, content)` | Replace a specific line. |
+| `insertLine(lineNumber, content)` | Insert a new line at position. |
+| `deleteLine(lineNumber)` | Delete a specific line. |
+| `startBatch()` | Begin a batch of operations. |
+| `endBatch()` | End batch and apply combined operation. |
+| `cancelBatch()` | Discard batch without applying. |
+| `batch(fn)` | Execute function within a batch. |
+| `undo()` | Undo the last operation. |
+| `redo()` | Redo the last undone operation. |
+| `canUndo()` / `canRedo()` | Check if undo/redo is available. |
+| `clearHistory()` | Clear undo/redo history. |
+| `setRateLimitEnabled(bool)` | Enable/disable rate limiting. |
+| `configureRateLimit(opts)` | Configure rate limit settings. |
+| `setReconnectEnabled(bool)` | Enable/disable auto-reconnection. |
+| `configureReconnect(opts)` | Configure reconnection settings. |
 
 #### Events
 
@@ -131,6 +171,7 @@ client.on('ready', ({ document, revision }) => { /* Document loaded */ });
 client.on('error', (error) => { /* Error occurred */ });
 
 client.on('document', (content) => { /* Document content changed */ });
+client.on('change', ({ type, operation }) => { /* Local/remote change */ });
 client.on('refresh', (noteInfo) => { /* Note metadata updated */ });
 client.on('permission', (permission) => { /* Permission changed */ });
 client.on('delete', () => { /* Note was deleted */ });
@@ -142,6 +183,154 @@ client.on('user:left', (clientId) => { /* User disconnected */ });
 client.on('cursor:focus', (user) => { /* User focused their cursor */ });
 client.on('cursor:activity', (user) => { /* User moved their cursor */ });
 client.on('cursor:blur', (data) => { /* User unfocused their cursor */ });
+
+// Reconnection events
+client.on('reconnect:scheduled', ({ attempt, maxAttempts, delay }) => { /* Reconnect scheduled */ });
+client.on('reconnect:attempting', ({ attempt, maxAttempts }) => { /* Attempting to reconnect */ });
+client.on('reconnect:success', ({ attempts }) => { /* Reconnected successfully */ });
+client.on('reconnect:error', ({ error, attempt }) => { /* Reconnection attempt failed */ });
+client.on('reconnect:failed', ({ attempts, maxAttempts }) => { /* All reconnection attempts failed */ });
+
+// Undo/Redo events
+client.on('undo', (entry) => { /* Operation was undone */ });
+client.on('redo', (entry) => { /* Operation was redone */ });
+```
+
+### Rate Limiting
+
+Rate limiting prevents overwhelming the server with rapid operations.
+
+```javascript
+// Configure at construction
+const client = new HedgeDocClient({
+  serverUrl: 'https://example.com',
+  noteId: 'abc123',
+  rateLimit: {
+    minInterval: 100,  // Wait at least 100ms between ops
+    maxBurst: 5,       // Max 5 ops per second
+    burstWindow: 1000
+  }
+});
+
+// Or configure at runtime
+client.configureRateLimit({ minInterval: 50, maxBurst: 10 });
+
+// Enable/disable
+client.setRateLimitEnabled(false); // Disable for bulk operations
+client.setRateLimitEnabled(true);  // Re-enable
+
+// Check queue status
+const queued = client.getQueuedOperationCount();
+```
+
+### Auto-Reconnection
+
+The client automatically reconnects on connection loss with exponential backoff.
+
+```javascript
+// Configure at construction
+const client = new HedgeDocClient({
+  serverUrl: 'https://example.com',
+  noteId: 'abc123',
+  reconnect: {
+    enabled: true,
+    maxAttempts: 10,
+    initialDelay: 1000,
+    maxDelay: 30000,
+    backoffFactor: 2
+  }
+});
+
+// Listen to reconnection events
+client.on('reconnect:scheduled', ({ attempt, delay }) => {
+  console.log(`Reconnecting in ${delay}ms (attempt ${attempt})...`);
+});
+
+client.on('reconnect:success', () => {
+  console.log('Reconnected!');
+});
+
+client.on('reconnect:failed', () => {
+  console.log('All reconnection attempts failed');
+});
+
+// Disable auto-reconnection
+client.setReconnectEnabled(false);
+
+// Manual reconnection
+await client.reconnect();
+```
+
+### Batch Operations
+
+Combine multiple edits into a single atomic operation.
+
+```javascript
+// Method 1: Manual start/end
+client.startBatch();
+client.insert(0, 'Hello ');
+client.insert(6, 'World');
+client.delete(11, 1);
+const combinedOp = client.endBatch(); // All edits sent as one operation
+
+// Method 2: Using batch() wrapper
+client.batch(() => {
+  client.setLine(0, '# Title');
+  client.setLine(1, '');
+  client.setLine(2, 'Content here');
+});
+
+// Cancel a batch
+client.startBatch();
+client.insert(0, 'test');
+client.cancelBatch(); // Discards without applying
+```
+
+### Undo/Redo
+
+Track edit history with automatic grouping of rapid edits.
+
+```javascript
+// Check availability
+if (client.canUndo()) {
+  client.undo();
+}
+
+if (client.canRedo()) {
+  client.redo();
+}
+
+// Listen to undo/redo events
+client.on('undo', (entry) => {
+  console.log('Undid operation');
+});
+
+client.on('redo', (entry) => {
+  console.log('Redid operation');
+});
+
+// Clear history
+client.clearHistory();
+
+// Check stack sizes
+console.log(`Undo: ${client.getUndoStackSize()}, Redo: ${client.getRedoStackSize()}`);
+```
+
+### Diff-Based Updates
+
+Use `updateContent()` for efficient updates that compute minimal changes.
+
+```javascript
+// Instead of replacing entire document:
+client.setContent(newContent); // Sends delete-all + insert-all
+
+// Use diff-based update:
+client.updateContent(newContent); // Computes and sends only the diff
+
+// This is especially efficient for small changes to large documents
+const doc = client.getDocument();
+const modified = doc.replace('old text', 'new text');
+client.updateContent(modified); // Only sends the changed portion
 ```
 
 ### `TextOperation`

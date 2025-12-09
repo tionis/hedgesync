@@ -11,6 +11,7 @@ import { OTClient } from './ot-client.js';
  * - Real-time document synchronization using Operational Transformation
  * - High-level editing API (insert, delete, replace)
  * - Event emission for document changes
+ * - Rate limiting, reconnection handling, and batch operations
  */
 export class HedgeDocClient extends EventEmitter {
   /**
@@ -19,6 +20,17 @@ export class HedgeDocClient extends EventEmitter {
    * @param {string} options.serverUrl - The HedgeDoc server URL (e.g., 'https://hedgedoc.example.com')
    * @param {string} options.noteId - The note ID or alias to connect to
    * @param {string} [options.cookie] - Optional session cookie for authentication
+   * @param {number} [options.operationTimeout=5000] - Timeout for operations (ms)
+   * @param {Object} [options.rateLimit] - Rate limiting options
+   * @param {number} [options.rateLimit.minInterval=50] - Minimum ms between operations
+   * @param {number} [options.rateLimit.maxBurst=10] - Max operations in burst
+   * @param {number} [options.rateLimit.burstWindow=1000] - Burst window in ms
+   * @param {Object} [options.reconnect] - Reconnection options
+   * @param {boolean} [options.reconnect.enabled=true] - Enable auto-reconnection
+   * @param {number} [options.reconnect.maxAttempts=10] - Max reconnection attempts
+   * @param {number} [options.reconnect.initialDelay=1000] - Initial delay before reconnect (ms)
+   * @param {number} [options.reconnect.maxDelay=30000] - Maximum delay between reconnects (ms)
+   * @param {number} [options.reconnect.backoffFactor=2] - Exponential backoff multiplier
    */
   constructor(options = {}) {
     super();
@@ -66,6 +78,51 @@ export class HedgeDocClient extends EventEmitter {
     this._pendingOperation = null;
     this._operationTimeout = null;
     this._operationTimeoutMs = options.operationTimeout || 5000;
+
+    // ============================================
+    // Rate Limiting
+    // ============================================
+    this._rateLimit = {
+      minInterval: options.rateLimit?.minInterval ?? 50,
+      maxBurst: options.rateLimit?.maxBurst ?? 10,
+      burstWindow: options.rateLimit?.burstWindow ?? 1000,
+      enabled: options.rateLimit?.enabled ?? true
+    };
+    this._lastOperationTime = 0;
+    this._operationTimes = []; // Timestamps for burst detection
+    this._operationQueue = []; // Queue for rate-limited operations
+    this._processingQueue = false;
+
+    // ============================================
+    // Reconnection Handling
+    // ============================================
+    this._reconnect = {
+      enabled: options.reconnect?.enabled ?? true,
+      maxAttempts: options.reconnect?.maxAttempts ?? 10,
+      initialDelay: options.reconnect?.initialDelay ?? 1000,
+      maxDelay: options.reconnect?.maxDelay ?? 30000,
+      backoffFactor: options.reconnect?.backoffFactor ?? 2
+    };
+    this._reconnectAttempts = 0;
+    this._reconnectTimer = null;
+    this._intentionalDisconnect = false;
+    this._pendingOperationsDuringDisconnect = [];
+
+    // ============================================
+    // Batch Operations
+    // ============================================
+    this._batchMode = false;
+    this._batchOperations = [];
+
+    // ============================================
+    // Undo/Redo Stack
+    // ============================================
+    this._undoStack = [];
+    this._redoStack = [];
+    this._undoMaxSize = options.undoMaxSize ?? 100;
+    this._trackUndo = options.trackUndo ?? true;
+    this._lastUndoTimestamp = 0;
+    this._undoGroupInterval = options.undoGroupInterval ?? 500; // Group rapid edits
   }
 
   /**
@@ -173,40 +230,79 @@ export class HedgeDocClient extends EventEmitter {
    * @returns {Promise<void>} Resolves when connected and document is received
    */
   connect() {
+    this._intentionalDisconnect = false;
+    this._reconnectAttempts = 0;
+    
     return new Promise(async (resolve, reject) => {
       try {
-        // First, get a session cookie if we don't have one
-        const cookie = await this._getSessionCookie();
-        
-        const socketOptions = {
-          query: {
-            noteId: this.noteId
-          },
-          // Use polling first - it handles custom headers better for auth
-          transports: ['polling', 'websocket'],
-          withCredentials: true,
-          extraHeaders: {
-            Cookie: cookie
-          }
-        };
+        await this._doConnect(resolve, reject);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
 
-        this.socket = io(this.serverUrl, socketOptions);
+  /**
+   * Internal connection logic (supports reconnection)
+   * @private
+   */
+  async _doConnect(resolve, reject) {
+    try {
+      // First, get a session cookie if we don't have one
+      const cookie = await this._getSessionCookie();
+      
+      const socketOptions = {
+        query: {
+          noteId: this.noteId
+        },
+        // Use polling first - it handles custom headers better for auth
+        transports: ['polling', 'websocket'],
+        withCredentials: true,
+        extraHeaders: {
+          Cookie: cookie
+        },
+        // Disable socket.io's built-in reconnection, we handle it ourselves
+        reconnection: false
+      };
+
+      this.socket = io(this.serverUrl, socketOptions);
 
       // Connection events
       this.socket.on('connect', () => {
         this.connected = true;
+        this._reconnectAttempts = 0; // Reset on successful connect
         this.emit('connect');
+        
+        // Replay any operations that were queued during disconnect
+        if (this._pendingOperationsDuringDisconnect.length > 0) {
+          this.emit('reconnect:replaying', this._pendingOperationsDuringDisconnect.length);
+          // Operations will be resent when we receive 'doc' event
+        }
       });
 
       this.socket.on('disconnect', (reason) => {
+        const wasReady = this.ready;
         this.connected = false;
         this.ready = false;
         this.emit('disconnect', reason);
+        
+        // Handle reconnection
+        if (!this._intentionalDisconnect && this._reconnect.enabled && wasReady) {
+          this._scheduleReconnect();
+        }
       });
 
       this.socket.on('connect_error', (error) => {
-        reject(error);
+        if (!this.ready) {
+          // Initial connection failed
+          reject(error);
+        }
         this.emit('error', error);
+        
+        // Try to reconnect if enabled
+        if (!this._intentionalDisconnect && this._reconnect.enabled) {
+          this._scheduleReconnect();
+        }
       });
 
       // Document received - this is when we're fully initialized
@@ -215,11 +311,19 @@ export class HedgeDocClient extends EventEmitter {
         // Request note info immediately to get permissions
         this.socket.emit('refresh');
         this.ready = true;
-        resolve();
+        
+        if (resolve) {
+          resolve();
+          resolve = null; // Only resolve once
+        }
+        
         this.emit('ready', {
           document: this.document,
           revision: this.revision
         });
+        
+        // Clear any pending operations from disconnect
+        this._pendingOperationsDuringDisconnect = [];
       });
 
       // Server info/error messages
@@ -227,12 +331,18 @@ export class HedgeDocClient extends EventEmitter {
         if (data.code === 403) {
           const error = new Error('Access forbidden');
           error.code = 403;
-          reject(error);
+          if (reject) {
+            reject(error);
+            reject = null;
+          }
           this.emit('error', error);
         } else if (data.code === 404) {
           const error = new Error('Note not found');
           error.code = 404;
-          reject(error);
+          if (reject) {
+            reject(error);
+            reject = null;
+          }
           this.emit('error', error);
         } else {
           this.emit('info', data);
@@ -300,16 +410,96 @@ export class HedgeDocClient extends EventEmitter {
         this.emit('version', data);
       });
       
-      } catch (error) {
-        reject(error);
-      }
+    } catch (error) {
+      if (reject) reject(error);
+      else throw error;
+    }
+  }
+
+  /**
+   * Schedule a reconnection attempt with exponential backoff
+   * @private
+   */
+  _scheduleReconnect() {
+    if (this._reconnectTimer) {
+      return; // Already scheduled
+    }
+    
+    if (this._reconnectAttempts >= this._reconnect.maxAttempts) {
+      this.emit('reconnect:failed', {
+        attempts: this._reconnectAttempts,
+        maxAttempts: this._reconnect.maxAttempts
+      });
+      return;
+    }
+    
+    const delay = Math.min(
+      this._reconnect.initialDelay * Math.pow(this._reconnect.backoffFactor, this._reconnectAttempts),
+      this._reconnect.maxDelay
+    );
+    
+    this._reconnectAttempts++;
+    
+    this.emit('reconnect:scheduled', {
+      attempt: this._reconnectAttempts,
+      maxAttempts: this._reconnect.maxAttempts,
+      delay
     });
+    
+    this._reconnectTimer = setTimeout(async () => {
+      this._reconnectTimer = null;
+      
+      this.emit('reconnect:attempting', {
+        attempt: this._reconnectAttempts,
+        maxAttempts: this._reconnect.maxAttempts
+      });
+      
+      try {
+        // Clean up old socket
+        if (this.socket) {
+          this.socket.removeAllListeners();
+          this.socket.disconnect();
+          this.socket = null;
+        }
+        
+        // Try to reconnect
+        await this._doConnect(
+          () => this.emit('reconnect:success', { attempts: this._reconnectAttempts }),
+          (error) => {
+            this.emit('reconnect:error', { error, attempt: this._reconnectAttempts });
+            if (this._reconnect.enabled && !this._intentionalDisconnect) {
+              this._scheduleReconnect();
+            }
+          }
+        );
+      } catch (error) {
+        this.emit('reconnect:error', { error, attempt: this._reconnectAttempts });
+        if (this._reconnect.enabled && !this._intentionalDisconnect) {
+          this._scheduleReconnect();
+        }
+      }
+    }, delay);
+  }
+
+  /**
+   * Cancel any pending reconnection attempt
+   * @private
+   */
+  _cancelReconnect() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
   }
 
   /**
    * Disconnect from the server
+   * @param {boolean} [intentional=true] - Whether this is an intentional disconnect
    */
-  disconnect() {
+  disconnect(intentional = true) {
+    this._intentionalDisconnect = intentional;
+    this._cancelReconnect();
+    
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -839,6 +1029,136 @@ export class HedgeDocClient extends EventEmitter {
     }
   }
 
+  // ============================================
+  // Rate Limiting Control
+  // ============================================
+
+  /**
+   * Enable or disable rate limiting
+   * @param {boolean} enabled
+   */
+  setRateLimitEnabled(enabled) {
+    this._rateLimit.enabled = enabled;
+  }
+
+  /**
+   * Check if rate limiting is enabled
+   * @returns {boolean}
+   */
+  isRateLimitEnabled() {
+    return this._rateLimit.enabled;
+  }
+
+  /**
+   * Configure rate limiting
+   * @param {Object} options
+   * @param {number} [options.minInterval] - Minimum ms between operations
+   * @param {number} [options.maxBurst] - Max operations in burst window
+   * @param {number} [options.burstWindow] - Burst window in ms
+   */
+  configureRateLimit(options) {
+    if (options.minInterval !== undefined) {
+      this._rateLimit.minInterval = options.minInterval;
+    }
+    if (options.maxBurst !== undefined) {
+      this._rateLimit.maxBurst = options.maxBurst;
+    }
+    if (options.burstWindow !== undefined) {
+      this._rateLimit.burstWindow = options.burstWindow;
+    }
+  }
+
+  /**
+   * Get the current rate limit configuration
+   * @returns {Object}
+   */
+  getRateLimitConfig() {
+    return { ...this._rateLimit };
+  }
+
+  /**
+   * Get the number of operations currently queued
+   * @returns {number}
+   */
+  getQueuedOperationCount() {
+    return this._operationQueue.length;
+  }
+
+  // ============================================
+  // Reconnection Control
+  // ============================================
+
+  /**
+   * Enable or disable auto-reconnection
+   * @param {boolean} enabled
+   */
+  setReconnectEnabled(enabled) {
+    this._reconnect.enabled = enabled;
+    if (!enabled) {
+      this._cancelReconnect();
+    }
+  }
+
+  /**
+   * Check if auto-reconnection is enabled
+   * @returns {boolean}
+   */
+  isReconnectEnabled() {
+    return this._reconnect.enabled;
+  }
+
+  /**
+   * Configure reconnection
+   * @param {Object} options
+   * @param {number} [options.maxAttempts] - Maximum reconnection attempts
+   * @param {number} [options.initialDelay] - Initial delay in ms
+   * @param {number} [options.maxDelay] - Maximum delay in ms
+   * @param {number} [options.backoffFactor] - Backoff multiplier
+   */
+  configureReconnect(options) {
+    if (options.maxAttempts !== undefined) {
+      this._reconnect.maxAttempts = options.maxAttempts;
+    }
+    if (options.initialDelay !== undefined) {
+      this._reconnect.initialDelay = options.initialDelay;
+    }
+    if (options.maxDelay !== undefined) {
+      this._reconnect.maxDelay = options.maxDelay;
+    }
+    if (options.backoffFactor !== undefined) {
+      this._reconnect.backoffFactor = options.backoffFactor;
+    }
+  }
+
+  /**
+   * Get the current reconnection configuration
+   * @returns {Object}
+   */
+  getReconnectConfig() {
+    return {
+      ...this._reconnect,
+      attempts: this._reconnectAttempts,
+      scheduled: this._reconnectTimer !== null
+    };
+  }
+
+  /**
+   * Manually trigger a reconnection
+   * @returns {Promise<void>}
+   */
+  async reconnect() {
+    this._intentionalDisconnect = false;
+    this._reconnectAttempts = 0;
+    
+    // Disconnect first if connected
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    
+    return this.connect();
+  }
+
   // Private methods
 
   _handleDoc(data) {
@@ -914,9 +1234,90 @@ export class HedgeDocClient extends EventEmitter {
     }
   }
 
-  _applyClientOperation(operation) {
+  // ============================================
+  // Rate Limiting
+  // ============================================
+
+  /**
+   * Check if we're within rate limits
+   * @returns {boolean} True if operation can proceed
+   * @private
+   */
+  _checkRateLimit() {
+    if (!this._rateLimit.enabled) {
+      return true;
+    }
+    
+    const now = Date.now();
+    
+    // Check minimum interval
+    if (now - this._lastOperationTime < this._rateLimit.minInterval) {
+      return false;
+    }
+    
+    // Check burst limit
+    const windowStart = now - this._rateLimit.burstWindow;
+    this._operationTimes = this._operationTimes.filter(t => t > windowStart);
+    
+    if (this._operationTimes.length >= this._rateLimit.maxBurst) {
+      return false;
+    }
+    
+    return true;
+  }
+
+  /**
+   * Record an operation for rate limiting
+   * @private
+   */
+  _recordOperation() {
+    const now = Date.now();
+    this._lastOperationTime = now;
+    this._operationTimes.push(now);
+  }
+
+  /**
+   * Process the operation queue
+   * @private
+   */
+  async _processOperationQueue() {
+    if (this._processingQueue || this._operationQueue.length === 0) {
+      return;
+    }
+    
+    this._processingQueue = true;
+    
+    while (this._operationQueue.length > 0) {
+      if (!this._checkRateLimit()) {
+        // Wait until we can send
+        const waitTime = this._rateLimit.minInterval - (Date.now() - this._lastOperationTime);
+        await new Promise(resolve => setTimeout(resolve, Math.max(waitTime, 10)));
+        continue;
+      }
+      
+      const operation = this._operationQueue.shift();
+      this._executeOperation(operation);
+    }
+    
+    this._processingQueue = false;
+  }
+
+  /**
+   * Execute an operation immediately
+   * @private
+   */
+  _executeOperation(operation) {
     // Apply locally
+    const oldDocument = this.document;
     this.document = operation.apply(this.document);
+    
+    // Track for undo
+    if (this._trackUndo) {
+      this._pushUndo(operation, oldDocument);
+    }
+    
+    // Record for rate limiting
+    this._recordOperation();
     
     // Send to server via OT client
     if (this.otClient) {
@@ -924,6 +1325,241 @@ export class HedgeDocClient extends EventEmitter {
     }
     
     this.emit('document', this.document);
+    this.emit('change', { type: 'local', operation });
+  }
+
+  _applyClientOperation(operation) {
+    // If in batch mode, queue the operation
+    if (this._batchMode) {
+      this._batchOperations.push(operation);
+      return;
+    }
+    
+    // If rate limiting is enabled and we're over limit, queue it
+    if (this._rateLimit.enabled && !this._checkRateLimit()) {
+      this._operationQueue.push(operation);
+      this._processOperationQueue();
+      return;
+    }
+    
+    // Execute immediately
+    this._executeOperation(operation);
+  }
+
+  // ============================================
+  // Batch Operations
+  // ============================================
+
+  /**
+   * Start a batch of operations that will be applied together
+   * Operations made during batch mode are queued and combined
+   * @returns {HedgeDocClient} this for chaining
+   */
+  startBatch() {
+    this._batchMode = true;
+    this._batchOperations = [];
+    return this;
+  }
+
+  /**
+   * End the batch and apply all queued operations as one
+   * @returns {TextOperation|null} The combined operation, or null if empty
+   */
+  endBatch() {
+    this._batchMode = false;
+    
+    if (this._batchOperations.length === 0) {
+      return null;
+    }
+    
+    // Compose all operations into one
+    let combined = this._batchOperations[0];
+    for (let i = 1; i < this._batchOperations.length; i++) {
+      combined = combined.compose(this._batchOperations[i]);
+    }
+    
+    this._batchOperations = [];
+    
+    // Apply the combined operation
+    this._executeOperation(combined);
+    
+    return combined;
+  }
+
+  /**
+   * Discard the current batch without applying
+   */
+  cancelBatch() {
+    this._batchMode = false;
+    this._batchOperations = [];
+  }
+
+  /**
+   * Check if currently in batch mode
+   * @returns {boolean}
+   */
+  isBatchMode() {
+    return this._batchMode;
+  }
+
+  /**
+   * Execute a function within a batch
+   * @param {Function} fn - Function to execute
+   * @returns {TextOperation|null} The combined operation
+   */
+  batch(fn) {
+    this.startBatch();
+    try {
+      fn();
+      return this.endBatch();
+    } catch (error) {
+      this.cancelBatch();
+      throw error;
+    }
+  }
+
+  // ============================================
+  // Undo/Redo
+  // ============================================
+
+  /**
+   * Push an operation to the undo stack
+   * @private
+   */
+  _pushUndo(operation, oldDocument) {
+    const now = Date.now();
+    
+    // Group rapid edits together
+    if (this._undoStack.length > 0 && 
+        now - this._lastUndoTimestamp < this._undoGroupInterval) {
+      // Compose with the last entry
+      const last = this._undoStack[this._undoStack.length - 1];
+      last.operation = last.operation.compose(operation);
+      last.newDocument = this.document;
+    } else {
+      // Create new undo entry
+      this._undoStack.push({
+        operation: operation,
+        oldDocument: oldDocument,
+        newDocument: this.document,
+        timestamp: now
+      });
+      
+      // Trim stack if too large
+      while (this._undoStack.length > this._undoMaxSize) {
+        this._undoStack.shift();
+      }
+    }
+    
+    this._lastUndoTimestamp = now;
+    
+    // Clear redo stack on new edit
+    this._redoStack = [];
+  }
+
+  /**
+   * Check if undo is available
+   * @returns {boolean}
+   */
+  canUndo() {
+    return this._trackUndo && this._undoStack.length > 0;
+  }
+
+  /**
+   * Check if redo is available
+   * @returns {boolean}
+   */
+  canRedo() {
+    return this._trackUndo && this._redoStack.length > 0;
+  }
+
+  /**
+   * Undo the last operation
+   * @returns {boolean} True if undo was performed
+   */
+  undo() {
+    if (!this.canUndo()) {
+      return false;
+    }
+    
+    const entry = this._undoStack.pop();
+    
+    // We need to revert to oldDocument
+    // Create an operation that does this
+    this._trackUndo = false; // Temporarily disable to avoid recursion
+    try {
+      this.updateContent(entry.oldDocument);
+      
+      // Push to redo stack
+      this._redoStack.push({
+        operation: entry.operation,
+        oldDocument: entry.oldDocument,
+        newDocument: entry.newDocument,
+        timestamp: Date.now()
+      });
+      
+      this.emit('undo', entry);
+    } finally {
+      this._trackUndo = true;
+    }
+    
+    return true;
+  }
+
+  /**
+   * Redo the last undone operation
+   * @returns {boolean} True if redo was performed
+   */
+  redo() {
+    if (!this.canRedo()) {
+      return false;
+    }
+    
+    const entry = this._redoStack.pop();
+    
+    // Apply the operation to get to newDocument
+    this._trackUndo = false;
+    try {
+      this.updateContent(entry.newDocument);
+      
+      // Push back to undo stack
+      this._undoStack.push({
+        operation: entry.operation,
+        oldDocument: entry.oldDocument,
+        newDocument: entry.newDocument,
+        timestamp: Date.now()
+      });
+      
+      this.emit('redo', entry);
+    } finally {
+      this._trackUndo = true;
+    }
+    
+    return true;
+  }
+
+  /**
+   * Clear the undo/redo history
+   */
+  clearHistory() {
+    this._undoStack = [];
+    this._redoStack = [];
+  }
+
+  /**
+   * Get the undo stack size
+   * @returns {number}
+   */
+  getUndoStackSize() {
+    return this._undoStack.length;
+  }
+
+  /**
+   * Get the redo stack size
+   * @returns {number}
+   */
+  getRedoStackSize() {
+    return this._redoStack.length;
   }
 }
 
