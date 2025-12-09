@@ -488,6 +488,330 @@ export class HedgeDocClient extends EventEmitter {
     this._applyClientOperation(operation);
   }
 
+  // ============================================
+  // Advanced Editing Methods
+  // ============================================
+
+  /**
+   * Replace all matches of a pattern with a replacement string
+   * @param {RegExp|string} pattern - Pattern to match (string or RegExp)
+   * @param {string|Function} replacement - Replacement string or function
+   * @returns {number} Number of replacements made
+   * @throws {Error} If client not ready or no write permission
+   */
+  replaceRegex(pattern, replacement) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const doc = this.document;
+    const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, 'g');
+    
+    // Ensure global flag for counting all matches
+    const globalRegex = regex.global ? regex : new RegExp(regex.source, regex.flags + 'g');
+    
+    // Find all matches with their positions
+    const matches = [];
+    let match;
+    while ((match = globalRegex.exec(doc)) !== null) {
+      matches.push({
+        index: match.index,
+        length: match[0].length,
+        match: match[0],
+        groups: match.slice(1)
+      });
+    }
+    
+    if (matches.length === 0) {
+      return 0;
+    }
+
+    // Apply replacements from end to start to preserve positions
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const m = matches[i];
+      let replaceText;
+      
+      if (typeof replacement === 'function') {
+        replaceText = replacement(m.match, ...m.groups, m.index, doc);
+      } else {
+        // Handle $1, $2, etc. in replacement string
+        replaceText = replacement.replace(/\$(\d+)/g, (_, n) => m.groups[n - 1] || '');
+        replaceText = replaceText.replace(/\$&/g, m.match);
+      }
+      
+      this.replace(m.index, m.length, replaceText);
+    }
+    
+    return matches.length;
+  }
+
+  /**
+   * Replace the first match of a pattern
+   * @param {RegExp|string} pattern - Pattern to match
+   * @param {string|Function} replacement - Replacement string or function
+   * @returns {boolean} True if a replacement was made
+   */
+  replaceFirst(pattern, replacement) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const doc = this.document;
+    const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+    const match = doc.match(regex);
+    
+    if (!match) {
+      return false;
+    }
+    
+    let replaceText;
+    if (typeof replacement === 'function') {
+      replaceText = replacement(match[0], ...match.slice(1), match.index, doc);
+    } else {
+      replaceText = replacement.replace(/\$(\d+)/g, (_, n) => match[n] || '');
+      replaceText = replaceText.replace(/\$&/g, match[0]);
+    }
+    
+    this.replace(match.index, match[0].length, replaceText);
+    return true;
+  }
+
+  // ============================================
+  // Line-based Operations
+  // ============================================
+
+  /**
+   * Get the document split into lines
+   * @returns {string[]} Array of lines (without line endings)
+   */
+  getLines() {
+    return this.document.split('\n');
+  }
+
+  /**
+   * Get a specific line (0-indexed)
+   * @param {number} lineNum - Line number (0-indexed)
+   * @returns {string|null} Line content or null if out of bounds
+   */
+  getLine(lineNum) {
+    const lines = this.getLines();
+    if (lineNum < 0 || lineNum >= lines.length) {
+      return null;
+    }
+    return lines[lineNum];
+  }
+
+  /**
+   * Get the number of lines in the document
+   * @returns {number} Number of lines
+   */
+  getLineCount() {
+    return this.getLines().length;
+  }
+
+  /**
+   * Get the character position where a line starts
+   * @param {number} lineNum - Line number (0-indexed)
+   * @returns {number} Character position, or -1 if out of bounds
+   */
+  getLineStart(lineNum) {
+    if (lineNum < 0) return -1;
+    const lines = this.getLines();
+    if (lineNum >= lines.length) return -1;
+    
+    let pos = 0;
+    for (let i = 0; i < lineNum; i++) {
+      pos += lines[i].length + 1; // +1 for newline
+    }
+    return pos;
+  }
+
+  /**
+   * Get the character position where a line ends (before newline)
+   * @param {number} lineNum - Line number (0-indexed)
+   * @returns {number} Character position, or -1 if out of bounds
+   */
+  getLineEnd(lineNum) {
+    const start = this.getLineStart(lineNum);
+    if (start === -1) return -1;
+    const line = this.getLine(lineNum);
+    return start + line.length;
+  }
+
+  /**
+   * Replace the content of a specific line
+   * @param {number} lineNum - Line number (0-indexed)
+   * @param {string} content - New line content (without newline)
+   * @throws {Error} If line number out of bounds
+   */
+  setLine(lineNum, content) {
+    const start = this.getLineStart(lineNum);
+    if (start === -1) {
+      throw new Error(`Line ${lineNum} out of bounds`);
+    }
+    const oldLine = this.getLine(lineNum);
+    this.replace(start, oldLine.length, content);
+  }
+
+  /**
+   * Insert a new line at the specified position
+   * @param {number} lineNum - Line number to insert at (0-indexed)
+   * @param {string} content - Line content (without newline)
+   */
+  insertLine(lineNum, content) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const lines = this.getLines();
+    
+    if (lineNum <= 0) {
+      // Insert at beginning
+      this.insert(0, content + '\n');
+    } else if (lineNum >= lines.length) {
+      // Insert at end
+      this.insert(this.document.length, '\n' + content);
+    } else {
+      // Insert in middle
+      const pos = this.getLineStart(lineNum);
+      this.insert(pos, content + '\n');
+    }
+  }
+
+  /**
+   * Delete a specific line
+   * @param {number} lineNum - Line number to delete (0-indexed)
+   * @throws {Error} If line number out of bounds
+   */
+  deleteLine(lineNum) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const lines = this.getLines();
+    if (lineNum < 0 || lineNum >= lines.length) {
+      throw new Error(`Line ${lineNum} out of bounds`);
+    }
+    
+    const start = this.getLineStart(lineNum);
+    const line = lines[lineNum];
+    
+    if (lines.length === 1) {
+      // Only line - just clear it
+      this.delete(0, line.length);
+    } else if (lineNum === lines.length - 1) {
+      // Last line - delete including preceding newline
+      this.delete(start - 1, line.length + 1);
+    } else {
+      // Middle or first line - delete including trailing newline
+      this.delete(start, line.length + 1);
+    }
+  }
+
+  /**
+   * Replace lines matching a pattern
+   * @param {RegExp|string} pattern - Pattern to match against line content
+   * @param {string|Function} replacement - Replacement string or function(line, lineNum, match)
+   * @returns {number} Number of lines replaced
+   */
+  replaceLines(pattern, replacement) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const lines = this.getLines();
+    const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+    let count = 0;
+    
+    // Process from end to start to preserve line numbers
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const match = lines[i].match(regex);
+      if (match) {
+        let newContent;
+        if (typeof replacement === 'function') {
+          newContent = replacement(lines[i], i, match);
+        } else {
+          newContent = lines[i].replace(regex, replacement);
+        }
+        this.setLine(i, newContent);
+        count++;
+      }
+    }
+    
+    return count;
+  }
+
+  // ============================================
+  // Smart Update Methods
+  // ============================================
+
+  /**
+   * Update document content using minimal diff operations
+   * More efficient than setContent for small changes
+   * @param {string} newContent - New document content
+   * @returns {number} Number of operations applied
+   */
+  updateContent(newContent) {
+    if (!this.ready) {
+      throw new Error('Client not ready. Wait for connection to complete.');
+    }
+    const permError = this._getPermissionError();
+    if (permError) {
+      throw new Error(permError);
+    }
+
+    const oldContent = this.document;
+    if (oldContent === newContent) {
+      return 0;
+    }
+
+    // Simple diff: find common prefix and suffix
+    let prefixLen = 0;
+    const minLen = Math.min(oldContent.length, newContent.length);
+    
+    while (prefixLen < minLen && oldContent[prefixLen] === newContent[prefixLen]) {
+      prefixLen++;
+    }
+    
+    let suffixLen = 0;
+    while (
+      suffixLen < minLen - prefixLen &&
+      oldContent[oldContent.length - 1 - suffixLen] === newContent[newContent.length - 1 - suffixLen]
+    ) {
+      suffixLen++;
+    }
+    
+    const deleteLen = oldContent.length - prefixLen - suffixLen;
+    const insertText = newContent.slice(prefixLen, newContent.length - suffixLen);
+    
+    if (deleteLen > 0 || insertText.length > 0) {
+      this.replace(prefixLen, deleteLen, insertText);
+      return 1;
+    }
+    
+    return 0;
+  }
+
   /**
    * Request a refresh of note metadata
    */

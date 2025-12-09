@@ -10,6 +10,10 @@ A Node.js library to programmatically connect to a running [HedgeDoc](https://he
 - 🔒 **Permission-aware** - proper error handling for read-only documents
 - 📡 **Event-driven** - react to document changes from other users
 - 🍪 **Auto-authentication** - automatically obtains session cookies
+- 🔍 **Regex operations** - search and replace with patterns
+- 📝 **Line operations** - manipulate documents by line number
+- 🔄 **Pandoc integration** - AST-based transformations
+- 🤖 **Macro system** - auto-expand triggers as you type
 
 ## Installation
 
@@ -61,6 +65,18 @@ node examples/watch-document.js https://your-hedgedoc.com note-id
 
 # Programmatic editing demo
 node examples/edit-document.js https://your-hedgedoc.com note-id
+
+# Regex search and replace
+node examples/regex-replace.js
+
+# Line-based operations
+node examples/line-operations.js
+
+# Pandoc AST transformations (requires pandoc)
+node examples/pandoc-transform.js
+
+# Macro auto-expansion system
+node examples/macro-system.js
 ```
 
 ## API Reference
@@ -98,6 +114,13 @@ const client = new HedgeDocClient({
 | `applyOperation(op)` | Apply a raw `TextOperation`. |
 | `refresh()` | Request updated note metadata. |
 | `requestOnlineUsers()` | Request the online users list. |
+| `replaceRegex(pattern, replacement)` | Replace first regex match. |
+| `replaceAllRegex(pattern, replacement)` | Replace all regex matches. |
+| `getLine(lineNumber)` | Get content of a specific line (1-indexed). |
+| `getLines()` | Get all lines as an array. |
+| `replaceLine(lineNumber, content)` | Replace a specific line. |
+| `setLines(lines)` | Replace entire document with line array. |
+| `computeDiff(oldStr, newStr)` | Compute minimal TextOperation between strings. |
 
 #### Events
 
@@ -162,6 +185,112 @@ client.applyOperation(op);
 |--------|-------------|
 | `TextOperation.fromJSON(arr)` | Create from JSON array |
 | `TextOperation.transform(op1, op2)` | Transform concurrent operations |
+
+### `PandocTransformer`
+
+Transform documents using Pandoc's AST (Abstract Syntax Tree). Requires `pandoc` to be installed.
+
+```javascript
+import { HedgeDocClient, PandocTransformer } from 'hedgesync';
+
+const pandoc = new PandocTransformer();
+const client = new HedgeDocClient(serverUrl);
+await client.connect(noteId);
+
+// Transform document using AST manipulation
+const result = await pandoc.transform(client.getDocument(), (ast) => {
+  pandoc.walkAST(ast, (el) => {
+    if (el.t === 'Header') {
+      el.c[0] = Math.min(el.c[0] + 1, 6); // Demote headers
+    }
+  });
+  return ast;
+});
+
+// Extract specific elements
+const ast = await pandoc.markdownToAST(doc);
+const links = pandoc.filterByType(ast, 'Link');
+const images = pandoc.filterByType(ast, 'Image');
+
+// Apply transformation directly to client
+await pandoc.applyToClient(client, (ast) => {
+  // Your transformation
+  return ast;
+});
+```
+
+#### Methods
+
+| Method | Description |
+|--------|-------------|
+| `transform(markdown, transformFn)` | Transform markdown via AST |
+| `markdownToAST(markdown)` | Convert markdown to Pandoc AST |
+| `astToMarkdown(ast)` | Convert AST back to markdown |
+| `walkAST(ast, callback)` | Walk all elements in AST |
+| `filterByType(ast, type)` | Get all elements of a type |
+| `replaceText(ast, search, replace)` | Replace text in Str elements |
+| `applyToClient(client, transformFn)` | Transform and apply to client |
+| `convert(text, from, to)` | Convert between formats |
+
+### `MacroEngine`
+
+Auto-expand triggers as you type. Listens for document changes and replaces patterns.
+
+```javascript
+import { HedgeDocClient, MacroEngine } from 'hedgesync';
+
+const client = new HedgeDocClient(serverUrl);
+await client.connect(noteId);
+
+const macros = new MacroEngine(client);
+
+// Simple text triggers
+macros.addTextMacro('::date', () => new Date().toISOString().split('T')[0]);
+macros.addTextMacro('::sig', 'Signed by Bot');
+
+// Regex-based macros
+macros.addRegexMacro('uppercase', /UPPER\(([^)]+)\)/g, (match, text) => {
+  return text.toUpperCase();
+});
+
+// Template macros ${variable}
+macros.addTemplateMacro('vars', '${', '}', (name) => {
+  const vars = { user: 'Alice', project: 'Demo' };
+  return vars[name] || `[unknown: ${name}]`;
+});
+
+// Built-in helpers
+const { dateMacro, uuidMacro, counterMacro } = MacroEngine.builtins;
+macros.addTextMacro(...Object.values(dateMacro('::now', 'locale')));
+macros.addTextMacro(...Object.values(uuidMacro('::uuid')));
+
+// Start auto-expansion
+macros.start();
+
+// Manual expansion
+await macros.expand();
+
+// Stop listening
+macros.stop();
+```
+
+#### Built-in Macro Helpers
+
+```javascript
+// Date/time macros
+MacroEngine.builtins.dateMacro('::date', 'iso')     // 2024-01-15T10:30:00.000Z
+MacroEngine.builtins.dateMacro('::date', 'locale')  // 1/15/2024, 10:30:00 AM
+MacroEngine.builtins.dateMacro('::date', 'isoDate') // 2024-01-15
+
+// UUID macro
+MacroEngine.builtins.uuidMacro('::uuid')  // 550e8400-e29b-41d4-...
+
+// Counter macro
+MacroEngine.builtins.counterMacro('::n', 1)  // 1, 2, 3, ...
+
+// Snippet macro
+MacroEngine.builtins.snippetMacro('::todo', '- [ ] ')
+```
 
 ## Permissions
 

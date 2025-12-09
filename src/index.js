@@ -6,3 +6,5 @@
 export { HedgeDocClient } from './hedgedoc-client.js';
 export { TextOperation } from './text-operation.js';
 export { OTClient } from './ot-client.js';
+export { PandocTransformer } from './pandoc-transformer.js';
+export { MacroEngine } from './macro-engine.js';
