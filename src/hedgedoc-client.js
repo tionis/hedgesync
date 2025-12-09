@@ -1586,6 +1586,7 @@ class OTClientImpl extends OTClient {
     // Apply the server's operation to our document
     this.hedgeDocClient.document = operation.apply(this.hedgeDocClient.document);
     this.hedgeDocClient.emit('document', this.hedgeDocClient.document);
+    this.hedgeDocClient.emit('change', { type: 'remote', operation });
   }
 
   getOperations(base, head) {

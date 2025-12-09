@@ -113,11 +113,9 @@ class MacroEngine {
         return;
       }
       
-      // Only process insertions (not deletions)
-      // We want to expand macros when user types the trigger
-      if (event.type === 'insert') {
-        await this._processDocument();
-      }
+      // Process on any change (local or remote)
+      // The change event has type: 'local' or 'remote'
+      await this._processDocument();
     };
 
     this.client.on('change', this._changeHandler);
