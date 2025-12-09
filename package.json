@@ -8,7 +8,7 @@
     "hedgesync": "./bin/hedgesync.js"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun run test/test-all-features.js",
     "example": "bun run examples/basic-usage.js",
     "cli": "bun run bin/hedgesync.js"
   },
