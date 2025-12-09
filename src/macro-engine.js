@@ -439,6 +439,9 @@ class MacroEngine {
    * @private
    */
   async _startStreamingExec(name, macro, matchText, groups, originalIndex) {
+    // Import TextOperation for position transformation
+    const { TextOperation } = await import('./text-operation.js');
+    
     try {
       // Build the command
       const cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
@@ -466,6 +469,27 @@ class MacroEngine {
       // Delete the matched text first
       this.client.delete(insertPos, matchText.length);
       
+      // Small delay to let the delete operation settle
+      await new Promise(r => setTimeout(r, 50));
+      
+      // Track our cursor position - starts where we deleted the match
+      // This position will be updated when remote operations come in
+      let cursorPos = insertPos;
+      let aborted = false;
+      let isInserting = false; // Flag to avoid double-counting our own inserts
+      
+      // Listen for remote changes to adjust our cursor position
+      const remoteChangeHandler = (event) => {
+        // Only handle remote operations, and skip if we're currently inserting
+        // (our own operations will update cursorPos directly)
+        if (event.type === 'remote' && event.operation && !isInserting) {
+          // Transform our cursor position through the remote operation
+          const oldPos = cursorPos;
+          cursorPos = TextOperation.transformPosition(cursorPos, event.operation, true);
+        }
+      };
+      this.client.on('change', remoteChangeHandler);
+      
       // Callback: onStart
       if (macro.onStart) {
         macro.onStart(matchText, insertPos);
@@ -480,76 +504,106 @@ class MacroEngine {
       const reader = proc.stdout.getReader();
       const decoder = new TextDecoder();
       let lineBuffer = '';
-      let totalInserted = 0;
       
-      // Stream output into document
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      // Helper to safely insert text at tracked cursor position
+      const safeInsert = async (text) => {
+        if (aborted) return false;
         
-        const chunk = decoder.decode(value, { stream: true });
+        // Get current document state
+        const doc = this.client.getDocument();
         
-        if (macro.lineBuffered) {
-          // Buffer by line
-          lineBuffer += chunk;
-          const lines = lineBuffer.split('\n');
+        // Bounds check - clamp to valid range
+        const insertAt = Math.max(0, Math.min(cursorPos, doc.length));
+        
+        if (insertAt !== cursorPos) {
+          // Position was out of bounds, adjust it
+          cursorPos = insertAt;
+        }
+        
+        try {
+          isInserting = true;
+          this.client.insert(insertAt, text);
+          // Move our cursor forward by the inserted length
+          cursorPos += text.length;
+          isInserting = false;
           
-          // Process all complete lines
-          for (let i = 0; i < lines.length - 1; i++) {
-            const line = lines[i] + '\n';
+          // Small delay to let OT process the operation
+          await new Promise(r => setTimeout(r, 30));
+          return true;
+        } catch (err) {
+          isInserting = false;
+          console.error(`Streaming macro ${name}: insert failed:`, err.message);
+          return false;
+        }
+      };
+      
+      try {
+        // Stream output into document
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          const chunk = decoder.decode(value, { stream: true });
+          
+          if (macro.lineBuffered) {
+            // Buffer by line
+            lineBuffer += chunk;
+            const lines = lineBuffer.split('\n');
             
-            // Re-fetch position - document may have changed
-            currentDoc = this.client.getDocument();
-            const currentInsertPos = insertPos + totalInserted;
-            
-            if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
-              this.client.insert(currentInsertPos, line);
-              totalInserted += line.length;
+            // Process all complete lines
+            for (let i = 0; i < lines.length - 1; i++) {
+              const line = lines[i] + '\n';
+              
+              const insertedAt = cursorPos;
+              if (!await safeInsert(line)) {
+                // Insert failed, abort streaming
+                aborted = true;
+                proc.kill();
+                break;
+              }
               
               if (macro.onData) {
-                macro.onData(line, currentInsertPos);
+                macro.onData(line, insertedAt);
               }
             }
-          }
-          
-          // Keep incomplete line in buffer
-          lineBuffer = lines[lines.length - 1];
-        } else {
-          // Character-by-character (or chunk-by-chunk)
-          currentDoc = this.client.getDocument();
-          const currentInsertPos = insertPos + totalInserted;
-          
-          if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
-            this.client.insert(currentInsertPos, chunk);
-            totalInserted += chunk.length;
+            
+            if (aborted) break;
+            
+            // Keep incomplete line in buffer
+            lineBuffer = lines[lines.length - 1];
+          } else {
+            // Character-by-character (or chunk-by-chunk)
+            const insertedAt = cursorPos;
+            if (!await safeInsert(chunk)) {
+              aborted = true;
+              proc.kill();
+              break;
+            }
             
             if (macro.onData) {
-              macro.onData(chunk, currentInsertPos);
+              macro.onData(chunk, insertedAt);
             }
           }
         }
-      }
-      
-      // Flush remaining buffer (line without trailing newline)
-      if (macro.lineBuffered && lineBuffer) {
-        currentDoc = this.client.getDocument();
-        const currentInsertPos = insertPos + totalInserted;
         
-        if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
-          this.client.insert(currentInsertPos, lineBuffer);
-          totalInserted += lineBuffer.length;
-          
+        // Flush remaining buffer (line without trailing newline)
+        if (!aborted && macro.lineBuffered && lineBuffer) {
+          const insertedAt = cursorPos;
+          await safeInsert(lineBuffer);
           if (macro.onData) {
-            macro.onData(lineBuffer, currentInsertPos);
+            macro.onData(lineBuffer, insertedAt);
           }
         }
-      }
-      
-      const exitCode = await proc.exited;
-      
-      // Callback: onEnd
-      if (macro.onEnd) {
-        macro.onEnd(exitCode, insertPos + totalInserted);
+        
+        const exitCode = await proc.exited;
+        
+        // Callback: onEnd
+        if (macro.onEnd) {
+          macro.onEnd(exitCode, cursorPos);
+        }
+      } finally {
+        // Always remove the change handler
+        this.client.off('change', remoteChangeHandler);
       }
       
     } catch (err) {

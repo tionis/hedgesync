@@ -1369,6 +1369,15 @@ export class HedgeDocClient extends EventEmitter {
       }
       
       const operation = this._operationQueue.shift();
+      
+      // Verify the operation is still valid for the current document
+      if (operation.baseLength !== this.document.length) {
+        // Operation is stale - skip it
+        // This can happen if remote operations came in while this was queued
+        console.error(`Skipping stale operation: baseLength ${operation.baseLength} != doc length ${this.document.length}`);
+        continue;
+      }
+      
       this._executeOperation(operation);
     }
     
@@ -1654,6 +1663,28 @@ class OTClientImpl extends OTClient {
   applyOperation(operation) {
     // Apply the server's operation to our document
     this.hedgeDocClient.document = operation.apply(this.hedgeDocClient.document);
+    
+    // Transform any queued operations against this server operation
+    // This is critical - queued operations were created against the old document state
+    if (this.hedgeDocClient._operationQueue && this.hedgeDocClient._operationQueue.length > 0) {
+      const transformedQueue = [];
+      let serverOp = operation;
+      
+      for (const queuedOp of this.hedgeDocClient._operationQueue) {
+        try {
+          // Transform the queued operation against the server operation
+          const [transformedQueued, transformedServer] = TextOperation.transform(queuedOp, serverOp);
+          transformedQueue.push(transformedQueued);
+          serverOp = transformedServer;
+        } catch (err) {
+          // If transformation fails, skip this operation
+          console.error('Failed to transform queued operation:', err.message);
+        }
+      }
+      
+      this.hedgeDocClient._operationQueue = transformedQueue;
+    }
+    
     this.hedgeDocClient.emit('document', this.hedgeDocClient.document);
     this.hedgeDocClient.emit('change', { type: 'remote', operation });
   }

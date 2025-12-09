@@ -356,6 +356,40 @@ export class TextOperation {
   }
 
   /**
+   * Transform a position through an operation
+   * Returns the new position after the operation is applied
+   * @param {number} position - The position to transform
+   * @param {TextOperation} operation - The operation to transform through
+   * @param {boolean} insertBefore - If true, inserts at the same position push position forward
+   * @returns {number} The transformed position
+   */
+  static transformPosition(position, operation, insertBefore = false) {
+    let pos = position;
+    let index = 0;
+    
+    for (const op of operation.ops) {
+      if (TextOperation.isRetain(op)) {
+        index += op;
+      } else if (TextOperation.isInsert(op)) {
+        // Insert at or before our position moves us forward
+        if (index < pos || (index === pos && insertBefore)) {
+          pos += op.length;
+        }
+        // Insert doesn't advance index (it's inserted at current position)
+      } else if (TextOperation.isDelete(op)) {
+        const deleteCount = -op;
+        if (index < pos) {
+          // Delete before our position moves us backward
+          pos -= Math.min(deleteCount, pos - index);
+        }
+        index += deleteCount;
+      }
+    }
+    
+    return Math.max(0, pos);
+  }
+
+  /**
    * Create from JSON array
    */
   static fromJSON(ops) {
