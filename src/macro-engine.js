@@ -17,6 +17,7 @@ class MacroEngine {
     this._processing = false;
     this._changeHandler = null;
     this._debounceTimer = null;
+    this._activeStreams = new Set(); // Track active streaming processes
   }
 
   /**
@@ -102,6 +103,41 @@ class MacroEngine {
   }
 
   /**
+   * Register a streaming exec macro that streams command output into the document
+   * @param {string} name - Unique name for this macro
+   * @param {RegExp} pattern - The pattern to match
+   * @param {Function} commandBuilder - Function(match, ...groups) returning shell command string
+   * @param {Object} options - Options
+   * @param {boolean} options.lineBuffered - Buffer by line instead of character (default: true)
+   * @param {Function} options.onStart - Called when command starts (match, position)
+   * @param {Function} options.onData - Called on each chunk (chunk, position)
+   * @param {Function} options.onEnd - Called when command ends (exitCode, finalPosition)
+   * @param {Function} options.onError - Called on error (error)
+   * @returns {MacroEngine} this for chaining
+   */
+  addStreamingExecMacro(name, pattern, commandBuilder, options = {}) {
+    const { lineBuffered = true, onStart, onData, onEnd, onError } = options;
+    
+    // Ensure the pattern has the global flag
+    const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+    const globalPattern = new RegExp(pattern.source, flags);
+    
+    this.macros.set(name, {
+      type: 'streaming',
+      name,
+      pattern: globalPattern,
+      commandBuilder,
+      lineBuffered,
+      onStart,
+      onData,
+      onEnd,
+      onError
+    });
+    
+    return this;
+  }
+
+  /**
    * Start listening for document changes
    */
   start() {
@@ -177,6 +213,11 @@ class MacroEngine {
         iterations++;
 
         for (const [name, macro] of this.macros) {
+          // Skip streaming macros in the sync loop - they're handled separately
+          if (macro.type === 'streaming') {
+            continue;
+          }
+          
           const result = await this._applyMacro(document, macro);
           if (result.changed) {
             document = result.document;
@@ -188,6 +229,15 @@ class MacroEngine {
             break; // Start over after each change to get fresh document
           }
         }
+      }
+      
+      // Process streaming macros asynchronously (fire and forget)
+      const streamingStarted = await this._processStreamingMacros();
+      for (const s of streamingStarted) {
+        expansions.push({
+          macro: s.name,
+          matches: [{ match: s.match, index: s.index, streaming: true }]
+        });
       }
     } finally {
       this._processing = false;
@@ -316,6 +366,198 @@ class MacroEngine {
       matches,
       document: updatedDocument
     };
+  }
+
+  /**
+   * Process streaming macros - these run asynchronously and stream output into the document
+   * @private
+   */
+  async _processStreamingMacros() {
+    const document = this.client.getDocument();
+    const streamingMacros = [];
+    
+    // Find all streaming macros
+    for (const [name, macro] of this.macros) {
+      if (macro.type === 'streaming') {
+        streamingMacros.push({ name, macro });
+      }
+    }
+    
+    if (streamingMacros.length === 0) return [];
+    
+    const started = [];
+    
+    // Find matches for streaming macros
+    for (const { name, macro } of streamingMacros) {
+      macro.pattern.lastIndex = 0;
+      let match;
+      
+      while ((match = macro.pattern.exec(document)) !== null) {
+        const matchText = match[0];
+        const groups = match.slice(1);
+        const index = match.index;
+        
+        // Start streaming this match asynchronously
+        // Track the promise so we can wait for completion
+        const streamPromise = this._startStreamingExec(name, macro, matchText, groups, index);
+        this._activeStreams.add(streamPromise);
+        streamPromise.finally(() => this._activeStreams.delete(streamPromise));
+        
+        started.push({ name, match: matchText, index });
+        
+        // Prevent infinite loop on zero-length matches
+        if (match.index === macro.pattern.lastIndex) {
+          macro.pattern.lastIndex++;
+        }
+      }
+    }
+    
+    return started;
+  }
+
+  /**
+   * Wait for all active streaming macros to complete
+   * @returns {Promise<void>}
+   */
+  async waitForStreams() {
+    if (this._activeStreams.size === 0) {
+      return;
+    }
+    await Promise.all([...this._activeStreams]);
+  }
+
+  /**
+   * Check if there are active streaming macros
+   * @returns {boolean}
+   */
+  hasActiveStreams() {
+    return this._activeStreams.size > 0;
+  }
+
+  /**
+   * Start a streaming exec macro - removes match and streams command output
+   * @private
+   */
+  async _startStreamingExec(name, macro, matchText, groups, originalIndex) {
+    try {
+      // Build the command
+      const cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
+      
+      if (!cmd) {
+        return; // Command builder returned nothing
+      }
+      
+      // Re-fetch document and find current position of the match
+      let currentDoc = this.client.getDocument();
+      let insertPos = originalIndex;
+      
+      // Verify match still exists at expected position
+      const textAtPos = currentDoc.substring(insertPos, insertPos + matchText.length);
+      if (textAtPos !== matchText) {
+        // Try to find it elsewhere
+        const newIndex = currentDoc.indexOf(matchText);
+        if (newIndex === -1) {
+          console.error(`Streaming macro ${name}: match "${matchText}" no longer found`);
+          return;
+        }
+        insertPos = newIndex;
+      }
+      
+      // Delete the matched text first
+      this.client.delete(insertPos, matchText.length);
+      
+      // Callback: onStart
+      if (macro.onStart) {
+        macro.onStart(matchText, insertPos);
+      }
+      
+      // Start the process
+      const proc = Bun.spawn(['sh', '-c', cmd], {
+        stdout: 'pipe',
+        stderr: 'pipe'
+      });
+      
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let lineBuffer = '';
+      let totalInserted = 0;
+      
+      // Stream output into document
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        
+        if (macro.lineBuffered) {
+          // Buffer by line
+          lineBuffer += chunk;
+          const lines = lineBuffer.split('\n');
+          
+          // Process all complete lines
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i] + '\n';
+            
+            // Re-fetch position - document may have changed
+            currentDoc = this.client.getDocument();
+            const currentInsertPos = insertPos + totalInserted;
+            
+            if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
+              this.client.insert(currentInsertPos, line);
+              totalInserted += line.length;
+              
+              if (macro.onData) {
+                macro.onData(line, currentInsertPos);
+              }
+            }
+          }
+          
+          // Keep incomplete line in buffer
+          lineBuffer = lines[lines.length - 1];
+        } else {
+          // Character-by-character (or chunk-by-chunk)
+          currentDoc = this.client.getDocument();
+          const currentInsertPos = insertPos + totalInserted;
+          
+          if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
+            this.client.insert(currentInsertPos, chunk);
+            totalInserted += chunk.length;
+            
+            if (macro.onData) {
+              macro.onData(chunk, currentInsertPos);
+            }
+          }
+        }
+      }
+      
+      // Flush remaining buffer (line without trailing newline)
+      if (macro.lineBuffered && lineBuffer) {
+        currentDoc = this.client.getDocument();
+        const currentInsertPos = insertPos + totalInserted;
+        
+        if (currentInsertPos >= 0 && currentInsertPos <= currentDoc.length) {
+          this.client.insert(currentInsertPos, lineBuffer);
+          totalInserted += lineBuffer.length;
+          
+          if (macro.onData) {
+            macro.onData(lineBuffer, currentInsertPos);
+          }
+        }
+      }
+      
+      const exitCode = await proc.exited;
+      
+      // Callback: onEnd
+      if (macro.onEnd) {
+        macro.onEnd(exitCode, insertPos + totalInserted);
+      }
+      
+    } catch (err) {
+      console.error(`Streaming macro ${name} error:`, err);
+      if (macro.onError) {
+        macro.onError(err);
+      }
+    }
   }
 
   /**

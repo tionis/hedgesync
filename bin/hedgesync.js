@@ -956,26 +956,62 @@ async function cmdMacro(args) {
                 if (regexMatch) {
                   const regex = new RegExp(regexMatch[1], regexMatch[2]);
                   const cmdTemplate = macro.command;
-                  engine.addRegexMacro(`exec:${macro.pattern}`, regex, async (fullMatch, ...groups) => {
+                  
+                  // Build command helper
+                  const buildCmd = (fullMatch, ...groups) => {
                     let cmd = cmdTemplate;
                     cmd = cmd.replace(/\{0\}/g, fullMatch);
                     groups.forEach((g, i) => {
                       cmd = cmd.replace(new RegExp(`\\{${i + 1}\\}`, 'g'), g || '');
                     });
-                    
-                    if (!quiet) {
-                      console.error(c('dim', `  Executing: ${cmd}`));
-                    }
-                    
-                    try {
-                      const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', stderr: 'pipe' });
-                      const stdout = await new Response(proc.stdout).text();
-                      return stdout.trim();
-                    } catch (err) {
-                      console.error(c('red', `  Command failed: ${err.message}`));
-                      return fullMatch;
-                    }
-                  });
+                    return cmd;
+                  };
+                  
+                  // Check if streaming is enabled (via config option or --stream flag)
+                  const useStreaming = macro.streaming || streamOutput;
+                  
+                  if (useStreaming) {
+                    // Streaming mode
+                    engine.addStreamingExecMacro(`exec:${macro.pattern}`, regex, buildCmd, {
+                      lineBuffered: macro.lineBuffered !== false,
+                      onStart: (match, pos) => {
+                        if (!quiet) {
+                          console.error(c('dim', `  Streaming: ${buildCmd(match)} at position ${pos}`));
+                        }
+                      },
+                      onData: (chunk, pos) => {
+                        if (!quiet) {
+                          process.stderr.write(c('dim', chunk));
+                        }
+                      },
+                      onEnd: (exitCode, finalPos) => {
+                        if (!quiet) {
+                          console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
+                        }
+                      },
+                      onError: (err) => {
+                        console.error(c('red', `  Stream error: ${err.message}`));
+                      }
+                    });
+                  } else {
+                    // Non-streaming mode
+                    engine.addRegexMacro(`exec:${macro.pattern}`, regex, async (fullMatch, ...groups) => {
+                      const cmd = buildCmd(fullMatch, ...groups);
+                      
+                      if (!quiet) {
+                        console.error(c('dim', `  Executing: ${cmd}`));
+                      }
+                      
+                      try {
+                        const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', stderr: 'pipe' });
+                        const stdout = await new Response(proc.stdout).text();
+                        return stdout.trim();
+                      } catch (err) {
+                        console.error(c('red', `  Command failed: ${err.message}`));
+                        return fullMatch;
+                      }
+                    });
+                  }
                 }
               }
               break;
@@ -1144,6 +1180,7 @@ async function cmdMacro(args) {
   // Add exec macros from command line: --exec "/pattern/:command arg1 arg2"
   // Capture groups become positional arguments $1, $2, etc. or can use {1}, {2}
   // Full match is available as $0 or {0}
+  // With --stream: output is streamed live into the document
   for (const macro of execMacros) {
     // Parse format: /pattern/flags:command with args
     // The command can contain {0}, {1}, {2} etc for capture group substitution
@@ -1159,8 +1196,8 @@ async function cmdMacro(args) {
     const [, pattern, flags, cmdTemplate] = execMatch;
     const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
     
-    engine.addRegexMacro(`exec:${pattern}`, regex, async (fullMatch, ...groups) => {
-      // Build the command by substituting capture groups
+    // Helper to build command from template
+    const buildCommand = (fullMatch, ...groups) => {
       let cmd = cmdTemplate;
       
       // Replace {0} with full match, {1}, {2}, etc. with groups
@@ -1175,36 +1212,46 @@ async function cmdMacro(args) {
         cmd = cmd.replace(new RegExp(`\\$${i + 1}\\b`, 'g'), g || '');
       });
       
-      if (!quiet) {
-        console.error(c('dim', `  Executing: ${cmd}`));
-      }
-      
-      try {
-        if (streamOutput) {
-          // Stream output live (useful for long-running commands)
-          const proc = Bun.spawn(['sh', '-c', cmd], {
-            stdout: 'pipe',
-            stderr: 'pipe'
-          });
-          
-          // Collect output while streaming to stderr for visibility
-          let output = '';
-          const reader = proc.stdout.getReader();
-          const decoder = new TextDecoder();
-          
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value);
-            output += chunk;
-            if (!quiet) {
-              process.stderr.write(c('dim', chunk));
-            }
+      return cmd;
+    };
+    
+    if (streamOutput) {
+      // Streaming mode: output is streamed live into the document
+      engine.addStreamingExecMacro(`exec:${pattern}`, regex, buildCommand, {
+        lineBuffered: true,
+        onStart: (match, pos) => {
+          if (!quiet) {
+            console.error(c('dim', `  Streaming: ${buildCommand(match)} at position ${pos}`));
           }
-          
-          await proc.exited;
-          return output.trim();
-        } else {
+        },
+        onData: (chunk, pos) => {
+          if (!quiet) {
+            process.stderr.write(c('dim', chunk));
+          }
+        },
+        onEnd: (exitCode, finalPos) => {
+          if (!quiet) {
+            console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
+          }
+        },
+        onError: (err) => {
+          console.error(c('red', `  Stream error: ${err.message}`));
+        }
+      });
+      
+      if (!quiet) {
+        console.error(c('cyan', `Registered streaming exec macro: /${pattern}/ -> ${cmdTemplate}`));
+      }
+    } else {
+      // Non-streaming mode: wait for full output then replace
+      engine.addRegexMacro(`exec:${pattern}`, regex, async (fullMatch, ...groups) => {
+        const cmd = buildCommand(fullMatch, ...groups);
+        
+        if (!quiet) {
+          console.error(c('dim', `  Executing: ${cmd}`));
+        }
+      
+        try {
           // Wait for full output
           const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', stderr: 'pipe' });
           const [stdout, stderr] = await Promise.all([
@@ -1222,15 +1269,15 @@ async function cmdMacro(args) {
           }
           
           return stdout.trim();
+        } catch (err) {
+          console.error(c('red', `  Command failed: ${err.message}`));
+          return fullMatch; // Return original on error
         }
-      } catch (err) {
-        console.error(c('red', `  Command failed: ${err.message}`));
-        return fullMatch; // Return original on error
+      });
+      
+      if (!quiet) {
+        console.error(c('cyan', `Registered exec macro: /${pattern}/ -> ${cmdTemplate}`));
       }
-    });
-    
-    if (!quiet) {
-      console.error(c('cyan', `Registered exec macro: /${pattern}/ -> ${cmdTemplate}`));
     }
   }
   
@@ -1302,6 +1349,14 @@ async function cmdMacro(args) {
             console.error(c('green', `✓ Expanded ${r.macro}: ${r.matches.length} match(es)`));
           }
         }
+      }
+      
+      // Wait for streaming macros to complete
+      if (engine.hasActiveStreams()) {
+        if (!quiet) {
+          console.error(c('cyan', 'Waiting for streaming macros to complete...'));
+        }
+        await engine.waitForStreams();
       }
       
       // Wait for operations to sync

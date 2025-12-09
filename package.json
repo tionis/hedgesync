@@ -20,7 +20,7 @@
     "socket.io",
     "cli"
   ],
-  "author": "",
+  "author": "tionis",
   "license": "AGPL-3.0-only",
   "dependencies": {
     "socket.io-client": "^4.7.0"

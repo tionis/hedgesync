@@ -708,6 +708,27 @@ hedgesync macro <url> --exec '/::weather\s+(.+?)::/gi:curl -s wttr.in/{1}?format
 hedgesync macro <url> --exec '/::uptime::/gi:uptime -p' --watch
 ```
 
+#### Streaming Output
+
+Use `--stream` to stream command output live into the document. This is useful for long-running commands where you want to see output as it's generated:
+
+```bash
+# Stream output line-by-line into the document
+hedgesync macro <url> --exec '/::slow::/gi:for i in 1 2 3 4 5; do echo "Step $i"; sleep 1; done' --stream
+
+# Stream a log file
+hedgesync macro <url> --exec '/::tail-log::/gi:tail -f /var/log/syslog' --stream --watch
+
+# Stream a build process
+hedgesync macro <url> --exec '/::build::/gi:make 2>&1' --stream
+```
+
+With streaming enabled:
+1. The matched pattern is immediately removed from the document
+2. Command output is inserted into the document as it's generated (line-buffered by default)
+3. Multiple streaming commands can run concurrently
+4. The CLI waits for all streams to complete before exiting
+
 **Security Note:** Exec macros execute arbitrary shell commands. Only use on documents you trust, and be careful with user-provided content.
 
 #### Macro Config File Format
@@ -731,12 +752,23 @@ hedgesync macro <url> --exec '/::uptime::/gi:uptime -p' --watch
       "command": "echo {1} | bc -l"
     },
     {
+      "type": "exec",
+      "pattern": "/::slow-cmd::/gi",
+      "command": "for i in 1 2 3; do echo \"Step $i\"; sleep 1; done",
+      "streaming": true,
+      "lineBuffered": true
+    },
+    {
       "type": "builtin",
       "name": "date"
     }
   ]
 }
 ```
+
+Config options for exec macros:
+- `streaming`: Set to `true` to enable live streaming output (default: `false`)
+- `lineBuffered`: When streaming, buffer by line instead of character (default: `true`)
 
 See `examples/macros.json` for more examples.
 

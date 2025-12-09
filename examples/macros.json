@@ -46,6 +46,13 @@
       "command": "curl -s 'wttr.in/{1}?format=3'"
     },
     {
+      "type": "exec",
+      "pattern": "/::stream-test::/gi",
+      "command": "for i in 1 2 3 4 5; do echo \"Line $i\"; sleep 0.5; done",
+      "streaming": true,
+      "lineBuffered": true
+    },
+    {
       "type": "builtin",
       "name": "date"
     }
