@@ -1,0 +1,24 @@
+{
+  "name": "hedgesync",
+  "version": "1.0.0",
+  "description": "A library to programmatically connect to a running HedgeDoc server and make live edits to documents",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "example": "node examples/basic-usage.js"
+  },
+  "keywords": [
+    "hedgedoc",
+    "realtime",
+    "collaboration",
+    "operational-transformation",
+    "socket.io"
+  ],
+  "author": "",
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "socket.io-client": "^4.7.0"
+  },
+  "devDependencies": {}
+}
