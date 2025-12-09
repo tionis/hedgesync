@@ -85,10 +85,8 @@ hedgesync transform https://md.example.com/abc123 --to html # Convert to HTML
 ### Options
 
 ```
--u, --url      Full HedgeDoc URL
--s, --server   HedgeDoc server URL
--n, --note     Note ID
--c, --cookie   Session cookie for authentication
+<url>          Full HedgeDoc URL (required, e.g., https://md.example.com/abc123)
+-c, --cookie   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
 -f, --file     Read content from file
 -o, --output   Write output to file
 -q, --quiet    Suppress non-essential output
@@ -97,16 +95,17 @@ hedgesync transform https://md.example.com/abc123 --to html # Convert to HTML
 --all, -a, -g  Replace all occurrences
 ```
 
-### Environment Variables
+### Authentication
+
+If the document requires authentication, provide a session cookie:
 
 ```bash
-export HEDGEDOC_SERVER=https://md.example.com
-export HEDGEDOC_NOTE=abc123
-export HEDGEDOC_COOKIE='connect.sid=...'
+# Via command-line option
+hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
 
-# Now you can omit the URL
-hedgesync get
-hedgesync set -f document.md
+# Via environment variable
+export HEDGEDOC_COOKIE='connect.sid=...'
+hedgesync get https://md.example.com/abc123
 ```
 
 ### Scripting Examples

@@ -99,19 +99,21 @@ function parseUrl(url) {
     
     return { serverUrl, noteId };
   } catch {
-    // Maybe it's just a note ID
+    // Not a valid URL
     return null;
   }
 }
 
-// Get connection options from args and environment
+// Get connection options from args (URL is required as argument)
 function getConnectionOptions(args) {
-  const url = args.options.url || args.options.u || args.positional[0];
-  const server = args.options.server || args.options.s || process.env.HEDGEDOC_SERVER;
-  const noteId = args.options.note || args.options.n || process.env.HEDGEDOC_NOTE;
+  const url = args.positional[0] || args.options.url || args.options.u;
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   
-  // Try parsing URL first
+  if (!url) {
+    return null;
+  }
+  
+  // Parse the URL
   const parsed = parseUrl(url);
   
   if (parsed) {
@@ -122,15 +124,7 @@ function getConnectionOptions(args) {
     };
   }
   
-  // Fall back to separate server and note
-  if (server && (noteId || url)) {
-    return {
-      serverUrl: server,
-      noteId: noteId || url,
-      cookie,
-    };
-  }
-  
+  // URL parsing failed
   return null;
 }
 
@@ -140,7 +134,7 @@ function printHelp() {
 ${c('bold', 'hedgesync')} - HedgeDoc CLI for document manipulation
 
 ${c('yellow', 'USAGE:')}
-  hedgesync <command> [options] [arguments]
+  hedgesync <command> <url> [options] [arguments]
 
 ${c('yellow', 'COMMANDS:')}
   ${c('green', 'get')}         Get document content
@@ -156,51 +150,49 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'transform')}   Transform document with pandoc
   ${c('green', 'help')}        Show this help message
 
+${c('yellow', 'ARGUMENTS:')}
+  ${c('cyan', '<url>')}          Full HedgeDoc URL (required, e.g., https://md.example.com/abc123)
+
 ${c('yellow', 'OPTIONS:')}
-  ${c('cyan', '-u, --url')}      Full HedgeDoc URL (e.g., https://md.example.com/abc123)
-  ${c('cyan', '-s, --server')}   HedgeDoc server URL
-  ${c('cyan', '-n, --note')}     Note ID
-  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
   ${c('cyan', '-f, --file')}     Read content from file
   ${c('cyan', '-o, --output')}   Write output to file
   ${c('cyan', '-q, --quiet')}    Suppress non-essential output
   ${c('cyan', '--json')}         Output in JSON format
   ${c('cyan', '--no-reconnect')} Disable auto-reconnection
-
-${c('yellow', 'ENVIRONMENT VARIABLES:')}
-  HEDGEDOC_SERVER   Default server URL
-  HEDGEDOC_NOTE     Default note ID  
-  HEDGEDOC_COOKIE   Session cookie for authentication
+  ${c('cyan', '-r, --regex')}    Treat search pattern as regex (for replace)
+  ${c('cyan', '-a, --all')}      Replace all occurrences (for replace)
 
 ${c('yellow', 'EXAMPLES:')}
   # Get document content
   hedgesync get https://md.example.com/abc123
   
   # Set document from stdin
-  echo "# Hello" | hedgesync set -u https://md.example.com/abc123
+  echo "# Hello" | hedgesync set https://md.example.com/abc123
   
   # Set document from file
-  hedgesync set -u https://md.example.com/abc123 -f document.md
+  hedgesync set https://md.example.com/abc123 -f document.md
   
   # Append text
-  hedgesync append -u https://md.example.com/abc123 "New content"
+  hedgesync append https://md.example.com/abc123 "New content"
   
   # Search and replace
-  hedgesync replace -u https://md.example.com/abc123 "old" "new"
+  hedgesync replace https://md.example.com/abc123 "old" "new"
+  
+  # Regex replace all
+  hedgesync replace https://md.example.com/abc123 "\\d+" "NUM" --regex --all
   
   # Watch for changes
-  hedgesync watch -u https://md.example.com/abc123
+  hedgesync watch https://md.example.com/abc123
   
-  # Get line 5
-  hedgesync line -u https://md.example.com/abc123 5
+  # Get line 5 (0-indexed)
+  hedgesync line https://md.example.com/abc123 5
   
   # Set line 5
-  hedgesync line -u https://md.example.com/abc123 5 "New line content"
+  hedgesync line https://md.example.com/abc123 5 "New line content"
   
-  # Using environment variables
-  export HEDGEDOC_SERVER=https://md.example.com
-  export HEDGEDOC_NOTE=abc123
-  hedgesync get
+  # With authentication cookie
+  hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
 `);
 }
 
@@ -209,8 +201,9 @@ async function connect(args, options = {}) {
   const connOpts = getConnectionOptions(args);
   
   if (!connOpts || !connOpts.serverUrl || !connOpts.noteId) {
-    console.error(c('red', 'Error: Missing server URL or note ID'));
-    console.error('Use --url, or --server and --note, or set HEDGEDOC_SERVER and HEDGEDOC_NOTE');
+    console.error(c('red', 'Error: URL is required'));
+    console.error('Usage: hedgesync <command> <url> [options]');
+    console.error('Example: hedgesync get https://md.example.com/abc123');
     process.exit(1);
   }
   
