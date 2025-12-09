@@ -1,4 +1,4 @@
-import { TextOperation } from './text-operation.js';
+import { TextOperation, OperationJSON } from './text-operation.js';
 
 /**
  * OT Client State Machine
@@ -10,15 +10,30 @@ import { TextOperation } from './text-operation.js';
  * - AwaitingWithBuffer: Sent one operation, have buffered another
  */
 
+/** Selection that can be transformed */
+export interface Transformable {
+  transform(operation: TextOperation): Transformable;
+}
+
+/** Base interface for OT client states */
+interface OTState {
+  applyClient(client: OTClient, operation: TextOperation): OTState;
+  applyServer(client: OTClient, revision: number, operation: TextOperation): OTState;
+  serverAck(client: OTClient, revision: number): OTState;
+  transformSelection(selection: Transformable): Transformable;
+  applyOperations?(client: OTClient, head: number, operations: OperationJSON[]): OTState;
+  resend?(client: OTClient): void;
+}
+
 // State: Synchronized - no pending operations
-class Synchronized {
-  applyClient(client, operation) {
+class Synchronized implements OTState {
+  applyClient(client: OTClient, operation: TextOperation): OTState {
     // Send operation to server and wait for ack
     client.sendOperation(client.revision, operation);
     return new AwaitingConfirm(operation);
   }
 
-  applyServer(client, revision, operation) {
+  applyServer(client: OTClient, revision: number, operation: TextOperation): OTState {
     if (revision - client.revision > 1) {
       throw new Error('Invalid revision.');
     }
@@ -27,11 +42,11 @@ class Synchronized {
     return this;
   }
 
-  serverAck(client, revision) {
+  serverAck(_client: OTClient, _revision: number): OTState {
     throw new Error('There is no pending operation.');
   }
 
-  transformSelection(x) {
+  transformSelection(x: Transformable): Transformable {
     return x;
   }
 }
@@ -40,17 +55,19 @@ class Synchronized {
 const synchronized = new Synchronized();
 
 // State: AwaitingConfirm - waiting for server to acknowledge our operation
-class AwaitingConfirm {
-  constructor(outstanding) {
+class AwaitingConfirm implements OTState {
+  outstanding: TextOperation;
+
+  constructor(outstanding: TextOperation) {
     this.outstanding = outstanding;
   }
 
-  applyClient(client, operation) {
+  applyClient(_client: OTClient, operation: TextOperation): OTState {
     // Buffer the new operation
     return new AwaitingWithBuffer(this.outstanding, operation);
   }
 
-  applyServer(client, revision, operation) {
+  applyServer(client: OTClient, revision: number, operation: TextOperation): OTState {
     if (revision - client.revision > 1) {
       throw new Error('Invalid revision.');
     }
@@ -61,7 +78,7 @@ class AwaitingConfirm {
     return new AwaitingConfirm(outstanding);
   }
 
-  serverAck(client, revision) {
+  serverAck(client: OTClient, revision: number): OTState {
     if (revision - client.revision > 1) {
       // Stale - need to fetch missing operations
       return new Stale(this.outstanding, client, revision).getOperations();
@@ -70,29 +87,32 @@ class AwaitingConfirm {
     return synchronized;
   }
 
-  transformSelection(selection) {
+  transformSelection(selection: Transformable): Transformable {
     return selection.transform(this.outstanding);
   }
 
-  resend(client) {
+  resend(client: OTClient): void {
     client.sendOperation(client.revision, this.outstanding);
   }
 }
 
 // State: AwaitingWithBuffer - waiting for ack and have buffered operations
-class AwaitingWithBuffer {
-  constructor(outstanding, buffer) {
+class AwaitingWithBuffer implements OTState {
+  outstanding: TextOperation;
+  buffer: TextOperation;
+
+  constructor(outstanding: TextOperation, buffer: TextOperation) {
     this.outstanding = outstanding;
     this.buffer = buffer;
   }
 
-  applyClient(client, operation) {
+  applyClient(_client: OTClient, operation: TextOperation): OTState {
     // Compose new operation with buffer
     const newBuffer = this.buffer.compose(operation);
     return new AwaitingWithBuffer(this.outstanding, newBuffer);
   }
 
-  applyServer(client, revision, operation) {
+  applyServer(client: OTClient, revision: number, operation: TextOperation): OTState {
     if (revision - client.revision > 1) {
       throw new Error('Invalid revision.');
     }
@@ -104,7 +124,7 @@ class AwaitingWithBuffer {
     return new AwaitingWithBuffer(outstanding, buffer);
   }
 
-  serverAck(client, revision) {
+  serverAck(client: OTClient, revision: number): OTState {
     if (revision - client.revision > 1) {
       return new StaleWithBuffer(this.outstanding, this.buffer, client, revision).getOperations();
     }
@@ -114,37 +134,41 @@ class AwaitingWithBuffer {
     return new AwaitingConfirm(this.buffer);
   }
 
-  transformSelection(selection) {
+  transformSelection(selection: Transformable): Transformable {
     return selection.transform(this.outstanding).transform(this.buffer);
   }
 
-  resend(client) {
+  resend(client: OTClient): void {
     client.sendOperation(client.revision, this.outstanding);
   }
 }
 
 // State: Stale - missed some revisions, need to catch up
-class Stale {
-  constructor(outstanding, client, revision) {
+class Stale implements OTState {
+  outstanding: TextOperation;
+  client: OTClient;
+  targetRevision: number;
+
+  constructor(outstanding: TextOperation, client: OTClient, revision: number) {
     this.outstanding = outstanding;
     this.client = client;
-    this.revision = revision;
+    this.targetRevision = revision;
   }
 
-  getOperations() {
-    this.client.getOperations(this.client.revision, this.revision);
+  getOperations(): OTState {
+    this.client.getOperations(this.client.revision, this.targetRevision);
     return this;
   }
 
-  applyClient(client, operation) {
+  applyClient(_client: OTClient, _operation: TextOperation): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  applyServer(client, revision, operation) {
+  applyServer(_client: OTClient, _revision: number, _operation: TextOperation): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  applyOperations(client, head, operations) {
+  applyOperations(client: OTClient, head: number, operations: OperationJSON[]): OTState {
     for (let i = 0; i < operations.length; i++) {
       const op = TextOperation.fromJSON(operations[i]);
       const [outstanding, serverOp] = TextOperation.transform(this.outstanding, op);
@@ -155,38 +179,43 @@ class Stale {
     return new AwaitingConfirm(this.outstanding);
   }
 
-  serverAck(client, revision) {
+  serverAck(_client: OTClient, _revision: number): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  transformSelection(selection) {
+  transformSelection(selection: Transformable): Transformable {
     return selection;
   }
 }
 
 // State: StaleWithBuffer - missed revisions and have buffered operations
-class StaleWithBuffer {
-  constructor(outstanding, buffer, client, revision) {
+class StaleWithBuffer implements OTState {
+  outstanding: TextOperation;
+  buffer: TextOperation;
+  client: OTClient;
+  targetRevision: number;
+
+  constructor(outstanding: TextOperation, buffer: TextOperation, client: OTClient, revision: number) {
     this.outstanding = outstanding;
     this.buffer = buffer;
     this.client = client;
-    this.revision = revision;
+    this.targetRevision = revision;
   }
 
-  getOperations() {
-    this.client.getOperations(this.client.revision, this.revision);
+  getOperations(): OTState {
+    this.client.getOperations(this.client.revision, this.targetRevision);
     return this;
   }
 
-  applyClient(client, operation) {
+  applyClient(_client: OTClient, _operation: TextOperation): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  applyServer(client, revision, operation) {
+  applyServer(_client: OTClient, _revision: number, _operation: TextOperation): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  applyOperations(client, head, operations) {
+  applyOperations(client: OTClient, head: number, operations: OperationJSON[]): OTState {
     for (let i = 0; i < operations.length; i++) {
       const op = TextOperation.fromJSON(operations[i]);
       const [outstanding, op1] = TextOperation.transform(this.outstanding, op);
@@ -200,11 +229,11 @@ class StaleWithBuffer {
     return new AwaitingWithBuffer(this.outstanding, this.buffer);
   }
 
-  serverAck(client, revision) {
+  serverAck(_client: OTClient, _revision: number): OTState {
     throw new Error('Unsupported operation in stale state');
   }
 
-  transformSelection(selection) {
+  transformSelection(selection: Transformable): Transformable {
     return selection.transform(this.outstanding).transform(this.buffer);
   }
 }
@@ -213,7 +242,10 @@ class StaleWithBuffer {
  * OT Client - manages client-side state for operational transformation
  */
 export class OTClient {
-  constructor(revision = 0) {
+  revision: number;
+  private state: OTState;
+
+  constructor(revision: number = 0) {
     this.revision = revision;
     this.state = synchronized;
   }
@@ -221,36 +253,38 @@ export class OTClient {
   /**
    * Called when the local user makes an edit
    */
-  applyClient(operation) {
+  applyClient(operation: TextOperation): void {
     this.state = this.state.applyClient(this, operation);
   }
 
   /**
    * Called when receiving an operation from the server
    */
-  applyServer(revision, operation) {
+  applyServer(revision: number, operation: TextOperation): void {
     this.state = this.state.applyServer(this, revision, operation);
   }
 
   /**
    * Called when receiving operations from get_operations request
    */
-  applyOperations(head, operations) {
-    this.state = this.state.applyOperations(this, head, operations);
+  applyOperations(head: number, operations: OperationJSON[]): void {
+    if (this.state.applyOperations) {
+      this.state = this.state.applyOperations(this, head, operations);
+    }
   }
 
   /**
    * Called when the server acknowledges our operation
    */
-  serverAck(revision) {
+  serverAck(revision: number): void {
     this.state = this.state.serverAck(this, revision);
   }
 
   /**
    * Called when reconnecting to resend pending operations
    */
-  serverReconnect() {
-    if (typeof this.state.resend === 'function') {
+  serverReconnect(): void {
+    if (this.state.resend) {
       this.state.resend(this);
     }
   }
@@ -258,14 +292,14 @@ export class OTClient {
   /**
    * Transform a selection from server state to client state
    */
-  transformSelection(selection) {
+  transformSelection(selection: Transformable): Transformable {
     return this.state.transformSelection(selection);
   }
 
   /**
    * Check if client is in synchronized state
    */
-  isSynchronized() {
+  isSynchronized(): boolean {
     return this.state === synchronized;
   }
 
@@ -273,27 +307,27 @@ export class OTClient {
 
   /**
    * Send an operation to the server
-   * @param {number} revision - The revision number
-   * @param {TextOperation} operation - The operation to send
+   * @param revision - The revision number
+   * @param operation - The operation to send
    */
-  sendOperation(revision, operation) {
+  sendOperation(_revision: number, _operation: TextOperation): void {
     throw new Error('sendOperation must be defined in child class');
   }
 
   /**
    * Apply an operation to the local document
-   * @param {TextOperation} operation - The operation to apply
+   * @param operation - The operation to apply
    */
-  applyOperation(operation) {
+  applyOperation(_operation: TextOperation): void {
     throw new Error('applyOperation must be defined in child class');
   }
 
   /**
    * Request missing operations from server
-   * @param {number} base - Start revision
-   * @param {number} head - End revision
+   * @param base - Start revision
+   * @param head - End revision
    */
-  getOperations(base, head) {
+  getOperations(_base: number, _head: number): void {
     throw new Error('getOperations must be defined in child class');
   }
 }

@@ -1,7 +1,161 @@
 import { EventEmitter } from 'events';
-import { io } from 'socket.io-client';
-import { TextOperation } from './text-operation.js';
-import { OTClient } from './ot-client.js';
+import { io, Socket } from 'socket.io-client';
+import { TextOperation, OperationJSON } from './text-operation.js';
+import { OTClient, Transformable } from './ot-client.js';
+
+// ===========================================
+// Types
+// ===========================================
+
+/** Rate limit configuration */
+export interface RateLimitConfig {
+  minInterval?: number;
+  maxBurst?: number;
+  burstWindow?: number;
+  enabled?: boolean;
+}
+
+/** Reconnection configuration */
+export interface ReconnectConfig {
+  enabled?: boolean;
+  maxAttempts?: number;
+  initialDelay?: number;
+  maxDelay?: number;
+  backoffFactor?: number;
+}
+
+/** Client options */
+export interface HedgeDocClientOptions {
+  serverUrl: string;
+  noteId: string;
+  cookie?: string | null;
+  operationTimeout?: number;
+  rateLimit?: RateLimitConfig;
+  reconnect?: ReconnectConfig;
+  undoMaxSize?: number;
+  trackUndo?: boolean;
+  undoGroupInterval?: number;
+}
+
+/** Author profile */
+export interface AuthorProfile {
+  name?: string;
+  color?: string;
+  photo?: string | null;
+}
+
+/** Note metadata */
+export interface NoteInfo {
+  title: string;
+  permission: string;
+  owner: string | null;
+  ownerprofile?: AuthorProfile | null;
+  lastchangeuser?: string | null;
+  lastchangeuserprofile?: AuthorProfile | null;
+  authors: Record<string, AuthorProfile>;
+  authorship?: Array<[string | null, number, number, number | null, number | null]>;
+  createtime: number | null;
+  updatetime: number | null;
+  docmaxlength?: number | null;
+}
+
+/** User info */
+export interface UserInfo {
+  id: string;
+  name?: string;
+  color?: string;
+  photo?: string;
+  cursor?: unknown;
+}
+
+/** Authorship span */
+export interface AuthorshipSpan {
+  userId: string | null;
+  start: number;
+  end: number;
+  text: string;
+  author: AuthorProfile | null;
+  createdAt: Date | null;
+  updatedAt: Date | null;
+}
+
+/** Document with authorship info */
+export interface DocumentWithAuthorship {
+  content: string;
+  authors: Record<string, AuthorProfile>;
+  authorship: AuthorshipSpan[];
+  getTextByAuthor: (authorId: string) => string;
+  getAuthorAtPosition: (position: number) => AuthorProfile | null;
+}
+
+/** Author entry */
+export interface AuthorEntry {
+  userId: string;
+  name: string;
+  color: string;
+  photo: string | null;
+}
+
+/** Undo entry */
+interface UndoEntry {
+  operation: TextOperation;
+  oldDocument: string;
+  newDocument: string;
+  timestamp: number;
+}
+
+/** Change event */
+export interface ChangeEvent {
+  type: 'local' | 'remote';
+  operation: TextOperation;
+}
+
+/** Doc event data */
+interface DocData {
+  str?: string;
+  revision?: number;
+  clients?: Record<string, UserInfo>;
+  force?: boolean;
+}
+
+/** Refresh event data */
+interface RefreshData {
+  title?: string;
+  permission?: string;
+  owner?: string | null;
+  ownerprofile?: AuthorProfile | null;
+  lastchangeuser?: string | null;
+  lastchangeuserprofile?: AuthorProfile | null;
+  authors?: Record<string, AuthorProfile>;
+  authorship?: Array<[string | null, number, number, number | null, number | null]>;
+  createtime?: number | null;
+  updatetime?: number | null;
+  docmaxlength?: number | null;
+}
+
+/** Info event data */
+interface InfoData {
+  code?: number;
+  message?: string;
+}
+
+// ===========================================
+// Error Types
+// ===========================================
+
+class HedgeDocError extends Error {
+  code?: number;
+  
+  constructor(message: string, code?: number) {
+    super(message);
+    this.code = code;
+    this.name = 'HedgeDocError';
+  }
+}
+
+// ===========================================
+// HedgeDocClient Class
+// ===========================================
 
 /**
  * HedgeDocClient - Connect to a HedgeDoc server and sync documents in real-time
@@ -14,25 +168,54 @@ import { OTClient } from './ot-client.js';
  * - Rate limiting, reconnection handling, and batch operations
  */
 export class HedgeDocClient extends EventEmitter {
+  serverUrl: string;
+  noteId: string;
+  cookie: string | null;
+  socket: Socket | null;
+  document: string;
+  revision: number;
+  connected: boolean;
+  ready: boolean;
+  otClient: OTClientImpl | null;
+  noteInfo: NoteInfo;
+  users: Map<string, UserInfo>;
+
+  private _sessionCookie: string | null;
+  private _isLoggedIn: boolean;
+  private _pendingOperation: TextOperation | null;
+  private _operationTimeout: ReturnType<typeof setTimeout> | null;
+  private _operationTimeoutMs: number;
+  
+  // Rate limiting
+  private _rateLimit: Required<RateLimitConfig>;
+  private _lastOperationTime: number;
+  private _operationTimes: number[];
+  _operationQueue: TextOperation[];
+  private _processingQueue: boolean;
+  
+  // Reconnection
+  private _reconnect: Required<ReconnectConfig>;
+  private _reconnectAttempts: number;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null;
+  private _intentionalDisconnect: boolean;
+  private _pendingOperationsDuringDisconnect: TextOperation[];
+  
+  // Batch operations
+  private _batchMode: boolean;
+  private _batchOperations: TextOperation[];
+  
+  // Undo/Redo
+  private _undoStack: UndoEntry[];
+  private _redoStack: UndoEntry[];
+  private _undoMaxSize: number;
+  private _trackUndo: boolean;
+  private _lastUndoTimestamp: number;
+  private _undoGroupInterval: number;
+
   /**
    * Create a new HedgeDoc client
-   * @param {Object} options - Configuration options
-   * @param {string} options.serverUrl - The HedgeDoc server URL (e.g., 'https://hedgedoc.example.com')
-   * @param {string} options.noteId - The note ID or alias to connect to
-   * @param {string} [options.cookie] - Optional session cookie for authentication
-   * @param {number} [options.operationTimeout=5000] - Timeout for operations (ms)
-   * @param {Object} [options.rateLimit] - Rate limiting options
-   * @param {number} [options.rateLimit.minInterval=50] - Minimum ms between operations
-   * @param {number} [options.rateLimit.maxBurst=10] - Max operations in burst
-   * @param {number} [options.rateLimit.burstWindow=1000] - Burst window in ms
-   * @param {Object} [options.reconnect] - Reconnection options
-   * @param {boolean} [options.reconnect.enabled=true] - Enable auto-reconnection
-   * @param {number} [options.reconnect.maxAttempts=10] - Max reconnection attempts
-   * @param {number} [options.reconnect.initialDelay=1000] - Initial delay before reconnect (ms)
-   * @param {number} [options.reconnect.maxDelay=30000] - Maximum delay between reconnects (ms)
-   * @param {number} [options.reconnect.backoffFactor=2] - Exponential backoff multiplier
    */
-  constructor(options = {}) {
+  constructor(options: HedgeDocClientOptions) {
     super();
     
     if (!options.serverUrl) {
@@ -79,9 +262,7 @@ export class HedgeDocClient extends EventEmitter {
     this._operationTimeout = null;
     this._operationTimeoutMs = options.operationTimeout || 5000;
 
-    // ============================================
     // Rate Limiting
-    // ============================================
     this._rateLimit = {
       minInterval: options.rateLimit?.minInterval ?? 50,
       maxBurst: options.rateLimit?.maxBurst ?? 10,
@@ -89,13 +270,11 @@ export class HedgeDocClient extends EventEmitter {
       enabled: options.rateLimit?.enabled ?? true
     };
     this._lastOperationTime = 0;
-    this._operationTimes = []; // Timestamps for burst detection
-    this._operationQueue = []; // Queue for rate-limited operations
+    this._operationTimes = [];
+    this._operationQueue = [];
     this._processingQueue = false;
 
-    // ============================================
     // Reconnection Handling
-    // ============================================
     this._reconnect = {
       enabled: options.reconnect?.enabled ?? true,
       maxAttempts: options.reconnect?.maxAttempts ?? 10,
@@ -108,55 +287,44 @@ export class HedgeDocClient extends EventEmitter {
     this._intentionalDisconnect = false;
     this._pendingOperationsDuringDisconnect = [];
 
-    // ============================================
     // Batch Operations
-    // ============================================
     this._batchMode = false;
     this._batchOperations = [];
 
-    // ============================================
     // Undo/Redo Stack
-    // ============================================
     this._undoStack = [];
     this._redoStack = [];
     this._undoMaxSize = options.undoMaxSize ?? 100;
     this._trackUndo = options.trackUndo ?? true;
     this._lastUndoTimestamp = 0;
-    this._undoGroupInterval = options.undoGroupInterval ?? 500; // Group rapid edits
+    this._undoGroupInterval = options.undoGroupInterval ?? 500;
   }
 
   /**
    * Check if the current user can edit the note based on permissions
-   * @returns {boolean} True if the user can edit
    */
-  canEdit() {
+  canEdit(): boolean {
     const permission = this.noteInfo.permission;
     
     switch (permission) {
       case 'freely':
-        // Anyone can edit
         return true;
       case 'editable':
       case 'limited':
-        // Only logged-in users can edit
         return this._isLoggedIn;
       case 'locked':
       case 'private':
       case 'protected':
-        // Only owner can edit - we can't easily check this without knowing our user ID
-        // For safety, assume we can't edit unless logged in
         return this._isLoggedIn;
       default:
-        // Unknown permission, be conservative
         return false;
     }
   }
 
   /**
    * Get a human-readable explanation of why editing is not allowed
-   * @returns {string|null} Error message or null if editing is allowed
    */
-  _getPermissionError() {
+  private _getPermissionError(): string | null {
     const permission = this.noteInfo.permission;
     
     if (this.canEdit()) {
@@ -178,15 +346,12 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Fetch a session cookie from the HedgeDoc server
-   * HedgeDoc requires a valid session cookie even for anonymous access
-   * @returns {Promise<string>} The session cookie
    */
-  async _getSessionCookie() {
+  private async _getSessionCookie(): Promise<string> {
     if (this.cookie) {
       return this.cookie;
     }
 
-    // Make a request to the note page to get a session cookie
     const response = await fetch(`${this.serverUrl}/${this.noteId}`, {
       method: 'GET',
       redirect: 'manual',
@@ -195,22 +360,18 @@ export class HedgeDocClient extends EventEmitter {
       }
     });
 
-    // Extract set-cookie header using getSetCookie (Node.js 18+)
-    let cookies = [];
-    if (response.headers.getSetCookie) {
-      cookies = response.headers.getSetCookie();
+    let cookies: string[] = [];
+    if ((response.headers as any).getSetCookie) {
+      cookies = (response.headers as any).getSetCookie();
     } else {
-      // Fallback for older Node.js
       const setCookie = response.headers.get('set-cookie');
       if (setCookie) {
         cookies = [setCookie];
       }
     }
 
-    // Parse the cookies - we need the session cookie (usually 'connect.sid')
-    const sessionCookies = [];
+    const sessionCookies: string[] = [];
     for (const cookie of cookies) {
-      // Get just the cookie name=value part (before any attributes like Path, HttpOnly)
       const cookiePart = cookie.split(';')[0];
       if (cookiePart) {
         sessionCookies.push(cookiePart);
@@ -227,9 +388,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Connect to the HedgeDoc server
-   * @returns {Promise<void>} Resolves when connected and document is received
    */
-  connect() {
+  connect(): Promise<void> {
     this._intentionalDisconnect = false;
     this._reconnectAttempts = 0;
     
@@ -244,11 +404,12 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Internal connection logic (supports reconnection)
-   * @private
    */
-  async _doConnect(resolve, reject) {
+  private async _doConnect(
+    resolve: (() => void) | null, 
+    reject: ((error: Error) => void) | null
+  ): Promise<void> {
     try {
-      // First, get a session cookie if we don't have one
       const cookie = await this._getSessionCookie();
       
       // Detect if we're running in Bun
@@ -258,14 +419,11 @@ export class HedgeDocClient extends EventEmitter {
         query: {
           noteId: this.noteId
         },
-        // Bun doesn't support XHR polling well, use websocket only
-        // Node.js/browsers can use polling first for better auth handling
-        transports: isBun ? ['websocket'] : ['polling', 'websocket'],
+        transports: isBun ? ['websocket'] as ('websocket')[] : ['polling', 'websocket'] as ('polling' | 'websocket')[],
         withCredentials: true,
         extraHeaders: {
           Cookie: cookie
         },
-        // Disable socket.io's built-in reconnection, we handle it ourselves
         reconnection: false
       };
 
@@ -274,51 +432,45 @@ export class HedgeDocClient extends EventEmitter {
       // Connection events
       this.socket.on('connect', () => {
         this.connected = true;
-        this._reconnectAttempts = 0; // Reset on successful connect
+        this._reconnectAttempts = 0;
         this.emit('connect');
         
-        // Replay any operations that were queued during disconnect
         if (this._pendingOperationsDuringDisconnect.length > 0) {
           this.emit('reconnect:replaying', this._pendingOperationsDuringDisconnect.length);
-          // Operations will be resent when we receive 'doc' event
         }
       });
 
-      this.socket.on('disconnect', (reason) => {
+      this.socket.on('disconnect', (reason: string) => {
         const wasReady = this.ready;
         this.connected = false;
         this.ready = false;
         this.emit('disconnect', reason);
         
-        // Handle reconnection
         if (!this._intentionalDisconnect && this._reconnect.enabled && wasReady) {
           this._scheduleReconnect();
         }
       });
 
-      this.socket.on('connect_error', (error) => {
-        if (!this.ready) {
-          // Initial connection failed
+      this.socket.on('connect_error', (error: Error) => {
+        if (!this.ready && reject) {
           reject(error);
+          reject = null;
         }
         this.emit('error', error);
         
-        // Try to reconnect if enabled
         if (!this._intentionalDisconnect && this._reconnect.enabled) {
           this._scheduleReconnect();
         }
       });
 
-      // Document received - this is when we're fully initialized
-      this.socket.on('doc', (data) => {
+      this.socket.on('doc', (data: DocData) => {
         this._handleDoc(data);
-        // Request note info immediately to get permissions
-        this.socket.emit('refresh');
+        this.socket!.emit('refresh');
         this.ready = true;
         
         if (resolve) {
           resolve();
-          resolve = null; // Only resolve once
+          resolve = null;
         }
         
         this.emit('ready', {
@@ -326,23 +478,19 @@ export class HedgeDocClient extends EventEmitter {
           revision: this.revision
         });
         
-        // Clear any pending operations from disconnect
         this._pendingOperationsDuringDisconnect = [];
       });
 
-      // Server info/error messages
-      this.socket.on('info', (data) => {
+      this.socket.on('info', (data: InfoData) => {
         if (data.code === 403) {
-          const error = new Error('Access forbidden');
-          error.code = 403;
+          const error = new HedgeDocError('Access forbidden', 403);
           if (reject) {
             reject(error);
             reject = null;
           }
           this.emit('error', error);
         } else if (data.code === 404) {
-          const error = new Error('Note not found');
-          error.code = 404;
+          const error = new HedgeDocError('Note not found', 404);
           if (reject) {
             reject(error);
             reject = null;
@@ -353,80 +501,73 @@ export class HedgeDocClient extends EventEmitter {
         }
       });
 
-      // Note metadata refresh
-      this.socket.on('refresh', (data) => {
+      this.socket.on('refresh', (data: RefreshData) => {
         this._handleRefresh(data);
       });
 
-      // OT events
-      this.socket.on('ack', (revision) => {
+      this.socket.on('ack', (revision: number) => {
         this._handleAck(revision);
       });
 
-      this.socket.on('operation', (clientId, revision, operation, selection) => {
+      this.socket.on('operation', (clientId: string, revision: number, operation: OperationJSON, selection: unknown) => {
         this._handleOperation(clientId, revision, operation, selection);
       });
 
-      this.socket.on('operations', (head, operations) => {
+      this.socket.on('operations', (head: number, operations: OperationJSON[]) => {
         this._handleOperations(head, operations);
       });
 
-      // User events
-      this.socket.on('online users', (data) => {
+      this.socket.on('online users', (data: { users?: UserInfo[] }) => {
         this._handleOnlineUsers(data);
       });
 
-      this.socket.on('user status', (user) => {
+      this.socket.on('user status', (user: UserInfo) => {
         this._handleUserStatus(user);
       });
 
-      this.socket.on('cursor focus', (user) => {
+      this.socket.on('cursor focus', (user: unknown) => {
         this.emit('cursor:focus', user);
       });
 
-      this.socket.on('cursor activity', (user) => {
+      this.socket.on('cursor activity', (user: unknown) => {
         this.emit('cursor:activity', user);
       });
 
-      this.socket.on('cursor blur', (data) => {
+      this.socket.on('cursor blur', (data: unknown) => {
         this.emit('cursor:blur', data);
       });
 
-      this.socket.on('client_left', (clientId) => {
+      this.socket.on('client_left', (clientId: string) => {
         this.users.delete(clientId);
         this.emit('user:left', clientId);
       });
 
-      // Permission changes
-      this.socket.on('permission', (data) => {
+      this.socket.on('permission', (data: { permission: string }) => {
         this.noteInfo.permission = data.permission;
         this.emit('permission', data.permission);
       });
 
-      // Note deleted
       this.socket.on('delete', () => {
         this.emit('delete');
         this.disconnect();
       });
 
-      // Version info
-      this.socket.on('version', (data) => {
+      this.socket.on('version', (data: unknown) => {
         this.emit('version', data);
       });
       
     } catch (error) {
-      if (reject) reject(error);
+      if (reject) reject(error as Error);
       else throw error;
     }
   }
 
   /**
    * Schedule a reconnection attempt with exponential backoff
-   * @private
    */
-  _scheduleReconnect() {
+  private _scheduleReconnect(): void {
     if (this._reconnectTimer) {
-      return; // Already scheduled
+      return;
     }
     
     if (this._reconnectAttempts >= this._reconnect.maxAttempts) {
@@ -459,14 +600,12 @@ export class HedgeDocClient extends EventEmitter {
       });
       
       try {
-        // Clean up old socket
         if (this.socket) {
           this.socket.removeAllListeners();
           this.socket.disconnect();
           this.socket = null;
         }
         
-        // Try to reconnect
         await this._doConnect(
           () => this.emit('reconnect:success', { attempts: this._reconnectAttempts }),
           (error) => {
@@ -487,9 +626,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Cancel any pending reconnection attempt
-   * @private
    */
-  _cancelReconnect() {
+  private _cancelReconnect(): void {
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -498,9 +636,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Disconnect from the server
-   * @param {boolean} [intentional=true] - Whether this is an intentional disconnect
    */
-  disconnect(intentional = true) {
+  disconnect(intentional: boolean = true): void {
     this._intentionalDisconnect = intentional;
     this._cancelReconnect();
     
@@ -514,59 +651,41 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get the current document content
-   * @returns {string} The document content
    */
-  getDocument() {
+  getDocument(): string {
     return this.document;
   }
 
   /**
    * Get the current revision number
-   * @returns {number} The revision number
    */
-  getRevision() {
+  getRevision(): number {
     return this.revision;
   }
 
   /**
    * Get note information
-   * @returns {Object} Note metadata
    */
-  getNoteInfo() {
+  getNoteInfo(): NoteInfo {
     return { ...this.noteInfo };
   }
 
   /**
    * Get online users
-   * @returns {Array} Array of online users
    */
-  getOnlineUsers() {
+  getOnlineUsers(): UserInfo[] {
     return Array.from(this.users.values());
   }
 
   /**
    * Get document content with authorship information
-   * Returns the document along with information about who wrote each part.
-   * 
-   * @returns {Object} Object containing:
-   *   - content: The full document text
-   *   - authors: Object mapping userId to author profile (name, color, photo)
-   *   - authorship: Array of authorship spans, each containing:
-   *     - userId: The author's user ID (null for anonymous)
-   *     - start: Start position in document
-   *     - end: End position in document
-   *     - text: The actual text in this span
-   *     - author: The author's profile (name, color, photo) or null
-   *     - createdAt: When this span was created
-   *     - updatedAt: When this span was last modified
    */
-  getDocumentWithAuthorship() {
+  getDocumentWithAuthorship(): DocumentWithAuthorship {
     const content = this.document;
     const authors = this.noteInfo.authors || {};
     const rawAuthorship = this.noteInfo.authorship || [];
     
-    // Transform authorship into a more useful format
-    const authorship = rawAuthorship.map(([userId, start, end, createdAt, updatedAt]) => ({
+    const authorship: AuthorshipSpan[] = rawAuthorship.map(([userId, start, end, createdAt, updatedAt]) => ({
       userId: userId || null,
       start,
       end,
@@ -580,15 +699,13 @@ export class HedgeDocClient extends EventEmitter {
       content,
       authors,
       authorship,
-      // Helper: get text by author
-      getTextByAuthor: (authorId) => {
+      getTextByAuthor: (authorId: string) => {
         return authorship
           .filter(span => span.userId === authorId)
           .map(span => span.text)
           .join('');
       },
-      // Helper: get author at position
-      getAuthorAtPosition: (position) => {
+      getAuthorAtPosition: (position: number) => {
         for (const span of authorship) {
           if (position >= span.start && position < span.end) {
             return span.author;
@@ -601,9 +718,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get authors who have contributed to this document
-   * @returns {Array} Array of author objects with userId, name, color, photo
    */
-  getAuthors() {
+  getAuthors(): AuthorEntry[] {
     const authors = this.noteInfo.authors || {};
     return Object.entries(authors).map(([userId, profile]) => ({
       userId,
@@ -615,11 +731,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Insert text at a position
-   * @param {number} position - Position to insert at
-   * @param {string} text - Text to insert
-   * @throws {Error} If client not ready, position invalid, or no write permission
    */
-  insert(position, text) {
+  insert(position: number, text: string): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -645,11 +758,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Delete text at a position
-   * @param {number} position - Start position
-   * @param {number} length - Number of characters to delete
-   * @throws {Error} If client not ready, position invalid, or no write permission
    */
-  delete(position, length) {
+  delete(position: number, length: number): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -676,12 +786,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Replace text in a range
-   * @param {number} position - Start position
-   * @param {number} length - Number of characters to replace
-   * @param {string} text - Replacement text
-   * @throws {Error} If client not ready, position invalid, or no write permission
    */
-  replace(position, length, text) {
+  replace(position: number, length: number, text: string): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -712,10 +818,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Set the entire document content
-   * @param {string} content - New document content
-   * @throws {Error} If client not ready or no write permission
    */
-  setContent(content) {
+  setContent(content: string): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -737,10 +841,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Apply a raw TextOperation
-   * @param {TextOperation} operation - The operation to apply
-   * @throws {Error} If client not ready or no write permission
    */
-  applyOperation(operation) {
+  applyOperation(operation: TextOperation): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -757,12 +859,11 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Replace all matches of a pattern with a replacement string
-   * @param {RegExp|string} pattern - Pattern to match (string or RegExp)
-   * @param {string|Function} replacement - Replacement string or function
-   * @returns {number} Number of replacements made
-   * @throws {Error} If client not ready or no write permission
    */
-  replaceRegex(pattern, replacement) {
+  replaceRegex(
+    pattern: RegExp | string, 
+    replacement: string | ((match: string, ...args: unknown[]) => string)
+  ): number {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -774,12 +875,17 @@ export class HedgeDocClient extends EventEmitter {
     const doc = this.document;
     const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, 'g');
     
-    // Ensure global flag for counting all matches
     const globalRegex = regex.global ? regex : new RegExp(regex.source, regex.flags + 'g');
     
-    // Find all matches with their positions
-    const matches = [];
-    let match;
+    interface MatchInfo {
+      index: number;
+      length: number;
+      match: string;
+      groups: string[];
+    }
+    
+    const matches: MatchInfo[] = [];
+    let match: RegExpExecArray | null;
     while ((match = globalRegex.exec(doc)) !== null) {
       matches.push({
         index: match.index,
@@ -793,16 +899,14 @@ export class HedgeDocClient extends EventEmitter {
       return 0;
     }
 
-    // Apply replacements from end to start to preserve positions
     for (let i = matches.length - 1; i >= 0; i--) {
       const m = matches[i];
-      let replaceText;
+      let replaceText: string;
       
       if (typeof replacement === 'function') {
         replaceText = replacement(m.match, ...m.groups, m.index, doc);
       } else {
-        // Handle $1, $2, etc. in replacement string
-        replaceText = replacement.replace(/\$(\d+)/g, (_, n) => m.groups[n - 1] || '');
+        replaceText = replacement.replace(/\$(\d+)/g, (_, n) => m.groups[parseInt(n) - 1] || '');
         replaceText = replaceText.replace(/\$&/g, m.match);
       }
       
@@ -814,11 +918,11 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Replace the first match of a pattern
-   * @param {RegExp|string} pattern - Pattern to match
-   * @param {string|Function} replacement - Replacement string or function
-   * @returns {boolean} True if a replacement was made
    */
-  replaceFirst(pattern, replacement) {
+  replaceFirst(
+    pattern: RegExp | string, 
+    replacement: string | ((match: string, ...args: unknown[]) => string)
+  ): boolean {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -831,15 +935,15 @@ export class HedgeDocClient extends EventEmitter {
     const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
     const match = doc.match(regex);
     
-    if (!match) {
+    if (!match || match.index === undefined) {
       return false;
     }
     
-    let replaceText;
+    let replaceText: string;
     if (typeof replacement === 'function') {
       replaceText = replacement(match[0], ...match.slice(1), match.index, doc);
     } else {
-      replaceText = replacement.replace(/\$(\d+)/g, (_, n) => match[n] || '');
+      replaceText = replacement.replace(/\$(\d+)/g, (_, n) => match[parseInt(n)] || '');
       replaceText = replaceText.replace(/\$&/g, match[0]);
     }
     
@@ -853,18 +957,15 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get the document split into lines
-   * @returns {string[]} Array of lines (without line endings)
    */
-  getLines() {
+  getLines(): string[] {
     return this.document.split('\n');
   }
 
   /**
    * Get a specific line (0-indexed)
-   * @param {number} lineNum - Line number (0-indexed)
-   * @returns {string|null} Line content or null if out of bounds
    */
-  getLine(lineNum) {
+  getLine(lineNum: number): string | null {
     const lines = this.getLines();
     if (lineNum < 0 || lineNum >= lines.length) {
       return null;
@@ -874,62 +975,52 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get the number of lines in the document
-   * @returns {number} Number of lines
    */
-  getLineCount() {
+  getLineCount(): number {
     return this.getLines().length;
   }
 
   /**
    * Get the character position where a line starts
-   * @param {number} lineNum - Line number (0-indexed)
-   * @returns {number} Character position, or -1 if out of bounds
    */
-  getLineStart(lineNum) {
+  getLineStart(lineNum: number): number {
     if (lineNum < 0) return -1;
     const lines = this.getLines();
     if (lineNum >= lines.length) return -1;
     
     let pos = 0;
     for (let i = 0; i < lineNum; i++) {
-      pos += lines[i].length + 1; // +1 for newline
+      pos += lines[i].length + 1;
     }
     return pos;
   }
 
   /**
    * Get the character position where a line ends (before newline)
-   * @param {number} lineNum - Line number (0-indexed)
-   * @returns {number} Character position, or -1 if out of bounds
    */
-  getLineEnd(lineNum) {
+  getLineEnd(lineNum: number): number {
     const start = this.getLineStart(lineNum);
     if (start === -1) return -1;
     const line = this.getLine(lineNum);
-    return start + line.length;
+    return start + (line?.length || 0);
   }
 
   /**
    * Replace the content of a specific line
-   * @param {number} lineNum - Line number (0-indexed)
-   * @param {string} content - New line content (without newline)
-   * @throws {Error} If line number out of bounds
    */
-  setLine(lineNum, content) {
+  setLine(lineNum: number, content: string): void {
     const start = this.getLineStart(lineNum);
     if (start === -1) {
       throw new Error(`Line ${lineNum} out of bounds`);
     }
     const oldLine = this.getLine(lineNum);
-    this.replace(start, oldLine.length, content);
+    this.replace(start, oldLine?.length || 0, content);
   }
 
   /**
    * Insert a new line at the specified position
-   * @param {number} lineNum - Line number to insert at (0-indexed)
-   * @param {string} content - Line content (without newline)
    */
-  insertLine(lineNum, content) {
+  insertLine(lineNum: number, content: string): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -941,13 +1032,10 @@ export class HedgeDocClient extends EventEmitter {
     const lines = this.getLines();
     
     if (lineNum <= 0) {
-      // Insert at beginning
       this.insert(0, content + '\n');
     } else if (lineNum >= lines.length) {
-      // Insert at end
       this.insert(this.document.length, '\n' + content);
     } else {
-      // Insert in middle
       const pos = this.getLineStart(lineNum);
       this.insert(pos, content + '\n');
     }
@@ -955,10 +1043,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Delete a specific line
-   * @param {number} lineNum - Line number to delete (0-indexed)
-   * @throws {Error} If line number out of bounds
    */
-  deleteLine(lineNum) {
+  deleteLine(lineNum: number): void {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -976,24 +1062,21 @@ export class HedgeDocClient extends EventEmitter {
     const line = lines[lineNum];
     
     if (lines.length === 1) {
-      // Only line - just clear it
       this.delete(0, line.length);
     } else if (lineNum === lines.length - 1) {
-      // Last line - delete including preceding newline
       this.delete(start - 1, line.length + 1);
     } else {
-      // Middle or first line - delete including trailing newline
       this.delete(start, line.length + 1);
     }
   }
 
   /**
    * Replace lines matching a pattern
-   * @param {RegExp|string} pattern - Pattern to match against line content
-   * @param {string|Function} replacement - Replacement string or function(line, lineNum, match)
-   * @returns {number} Number of lines replaced
    */
-  replaceLines(pattern, replacement) {
+  replaceLines(
+    pattern: RegExp | string, 
+    replacement: string | ((line: string, lineNum: number, match: RegExpMatchArray) => string)
+  ): number {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -1006,11 +1089,10 @@ export class HedgeDocClient extends EventEmitter {
     const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
     let count = 0;
     
-    // Process from end to start to preserve line numbers
     for (let i = lines.length - 1; i >= 0; i--) {
       const match = lines[i].match(regex);
       if (match) {
-        let newContent;
+        let newContent: string;
         if (typeof replacement === 'function') {
           newContent = replacement(lines[i], i, match);
         } else {
@@ -1030,11 +1112,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Update document content using minimal diff operations
-   * More efficient than setContent for small changes
-   * @param {string} newContent - New document content
-   * @returns {number} Number of operations applied
    */
-  updateContent(newContent) {
+  updateContent(newContent: string): number {
     if (!this.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
@@ -1048,7 +1127,6 @@ export class HedgeDocClient extends EventEmitter {
       return 0;
     }
 
-    // Simple diff: find common prefix and suffix
     let prefixLen = 0;
     const minLen = Math.min(oldContent.length, newContent.length);
     
@@ -1078,7 +1156,7 @@ export class HedgeDocClient extends EventEmitter {
   /**
    * Request a refresh of note metadata
    */
-  refresh() {
+  refresh(): void {
     if (this.socket && this.connected) {
       this.socket.emit('refresh');
     }
@@ -1087,7 +1165,7 @@ export class HedgeDocClient extends EventEmitter {
   /**
    * Request online users
    */
-  requestOnlineUsers() {
+  requestOnlineUsers(): void {
     if (this.socket && this.connected) {
       this.socket.emit('online users');
     }
@@ -1096,7 +1174,7 @@ export class HedgeDocClient extends EventEmitter {
   /**
    * Request version info
    */
-  requestVersion() {
+  requestVersion(): void {
     if (this.socket && this.connected) {
       this.socket.emit('version');
     }
@@ -1108,28 +1186,22 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Enable or disable rate limiting
-   * @param {boolean} enabled
    */
-  setRateLimitEnabled(enabled) {
+  setRateLimitEnabled(enabled: boolean): void {
     this._rateLimit.enabled = enabled;
   }
 
   /**
    * Check if rate limiting is enabled
-   * @returns {boolean}
    */
-  isRateLimitEnabled() {
+  isRateLimitEnabled(): boolean {
     return this._rateLimit.enabled;
   }
 
   /**
    * Configure rate limiting
-   * @param {Object} options
-   * @param {number} [options.minInterval] - Minimum ms between operations
-   * @param {number} [options.maxBurst] - Max operations in burst window
-   * @param {number} [options.burstWindow] - Burst window in ms
    */
-  configureRateLimit(options) {
+  configureRateLimit(options: Partial<RateLimitConfig>): void {
     if (options.minInterval !== undefined) {
       this._rateLimit.minInterval = options.minInterval;
     }
@@ -1143,17 +1215,15 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get the current rate limit configuration
-   * @returns {Object}
    */
-  getRateLimitConfig() {
+  getRateLimitConfig(): Required<RateLimitConfig> {
     return { ...this._rateLimit };
   }
 
   /**
    * Get the number of operations currently queued
-   * @returns {number}
    */
-  getQueuedOperationCount() {
+  getQueuedOperationCount(): number {
     return this._operationQueue.length;
   }
 
@@ -1163,9 +1233,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Enable or disable auto-reconnection
-   * @param {boolean} enabled
    */
-  setReconnectEnabled(enabled) {
+  setReconnectEnabled(enabled: boolean): void {
     this._reconnect.enabled = enabled;
     if (!enabled) {
       this._cancelReconnect();
@@ -1174,21 +1243,15 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Check if auto-reconnection is enabled
-   * @returns {boolean}
    */
-  isReconnectEnabled() {
+  isReconnectEnabled(): boolean {
     return this._reconnect.enabled;
   }
 
   /**
    * Configure reconnection
-   * @param {Object} options
-   * @param {number} [options.maxAttempts] - Maximum reconnection attempts
-   * @param {number} [options.initialDelay] - Initial delay in ms
-   * @param {number} [options.maxDelay] - Maximum delay in ms
-   * @param {number} [options.backoffFactor] - Backoff multiplier
    */
-  configureReconnect(options) {
+  configureReconnect(options: Partial<ReconnectConfig>): void {
     if (options.maxAttempts !== undefined) {
       this._reconnect.maxAttempts = options.maxAttempts;
     }
@@ -1205,9 +1268,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Get the current reconnection configuration
-   * @returns {Object}
    */
-  getReconnectConfig() {
+  getReconnectConfig(): Required<ReconnectConfig> & { attempts: number; scheduled: boolean } {
     return {
       ...this._reconnect,
       attempts: this._reconnectAttempts,
@@ -1217,13 +1279,11 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Manually trigger a reconnection
-   * @returns {Promise<void>}
    */
-  async reconnect() {
+  async reconnect(): Promise<void> {
     this._intentionalDisconnect = false;
     this._reconnectAttempts = 0;
     
-    // Disconnect first if connected
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -1232,29 +1292,28 @@ export class HedgeDocClient extends EventEmitter {
     return this.connect();
   }
 
-  // Private methods
+  // ============================================
+  // Private Event Handlers
+  // ============================================
 
-  _handleDoc(data) {
+  private _handleDoc(data: DocData): void {
     this.document = data.str || '';
     this.revision = data.revision || 0;
     
-    // Initialize OT client
     this.otClient = new OTClientImpl(this, this.revision);
     
-    // Process existing clients
     if (data.clients) {
       for (const [id, user] of Object.entries(data.clients)) {
         this.users.set(id, user);
       }
     }
     
-    // If force refresh, emit document change
     if (data.force) {
       this.emit('document', this.document);
     }
   }
 
-  _handleRefresh(data) {
+  private _handleRefresh(data: RefreshData): void {
     this.noteInfo = {
       title: data.title || '',
       permission: data.permission || '',
@@ -1271,26 +1330,26 @@ export class HedgeDocClient extends EventEmitter {
     this.emit('refresh', this.noteInfo);
   }
 
-  _handleAck(revision) {
+  private _handleAck(revision: number): void {
     if (this.otClient) {
       this.otClient.serverAck(revision);
     }
   }
 
-  _handleOperation(clientId, revision, operation, selection) {
+  private _handleOperation(clientId: string, revision: number, operation: OperationJSON, selection: unknown): void {
     if (this.otClient) {
       const op = TextOperation.fromJSON(operation);
       this.otClient.applyServer(revision, op);
     }
   }
 
-  _handleOperations(head, operations) {
+  private _handleOperations(head: number, operations: OperationJSON[]): void {
     if (this.otClient) {
       this.otClient.applyOperations(head, operations);
     }
   }
 
-  _handleOnlineUsers(data) {
+  private _handleOnlineUsers(data: { users?: UserInfo[] }): void {
     this.users.clear();
     if (data.users) {
       for (const user of data.users) {
@@ -1300,7 +1359,7 @@ export class HedgeDocClient extends EventEmitter {
     this.emit('users', this.getOnlineUsers());
   }
 
-  _handleUserStatus(user) {
+  private _handleUserStatus(user: UserInfo): void {
     if (user && user.id) {
       this.users.set(user.id, user);
       this.emit('user:status', user);
@@ -1313,22 +1372,18 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Check if we're within rate limits
-   * @returns {boolean} True if operation can proceed
-   * @private
    */
-  _checkRateLimit() {
+  private _checkRateLimit(): boolean {
     if (!this._rateLimit.enabled) {
       return true;
     }
     
     const now = Date.now();
     
-    // Check minimum interval
     if (now - this._lastOperationTime < this._rateLimit.minInterval) {
       return false;
     }
     
-    // Check burst limit
     const windowStart = now - this._rateLimit.burstWindow;
     this._operationTimes = this._operationTimes.filter(t => t > windowStart);
     
@@ -1341,9 +1396,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Record an operation for rate limiting
-   * @private
    */
-  _recordOperation() {
+  private _recordOperation(): void {
     const now = Date.now();
     this._lastOperationTime = now;
     this._operationTimes.push(now);
@@ -1351,9 +1405,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Process the operation queue
-   * @private
    */
-  async _processOperationQueue() {
+  private async _processOperationQueue(): Promise<void> {
     if (this._processingQueue || this._operationQueue.length === 0) {
       return;
     }
@@ -1362,18 +1415,14 @@ export class HedgeDocClient extends EventEmitter {
     
     while (this._operationQueue.length > 0) {
       if (!this._checkRateLimit()) {
-        // Wait until we can send
         const waitTime = this._rateLimit.minInterval - (Date.now() - this._lastOperationTime);
         await new Promise(resolve => setTimeout(resolve, Math.max(waitTime, 10)));
         continue;
       }
       
-      const operation = this._operationQueue.shift();
+      const operation = this._operationQueue.shift()!;
       
-      // Verify the operation is still valid for the current document
       if (operation.baseLength !== this.document.length) {
-        // Operation is stale - skip it
-        // This can happen if remote operations came in while this was queued
         console.error(`Skipping stale operation: baseLength ${operation.baseLength} != doc length ${this.document.length}`);
         continue;
       }
@@ -1386,22 +1435,17 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Execute an operation immediately
-   * @private
    */
-  _executeOperation(operation) {
-    // Apply locally
+  private _executeOperation(operation: TextOperation): void {
     const oldDocument = this.document;
     this.document = operation.apply(this.document);
     
-    // Track for undo
     if (this._trackUndo) {
       this._pushUndo(operation, oldDocument);
     }
     
-    // Record for rate limiting
     this._recordOperation();
     
-    // Send to server via OT client
     if (this.otClient) {
       this.otClient.applyClient(operation);
     }
@@ -1410,21 +1454,18 @@ export class HedgeDocClient extends EventEmitter {
     this.emit('change', { type: 'local', operation });
   }
 
-  _applyClientOperation(operation) {
-    // If in batch mode, queue the operation
+  private _applyClientOperation(operation: TextOperation): void {
     if (this._batchMode) {
       this._batchOperations.push(operation);
       return;
     }
     
-    // If rate limiting is enabled and we're over limit, queue it
     if (this._rateLimit.enabled && !this._checkRateLimit()) {
       this._operationQueue.push(operation);
       this._processOperationQueue();
       return;
     }
     
-    // Execute immediately
     this._executeOperation(operation);
   }
 
@@ -1434,10 +1475,8 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Start a batch of operations that will be applied together
-   * Operations made during batch mode are queued and combined
-   * @returns {HedgeDocClient} this for chaining
    */
-  startBatch() {
+  startBatch(): HedgeDocClient {
     this._batchMode = true;
     this._batchOperations = [];
     return this;
@@ -1445,16 +1484,14 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * End the batch and apply all queued operations as one
-   * @returns {TextOperation|null} The combined operation, or null if empty
    */
-  endBatch() {
+  endBatch(): TextOperation | null {
     this._batchMode = false;
     
     if (this._batchOperations.length === 0) {
       return null;
     }
     
-    // Compose all operations into one
     let combined = this._batchOperations[0];
     for (let i = 1; i < this._batchOperations.length; i++) {
       combined = combined.compose(this._batchOperations[i]);
@@ -1462,7 +1499,6 @@ export class HedgeDocClient extends EventEmitter {
     
     this._batchOperations = [];
     
-    // Apply the combined operation
     this._executeOperation(combined);
     
     return combined;
@@ -1471,25 +1507,22 @@ export class HedgeDocClient extends EventEmitter {
   /**
    * Discard the current batch without applying
    */
-  cancelBatch() {
+  cancelBatch(): void {
     this._batchMode = false;
     this._batchOperations = [];
   }
 
   /**
    * Check if currently in batch mode
-   * @returns {boolean}
    */
-  isBatchMode() {
+  isBatchMode(): boolean {
     return this._batchMode;
   }
 
   /**
    * Execute a function within a batch
-   * @param {Function} fn - Function to execute
-   * @returns {TextOperation|null} The combined operation
    */
-  batch(fn) {
+  batch(fn: () => void): TextOperation | null {
     this.startBatch();
     try {
       fn();
@@ -1506,20 +1539,16 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Push an operation to the undo stack
-   * @private
    */
-  _pushUndo(operation, oldDocument) {
+  private _pushUndo(operation: TextOperation, oldDocument: string): void {
     const now = Date.now();
     
-    // Group rapid edits together
     if (this._undoStack.length > 0 && 
         now - this._lastUndoTimestamp < this._undoGroupInterval) {
-      // Compose with the last entry
       const last = this._undoStack[this._undoStack.length - 1];
       last.operation = last.operation.compose(operation);
       last.newDocument = this.document;
     } else {
-      // Create new undo entry
       this._undoStack.push({
         operation: operation,
         oldDocument: oldDocument,
@@ -1527,7 +1556,6 @@ export class HedgeDocClient extends EventEmitter {
         timestamp: now
       });
       
-      // Trim stack if too large
       while (this._undoStack.length > this._undoMaxSize) {
         this._undoStack.shift();
       }
@@ -1535,44 +1563,37 @@ export class HedgeDocClient extends EventEmitter {
     
     this._lastUndoTimestamp = now;
     
-    // Clear redo stack on new edit
     this._redoStack = [];
   }
 
   /**
    * Check if undo is available
-   * @returns {boolean}
    */
-  canUndo() {
+  canUndo(): boolean {
     return this._trackUndo && this._undoStack.length > 0;
   }
 
   /**
    * Check if redo is available
-   * @returns {boolean}
    */
-  canRedo() {
+  canRedo(): boolean {
     return this._trackUndo && this._redoStack.length > 0;
   }
 
   /**
    * Undo the last operation
-   * @returns {boolean} True if undo was performed
    */
-  undo() {
+  undo(): boolean {
     if (!this.canUndo()) {
       return false;
     }
     
-    const entry = this._undoStack.pop();
+    const entry = this._undoStack.pop()!;
     
-    // We need to revert to oldDocument
-    // Create an operation that does this
-    this._trackUndo = false; // Temporarily disable to avoid recursion
+    this._trackUndo = false;
     try {
       this.updateContent(entry.oldDocument);
       
-      // Push to redo stack
       this._redoStack.push({
         operation: entry.operation,
         oldDocument: entry.oldDocument,
@@ -1590,21 +1611,18 @@ export class HedgeDocClient extends EventEmitter {
 
   /**
    * Redo the last undone operation
-   * @returns {boolean} True if redo was performed
    */
-  redo() {
+  redo(): boolean {
     if (!this.canRedo()) {
       return false;
     }
     
-    const entry = this._redoStack.pop();
+    const entry = this._redoStack.pop()!;
     
-    // Apply the operation to get to newDocument
     this._trackUndo = false;
     try {
       this.updateContent(entry.newDocument);
       
-      // Push back to undo stack
       this._undoStack.push({
         operation: entry.operation,
         oldDocument: entry.oldDocument,
@@ -1623,62 +1641,58 @@ export class HedgeDocClient extends EventEmitter {
   /**
    * Clear the undo/redo history
    */
-  clearHistory() {
+  clearHistory(): void {
     this._undoStack = [];
     this._redoStack = [];
   }
 
   /**
    * Get the undo stack size
-   * @returns {number}
    */
-  getUndoStackSize() {
+  getUndoStackSize(): number {
     return this._undoStack.length;
   }
 
   /**
    * Get the redo stack size
-   * @returns {number}
    */
-  getRedoStackSize() {
+  getRedoStackSize(): number {
     return this._redoStack.length;
   }
 }
 
-/**
- * Internal OT client implementation that bridges to socket
- */
+// ===========================================
+// OTClientImpl - Internal OT client implementation
+// ===========================================
+
 class OTClientImpl extends OTClient {
-  constructor(hedgeDocClient, revision) {
+  hedgeDocClient: HedgeDocClient;
+
+  constructor(hedgeDocClient: HedgeDocClient, revision: number) {
     super(revision);
     this.hedgeDocClient = hedgeDocClient;
   }
 
-  sendOperation(revision, operation) {
+  sendOperation(revision: number, operation: TextOperation): void {
     if (this.hedgeDocClient.socket && this.hedgeDocClient.connected) {
       this.hedgeDocClient.socket.emit('operation', revision, operation.toJSON(), null);
     }
   }
 
-  applyOperation(operation) {
-    // Apply the server's operation to our document
+  applyOperation(operation: TextOperation): void {
     this.hedgeDocClient.document = operation.apply(this.hedgeDocClient.document);
     
-    // Transform any queued operations against this server operation
-    // This is critical - queued operations were created against the old document state
     if (this.hedgeDocClient._operationQueue && this.hedgeDocClient._operationQueue.length > 0) {
-      const transformedQueue = [];
+      const transformedQueue: TextOperation[] = [];
       let serverOp = operation;
       
       for (const queuedOp of this.hedgeDocClient._operationQueue) {
         try {
-          // Transform the queued operation against the server operation
           const [transformedQueued, transformedServer] = TextOperation.transform(queuedOp, serverOp);
           transformedQueue.push(transformedQueued);
           serverOp = transformedServer;
         } catch (err) {
-          // If transformation fails, skip this operation
-          console.error('Failed to transform queued operation:', err.message);
+          console.error('Failed to transform queued operation:', (err as Error).message);
         }
       }
       
@@ -1689,7 +1703,7 @@ class OTClientImpl extends OTClient {
     this.hedgeDocClient.emit('change', { type: 'remote', operation });
   }
 
-  getOperations(base, head) {
+  getOperations(base: number, head: number): void {
     if (this.hedgeDocClient.socket && this.hedgeDocClient.connected) {
       this.hedgeDocClient.socket.emit('get_operations', base, head);
     }

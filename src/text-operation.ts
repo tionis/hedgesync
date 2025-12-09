@@ -8,41 +8,61 @@
  * 
  * Based on the OT implementation from HedgeDoc.
  */
+
+/** A retain operation - skip over n characters (positive integer) */
+export type RetainOp = number;
+
+/** An insert operation - insert string at current position */
+export type InsertOp = string;
+
+/** A delete operation - delete n characters (negative integer) */
+export type DeleteOp = number;
+
+/** Any operation component */
+export type Operation = RetainOp | InsertOp | DeleteOp;
+
+/** JSON representation of a TextOperation */
+export type OperationJSON = Operation[];
+
 export class TextOperation {
+  /** Operations array - contains retain (positive int), insert (string), or delete (negative int) */
+  ops: Operation[];
+  /** Length of the document this operation can be applied to */
+  baseLength: number;
+  /** Length of the document after applying this operation */
+  targetLength: number;
+
   constructor() {
-    // Operations array - contains retain (positive int), insert (string), or delete (negative int)
     this.ops = [];
-    // Length of the document this operation can be applied to
     this.baseLength = 0;
-    // Length of the document after applying this operation
     this.targetLength = 0;
   }
 
   /**
    * Check if an operation component is a retain
    */
-  static isRetain(op) {
+  static isRetain(op: Operation | undefined): op is RetainOp {
     return typeof op === 'number' && op > 0;
   }
 
   /**
    * Check if an operation component is an insert
    */
-  static isInsert(op) {
+  static isInsert(op: Operation | undefined): op is InsertOp {
     return typeof op === 'string';
   }
 
   /**
    * Check if an operation component is a delete
    */
-  static isDelete(op) {
+  static isDelete(op: Operation | undefined): op is DeleteOp {
     return typeof op === 'number' && op < 0;
   }
 
   /**
    * Skip over n characters
    */
-  retain(n) {
+  retain(n: number): this {
     if (typeof n !== 'number') {
       throw new Error('retain expects an integer');
     }
@@ -51,9 +71,10 @@ export class TextOperation {
     this.baseLength += n;
     this.targetLength += n;
     
-    if (TextOperation.isRetain(this.ops[this.ops.length - 1])) {
+    const lastOp = this.ops[this.ops.length - 1];
+    if (TextOperation.isRetain(lastOp)) {
       // Merge with previous retain
-      this.ops[this.ops.length - 1] += n;
+      this.ops[this.ops.length - 1] = (lastOp as number) + n;
     } else {
       this.ops.push(n);
     }
@@ -63,7 +84,7 @@ export class TextOperation {
   /**
    * Insert a string at the current position
    */
-  insert(str) {
+  insert(str: string): this {
     if (typeof str !== 'string') {
       throw new Error('insert expects a string');
     }
@@ -72,13 +93,15 @@ export class TextOperation {
     this.targetLength += str.length;
     const ops = this.ops;
     
-    if (TextOperation.isInsert(ops[ops.length - 1])) {
+    const lastOp = ops[ops.length - 1];
+    if (TextOperation.isInsert(lastOp)) {
       // Merge with previous insert
-      ops[ops.length - 1] += str;
-    } else if (TextOperation.isDelete(ops[ops.length - 1])) {
+      ops[ops.length - 1] = lastOp + str;
+    } else if (TextOperation.isDelete(lastOp)) {
       // Insert before delete (canonical form)
-      if (TextOperation.isInsert(ops[ops.length - 2])) {
-        ops[ops.length - 2] += str;
+      const secondLastOp = ops[ops.length - 2];
+      if (TextOperation.isInsert(secondLastOp)) {
+        ops[ops.length - 2] = secondLastOp + str;
       } else {
         ops[ops.length] = ops[ops.length - 1];
         ops[ops.length - 2] = str;
@@ -92,7 +115,7 @@ export class TextOperation {
   /**
    * Delete n characters
    */
-  delete(n) {
+  delete(n: number | string): this {
     if (typeof n === 'string') n = n.length;
     if (typeof n !== 'number') {
       throw new Error('delete expects an integer or a string');
@@ -102,8 +125,9 @@ export class TextOperation {
     
     this.baseLength -= n;
     
-    if (TextOperation.isDelete(this.ops[this.ops.length - 1])) {
-      this.ops[this.ops.length - 1] += n;
+    const lastOp = this.ops[this.ops.length - 1];
+    if (TextOperation.isDelete(lastOp)) {
+      this.ops[this.ops.length - 1] = (lastOp as number) + n;
     } else {
       this.ops.push(n);
     }
@@ -113,7 +137,7 @@ export class TextOperation {
   /**
    * Check if this is a no-op
    */
-  isNoop() {
+  isNoop(): boolean {
     return this.ops.length === 0 || 
            (this.ops.length === 1 && TextOperation.isRetain(this.ops[0]));
   }
@@ -121,12 +145,12 @@ export class TextOperation {
   /**
    * Apply this operation to a string
    */
-  apply(str) {
+  apply(str: string): string {
     if (str.length !== this.baseLength) {
       throw new Error("The operation's base length must be equal to the string's length.");
     }
     
-    const newStr = [];
+    const newStr: string[] = [];
     let strIndex = 0;
     
     for (const op of this.ops) {
@@ -153,7 +177,7 @@ export class TextOperation {
   /**
    * Compose two operations into one
    */
-  compose(operation2) {
+  compose(operation2: TextOperation): TextOperation {
     if (this.targetLength !== operation2.baseLength) {
       throw new Error('The base length of the second operation has to be the target length of the first operation');
     }
@@ -161,8 +185,8 @@ export class TextOperation {
     const operation1 = this;
     const composed = new TextOperation();
     let i1 = 0, i2 = 0;
-    let op1 = operation1.ops[i1++];
-    let op2 = operation2.ops[i2++];
+    let op1: Operation | undefined = operation1.ops[i1++];
+    let op2: Operation | undefined = operation2.ops[i2++];
     
     while (typeof op1 !== 'undefined' || typeof op2 !== 'undefined') {
       if (TextOperation.isDelete(op1)) {
@@ -247,7 +271,7 @@ export class TextOperation {
    * Transform two operations that happened concurrently
    * Returns [op1', op2'] where applying op1 then op2' gives the same result as op2 then op1'
    */
-  static transform(operation1, operation2) {
+  static transform(operation1: TextOperation, operation2: TextOperation): [TextOperation, TextOperation] {
     if (operation1.baseLength !== operation2.baseLength) {
       throw new Error('Both operations have to have the same base length');
     }
@@ -255,8 +279,8 @@ export class TextOperation {
     const operation1prime = new TextOperation();
     const operation2prime = new TextOperation();
     let i1 = 0, i2 = 0;
-    let op1 = operation1.ops[i1++];
-    let op2 = operation2.ops[i2++];
+    let op1: Operation | undefined = operation1.ops[i1++];
+    let op2: Operation | undefined = operation2.ops[i2++];
     
     while (typeof op1 !== 'undefined' || typeof op2 !== 'undefined') {
       // Insert operations always go first
@@ -280,7 +304,7 @@ export class TextOperation {
         throw new Error('Cannot transform operations: first operation is too long.');
       }
 
-      let minl;
+      let minl: number;
       if (TextOperation.isRetain(op1) && TextOperation.isRetain(op2)) {
         // Both retain
         if (op1 > op2) {
@@ -351,19 +375,19 @@ export class TextOperation {
   /**
    * Convert to JSON (array of ops)
    */
-  toJSON() {
+  toJSON(): OperationJSON {
     return this.ops;
   }
 
   /**
    * Transform a position through an operation
    * Returns the new position after the operation is applied
-   * @param {number} position - The position to transform
-   * @param {TextOperation} operation - The operation to transform through
-   * @param {boolean} insertBefore - If true, inserts at the same position push position forward
-   * @returns {number} The transformed position
+   * @param position - The position to transform
+   * @param operation - The operation to transform through
+   * @param insertBefore - If true, inserts at the same position push position forward
+   * @returns The transformed position
    */
-  static transformPosition(position, operation, insertBefore = false) {
+  static transformPosition(position: number, operation: TextOperation, insertBefore: boolean = false): number {
     let pos = position;
     let index = 0;
     
@@ -392,7 +416,7 @@ export class TextOperation {
   /**
    * Create from JSON array
    */
-  static fromJSON(ops) {
+  static fromJSON(ops: OperationJSON): TextOperation {
     const o = new TextOperation();
     for (const op of ops) {
       if (TextOperation.isRetain(op)) {
@@ -411,7 +435,7 @@ export class TextOperation {
   /**
    * String representation for debugging
    */
-  toString() {
+  toString(): string {
     return this.ops.map(op => {
       if (TextOperation.isRetain(op)) {
         return `retain ${op}`;

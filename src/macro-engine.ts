@@ -5,30 +5,214 @@
  * patterns are detected.
  */
 
+import { TextOperation } from './text-operation.js';
+
+// Forward declaration for HedgeDocClient to avoid circular imports
+interface HedgeDocClientLike {
+  getDocument(): string;
+  replace(index: number, length: number, text: string): void;
+  delete(index: number, length: number): void;
+  insert(index: number, text: string): void;
+  on(event: string, handler: (...args: unknown[]) => void): void;
+  off(event: string, handler: (...args: unknown[]) => void): void;
+  isRateLimitEnabled(): boolean;
+  setRateLimitEnabled(enabled: boolean): void;
+}
+
+// ===========================================
+// Types
+// ===========================================
+
+/** Change event from HedgeDoc client */
+interface ChangeEvent {
+  type: 'local' | 'remote';
+  operation?: TextOperation;
+}
+
+/** Base macro definition */
+interface BaseMacro {
+  type: string;
+  pattern: RegExp;
+}
+
+/** Text macro definition */
+interface TextMacro extends BaseMacro {
+  type: 'text';
+  trigger: string;
+  replacement: (trigger: string) => string | Promise<string>;
+  wordBoundary: boolean;
+}
+
+/** Regex macro definition */
+interface RegexMacro extends BaseMacro {
+  type: 'regex';
+  name: string;
+  handler: (match: string, ...groups: string[]) => string | null | undefined | Promise<string | null | undefined>;
+}
+
+/** Template macro definition */
+interface TemplateMacro extends BaseMacro {
+  type: 'template';
+  name: string;
+  startDelim: string;
+  endDelim: string;
+  handler: (content: string) => string | null | undefined | Promise<string | null | undefined>;
+}
+
+/** Streaming exec macro callbacks */
+interface StreamingCallbacks {
+  onStart?: (match: string, position: number) => void;
+  onData?: (chunk: string, position: number) => void;
+  onEnd?: (exitCode: number, finalPosition: number) => void;
+  onError?: (error: Error) => void;
+}
+
+/** Streaming exec macro definition */
+interface StreamingMacro extends BaseMacro, StreamingCallbacks {
+  type: 'streaming';
+  name: string;
+  commandBuilder: (match: string, ...groups: string[]) => string | Promise<string>;
+  lineBuffered: boolean;
+}
+
+/** Union of all macro types */
+type Macro = TextMacro | RegexMacro | TemplateMacro | StreamingMacro;
+
+/** Match info from pattern matching */
+interface MatchInfo {
+  match: string;
+  groups: string[];
+  index: number;
+}
+
+/** Text macro match result */
+interface TextMacroMatch {
+  trigger: string;
+  replacement: string;
+  index: number;
+}
+
+/** Regex macro match result */
+interface RegexMacroMatch {
+  match: string;
+  replacement: string;
+  index: number;
+}
+
+/** Template macro match result */
+interface TemplateMacroMatch {
+  template: string;
+  content: string;
+  replacement: string;
+  index: number;
+}
+
+/** Streaming macro match result */
+interface StreamingMacroMatch {
+  match: string;
+  index: number;
+  streaming: boolean;
+}
+
+/** Match result union */
+type MacroMatch = TextMacroMatch | RegexMacroMatch | TemplateMacroMatch | StreamingMacroMatch;
+
+/** Result from applying a macro */
+interface MacroApplyResult {
+  changed: boolean;
+  matches: MacroMatch[];
+  document: string;
+}
+
+/** Expansion record */
+interface Expansion {
+  macro: string;
+  matches: MacroMatch[];
+}
+
+/** Streaming started record */
+interface StreamingStarted {
+  name: string;
+  match: string;
+  index: number;
+}
+
+/** Text macro options */
+interface TextMacroOptions {
+  wordBoundary?: boolean;
+}
+
+/** Streaming exec macro options */
+interface StreamingExecOptions extends StreamingCallbacks {
+  lineBuffered?: boolean;
+}
+
+/** Built-in date macro result */
+interface DateMacroResult {
+  trigger: string;
+  replacement: () => string;
+}
+
+/** Built-in UUID macro result */
+interface UuidMacroResult {
+  trigger: string;
+  replacement: () => string;
+}
+
+/** Built-in counter macro result */
+interface CounterMacroResult {
+  trigger: string;
+  replacement: () => string;
+}
+
+/** Built-in snippet macro result */
+interface SnippetMacroResult {
+  trigger: string;
+  replacement: () => string;
+}
+
+/** Macro info for listing */
+interface MacroInfo {
+  name: string;
+  type: string;
+  trigger?: string;
+  pattern: string;
+}
+
+// ===========================================
+// MacroEngine Class
+// ===========================================
+
 class MacroEngine {
+  client: HedgeDocClientLike;
+  macros: Map<string, Macro>;
+  enabled: boolean;
+  private _processing: boolean;
+  private _changeHandler: ((event: ChangeEvent) => Promise<void>) | null;
+  private _debounceTimer: ReturnType<typeof setTimeout> | null;
+  private _activeStreams: Set<Promise<void>>;
+
   /**
    * Create a MacroEngine
-   * @param {HedgeDocClient} client - The HedgeDocClient instance to attach to
    */
-  constructor(client) {
+  constructor(client: HedgeDocClientLike) {
     this.client = client;
     this.macros = new Map();
     this.enabled = true;
     this._processing = false;
     this._changeHandler = null;
     this._debounceTimer = null;
-    this._activeStreams = new Set(); // Track active streaming processes
+    this._activeStreams = new Set();
   }
 
   /**
    * Register a simple text replacement macro
-   * @param {string} trigger - The trigger text (e.g., "::date")
-   * @param {string|Function} replacement - Static text or function returning replacement
-   * @param {Object} options - Options
-   * @param {boolean} options.wordBoundary - Require word boundaries (default: true)
-   * @returns {MacroEngine} this for chaining
    */
-  addTextMacro(trigger, replacement, options = {}) {
+  addTextMacro(
+    trigger: string, 
+    replacement: string | ((trigger: string) => string | Promise<string>), 
+    options: TextMacroOptions = {}
+  ): MacroEngine {
     const { wordBoundary = true } = options;
     const escapedTrigger = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const pattern = wordBoundary 
@@ -48,12 +232,12 @@ class MacroEngine {
 
   /**
    * Register a regex-based macro
-   * @param {string} name - Unique name for this macro
-   * @param {RegExp} pattern - The pattern to match
-   * @param {Function} handler - Function(match, ...groups) returning replacement text
-   * @returns {MacroEngine} this for chaining
    */
-  addRegexMacro(name, pattern, handler) {
+  addRegexMacro(
+    name: string, 
+    pattern: RegExp, 
+    handler: (match: string, ...groups: string[]) => string | null | undefined | Promise<string | null | undefined>
+  ): MacroEngine {
     // Ensure the pattern has the global flag
     const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
     const globalPattern = new RegExp(pattern.source, flags);
@@ -70,13 +254,13 @@ class MacroEngine {
 
   /**
    * Register a template macro (e.g., {{templateName}} or ${expression})
-   * @param {string} name - Unique name for this macro type
-   * @param {string} startDelim - Start delimiter (e.g., "{{" or "${")
-   * @param {string} endDelim - End delimiter (e.g., "}}" or "}")
-   * @param {Function} handler - Function(content) returning replacement
-   * @returns {MacroEngine} this for chaining
    */
-  addTemplateMacro(name, startDelim, endDelim, handler) {
+  addTemplateMacro(
+    name: string, 
+    startDelim: string, 
+    endDelim: string, 
+    handler: (content: string) => string | null | undefined | Promise<string | null | undefined>
+  ): MacroEngine {
     const escapedStart = startDelim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const escapedEnd = endDelim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const pattern = new RegExp(`${escapedStart}([^${escapedEnd[0]}]+)${escapedEnd}`, 'g');
@@ -95,27 +279,20 @@ class MacroEngine {
 
   /**
    * Remove a macro by name/trigger
-   * @param {string} name - The macro name or trigger to remove
-   * @returns {boolean} true if removed
    */
-  removeMacro(name) {
+  removeMacro(name: string): boolean {
     return this.macros.delete(name);
   }
 
   /**
    * Register a streaming exec macro that streams command output into the document
-   * @param {string} name - Unique name for this macro
-   * @param {RegExp} pattern - The pattern to match
-   * @param {Function} commandBuilder - Function(match, ...groups) returning shell command string
-   * @param {Object} options - Options
-   * @param {boolean} options.lineBuffered - Buffer by line instead of character (default: true)
-   * @param {Function} options.onStart - Called when command starts (match, position)
-   * @param {Function} options.onData - Called on each chunk (chunk, position)
-   * @param {Function} options.onEnd - Called when command ends (exitCode, finalPosition)
-   * @param {Function} options.onError - Called on error (error)
-   * @returns {MacroEngine} this for chaining
    */
-  addStreamingExecMacro(name, pattern, commandBuilder, options = {}) {
+  addStreamingExecMacro(
+    name: string, 
+    pattern: RegExp, 
+    commandBuilder: (match: string, ...groups: string[]) => string | Promise<string>, 
+    options: StreamingExecOptions = {}
+  ): MacroEngine {
     const { lineBuffered = true, onStart, onData, onEnd, onError } = options;
     
     // Ensure the pattern has the global flag
@@ -140,12 +317,12 @@ class MacroEngine {
   /**
    * Start listening for document changes
    */
-  start() {
+  start(): void {
     if (this._changeHandler) {
       return; // Already started
     }
 
-    this._changeHandler = async (event) => {
+    this._changeHandler = async (event: ChangeEvent) => {
       if (!this.enabled || this._processing) {
         return;
       }
@@ -164,43 +341,40 @@ class MacroEngine {
       }
     };
 
-    this.client.on('change', this._changeHandler);
+    this.client.on('change', this._changeHandler as (...args: unknown[]) => void);
   }
 
   /**
    * Stop listening for document changes
    */
-  stop() {
+  stop(): void {
     if (this._debounceTimer) {
       clearTimeout(this._debounceTimer);
       this._debounceTimer = null;
     }
     if (this._changeHandler) {
-      this.client.off('change', this._changeHandler);
+      this.client.off('change', this._changeHandler as (...args: unknown[]) => void);
       this._changeHandler = null;
     }
-    this._processingExpansion = false;
   }
 
   /**
    * Enable or disable macro processing
-   * @param {boolean} enabled
    */
-  setEnabled(enabled) {
+  setEnabled(enabled: boolean): void {
     this.enabled = enabled;
   }
 
   /**
    * Process the document for all registered macros
-   * @returns {Promise<Array>} Array of expansions performed
    */
-  async _processDocument() {
+  private async _processDocument(): Promise<Expansion[]> {
     if (this._processing) {
       return [];
     }
 
     this._processing = true;
-    const expansions = [];
+    const expansions: Expansion[] = [];
 
     try {
       let document = this.client.getDocument();
@@ -248,10 +422,9 @@ class MacroEngine {
 
   /**
    * Apply a single macro to the document
-   * @private
    */
-  async _applyMacro(document, macro) {
-    const matches = [];
+  private async _applyMacro(document: string, macro: TextMacro | RegexMacro | TemplateMacro): Promise<MacroApplyResult> {
+    const matches: MacroMatch[] = [];
     let changed = false;
     let updatedDocument = document;
 
@@ -259,8 +432,8 @@ class MacroEngine {
     macro.pattern.lastIndex = 0;
 
     // Find all matches first
-    let match;
-    const allMatches = [];
+    let match: RegExpExecArray | null;
+    const allMatches: MatchInfo[] = [];
     while ((match = macro.pattern.exec(document)) !== null) {
       allMatches.push({
         match: match[0],
@@ -276,9 +449,9 @@ class MacroEngine {
     // Process matches in reverse order to maintain indices
     for (let i = allMatches.length - 1; i >= 0; i--) {
       const m = allMatches[i];
-      let replacement;
-      let replaceIndex;
-      let replaceLength;
+      let replacement: string | null | undefined;
+      let replaceIndex: number;
+      let replaceLength: number;
       let originalMatch = m.match;
 
       try {
@@ -309,6 +482,8 @@ class MacroEngine {
           }
           replaceIndex = m.index;
           replaceLength = m.match.length;
+        } else {
+          continue;
         }
 
         // Re-fetch current document state after async operation
@@ -324,7 +499,7 @@ class MacroEngine {
           const newIndex = currentDocument.indexOf(originalMatch);
           if (newIndex === -1) {
             // Match no longer exists, skip it
-            console.error(`Macro ${macro.name || macro.trigger}: match "${originalMatch}" no longer found, skipping`);
+            console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: match "${originalMatch}" no longer found, skipping`);
             continue;
           }
           replaceIndex = newIndex;
@@ -332,18 +507,18 @@ class MacroEngine {
         
         // Verify the position is valid
         if (replaceIndex < 0 || replaceIndex + replaceLength > currentDocument.length) {
-          console.error(`Macro ${macro.name || macro.trigger}: position out of bounds, skipping`);
+          console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: position out of bounds, skipping`);
           continue;
         }
         
-        this.client.replace(replaceIndex, replaceLength, replacement);
+        this.client.replace(replaceIndex, replaceLength, replacement!);
         
         if (macro.type === 'text') {
-          matches.push({ trigger: macro.trigger, replacement, index: replaceIndex });
+          matches.push({ trigger: macro.trigger, replacement: replacement!, index: replaceIndex } as TextMacroMatch);
         } else if (macro.type === 'regex') {
-          matches.push({ match: m.match, replacement, index: replaceIndex });
+          matches.push({ match: m.match, replacement: replacement!, index: replaceIndex } as RegexMacroMatch);
         } else if (macro.type === 'template') {
-          matches.push({ template: m.match, content: m.groups[0], replacement, index: replaceIndex });
+          matches.push({ template: m.match, content: m.groups[0], replacement: replacement!, index: replaceIndex } as TemplateMacroMatch);
         }
         changed = true;
         
@@ -354,7 +529,7 @@ class MacroEngine {
           currentDocument.substring(replaceIndex + replaceLength);
           
       } catch (err) {
-        console.error(`Macro ${macro.name || macro.trigger} error:`, err);
+        console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name} error:`, err);
       }
 
       // Only process one match at a time to keep indices valid
@@ -370,11 +545,10 @@ class MacroEngine {
 
   /**
    * Process streaming macros - these run asynchronously and stream output into the document
-   * @private
    */
-  async _processStreamingMacros() {
+  private async _processStreamingMacros(): Promise<StreamingStarted[]> {
     const document = this.client.getDocument();
-    const streamingMacros = [];
+    const streamingMacros: Array<{ name: string; macro: StreamingMacro }> = [];
     
     // Find all streaming macros
     for (const [name, macro] of this.macros) {
@@ -385,12 +559,12 @@ class MacroEngine {
     
     if (streamingMacros.length === 0) return [];
     
-    const started = [];
+    const started: StreamingStarted[] = [];
     
     // Find matches for streaming macros
     for (const { name, macro } of streamingMacros) {
       macro.pattern.lastIndex = 0;
-      let match;
+      let match: RegExpExecArray | null;
       
       while ((match = macro.pattern.exec(document)) !== null) {
         const matchText = match[0];
@@ -417,9 +591,8 @@ class MacroEngine {
 
   /**
    * Wait for all active streaming macros to complete
-   * @returns {Promise<void>}
    */
-  async waitForStreams() {
+  async waitForStreams(): Promise<void> {
     if (this._activeStreams.size === 0) {
       return;
     }
@@ -428,20 +601,21 @@ class MacroEngine {
 
   /**
    * Check if there are active streaming macros
-   * @returns {boolean}
    */
-  hasActiveStreams() {
+  hasActiveStreams(): boolean {
     return this._activeStreams.size > 0;
   }
 
   /**
    * Start a streaming exec macro - removes match and streams command output
-   * @private
    */
-  async _startStreamingExec(name, macro, matchText, groups, originalIndex) {
-    // Import TextOperation for position transformation
-    const { TextOperation } = await import('./text-operation.js');
-    
+  private async _startStreamingExec(
+    name: string, 
+    macro: StreamingMacro, 
+    matchText: string, 
+    groups: string[], 
+    originalIndex: number
+  ): Promise<void> {
     // Track rate limiting state to restore later
     const wasRateLimitEnabled = this.client.isRateLimitEnabled();
     
@@ -486,16 +660,15 @@ class MacroEngine {
       let isInserting = false; // Flag to avoid double-counting our own inserts
       
       // Listen for remote changes to adjust our cursor position
-      const remoteChangeHandler = (event) => {
+      const remoteChangeHandler = (event: ChangeEvent) => {
         // Only handle remote operations, and skip if we're currently inserting
         // (our own operations will update cursorPos directly)
         if (event.type === 'remote' && event.operation && !isInserting) {
           // Transform our cursor position through the remote operation
-          const oldPos = cursorPos;
           cursorPos = TextOperation.transformPosition(cursorPos, event.operation, true);
         }
       };
-      this.client.on('change', remoteChangeHandler);
+      this.client.on('change', remoteChangeHandler as (...args: unknown[]) => void);
       
       // Callback: onStart
       if (macro.onStart) {
@@ -513,7 +686,7 @@ class MacroEngine {
       let lineBuffer = '';
       
       // Helper to safely insert text at tracked cursor position
-      const safeInsert = async (text) => {
+      const safeInsert = async (text: string): Promise<boolean> => {
         if (aborted) return false;
         
         // Get current document state
@@ -539,7 +712,7 @@ class MacroEngine {
           return true;
         } catch (err) {
           isInserting = false;
-          console.error(`Streaming macro ${name}: insert failed:`, err.message);
+          console.error(`Streaming macro ${name}: insert failed:`, (err as Error).message);
           return false;
         }
       };
@@ -610,13 +783,13 @@ class MacroEngine {
         }
       } finally {
         // Always remove the change handler
-        this.client.off('change', remoteChangeHandler);
+        this.client.off('change', remoteChangeHandler as (...args: unknown[]) => void);
       }
       
     } catch (err) {
       console.error(`Streaming macro ${name} error:`, err);
       if (macro.onError) {
-        macro.onError(err);
+        macro.onError(err as Error);
       }
     } finally {
       // Always restore rate limiting
@@ -626,94 +799,101 @@ class MacroEngine {
 
   /**
    * Manually trigger macro expansion on current document
-   * @returns {Promise<Array>} Array of expansions performed
    */
-  async expand() {
+  async expand(): Promise<Expansion[]> {
     return this._processDocument();
   }
 
   /**
    * List all registered macros
-   * @returns {Array} Array of macro info objects
    */
-  listMacros() {
-    const result = [];
+  listMacros(): MacroInfo[] {
+    const result: MacroInfo[] = [];
     for (const [name, macro] of this.macros) {
       result.push({
         name: name,
         type: macro.type,
-        trigger: macro.trigger,
+        trigger: (macro as TextMacro).trigger,
         pattern: macro.pattern.toString()
       });
     }
     return result;
   }
+
+  // ===========================================
+  // Built-in macro helpers (static)
+  // ===========================================
+  
+  static builtins = {
+    /**
+     * Create a date/time macro
+     */
+    dateMacro(trigger: string, format: 'iso' | 'locale' | 'date' | 'time' | 'isoDate' | (() => string) = 'iso'): DateMacroResult {
+      const formatters: Record<string, () => string> = {
+        iso: () => new Date().toISOString(),
+        locale: () => new Date().toLocaleString(),
+        date: () => new Date().toLocaleDateString(),
+        time: () => new Date().toLocaleTimeString(),
+        isoDate: () => new Date().toISOString().split('T')[0]
+      };
+      
+      return {
+        trigger,
+        replacement: typeof format === 'function' ? format : (formatters[format] || formatters.iso)
+      };
+    },
+
+    /**
+     * Create a UUID macro
+     */
+    uuidMacro(trigger: string): UuidMacroResult {
+      return {
+        trigger,
+        replacement: () => {
+          // Simple UUID v4 generator
+          return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+        }
+      };
+    },
+
+    /**
+     * Create a counter macro
+     */
+    counterMacro(trigger: string, start: number = 1): CounterMacroResult {
+      let counter = start;
+      return {
+        trigger,
+        replacement: () => String(counter++)
+      };
+    },
+
+    /**
+     * Create a snippet/template expansion macro
+     */
+    snippetMacro(trigger: string, template: string): SnippetMacroResult {
+      return {
+        trigger,
+        replacement: () => template.replace('$CURSOR', '')
+      };
+    }
+  };
 }
 
-// Built-in macro helpers
-MacroEngine.builtins = {
-  /**
-   * Create a date/time macro
-   * @param {string} trigger - Trigger text (e.g., "::date")
-   * @param {string} format - Date format ('iso', 'locale', 'date', 'time', or custom function)
-   */
-  dateMacro(trigger, format = 'iso') {
-    const formatters = {
-      iso: () => new Date().toISOString(),
-      locale: () => new Date().toLocaleString(),
-      date: () => new Date().toLocaleDateString(),
-      time: () => new Date().toLocaleTimeString(),
-      isoDate: () => new Date().toISOString().split('T')[0]
-    };
-    
-    return {
-      trigger,
-      replacement: typeof format === 'function' ? format : (formatters[format] || formatters.iso)
-    };
-  },
-
-  /**
-   * Create a UUID macro
-   * @param {string} trigger - Trigger text (e.g., "::uuid")
-   */
-  uuidMacro(trigger) {
-    return {
-      trigger,
-      replacement: () => {
-        // Simple UUID v4 generator
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-          const r = Math.random() * 16 | 0;
-          const v = c === 'x' ? r : (r & 0x3 | 0x8);
-          return v.toString(16);
-        });
-      }
-    };
-  },
-
-  /**
-   * Create a counter macro
-   * @param {string} trigger - Trigger text (e.g., "::n")
-   * @param {number} start - Starting number
-   */
-  counterMacro(trigger, start = 1) {
-    let counter = start;
-    return {
-      trigger,
-      replacement: () => String(counter++)
-    };
-  },
-
-  /**
-   * Create a snippet/template expansion macro
-   * @param {string} trigger - Trigger text
-   * @param {string} template - Template with $CURSOR placeholder
-   */
-  snippetMacro(trigger, template) {
-    return {
-      trigger,
-      replacement: () => template.replace('$CURSOR', '')
-    };
-  }
-};
-
 export { MacroEngine };
+export type {
+  Macro,
+  TextMacro,
+  RegexMacro,
+  TemplateMacro,
+  StreamingMacro,
+  MacroMatch,
+  Expansion,
+  MacroInfo,
+  TextMacroOptions,
+  StreamingExecOptions,
+  StreamingCallbacks
+};

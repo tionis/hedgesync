@@ -7,14 +7,112 @@
 
 import { spawn } from 'child_process';
 
+// Forward declaration for HedgeDocClient to avoid circular imports
+interface HedgeDocClientLike {
+  getDocument(): string;
+  setContent(content: string): void | Promise<void>;
+}
+
+// ===========================================
+// Pandoc AST Types
+// ===========================================
+
+/** Pandoc AST attribute tuple: [id, classes, key-value pairs] */
+export type Attr = [string, string[], [string, string][]];
+
+/** Base AST node structure */
+export interface ASTNode {
+  t: string;
+  c?: unknown;
+}
+
+/** Text string node */
+export interface StrNode extends ASTNode {
+  t: 'Str';
+  c: string;
+}
+
+/** Space node */
+export interface SpaceNode extends ASTNode {
+  t: 'Space';
+}
+
+/** Soft break node */
+export interface SoftBreakNode extends ASTNode {
+  t: 'SoftBreak';
+}
+
+/** Line break node */
+export interface LineBreakNode extends ASTNode {
+  t: 'LineBreak';
+}
+
+/** Inline element types */
+export type Inline = StrNode | SpaceNode | SoftBreakNode | LineBreakNode | ASTNode;
+
+/** Paragraph node */
+export interface ParaNode extends ASTNode {
+  t: 'Para';
+  c: Inline[];
+}
+
+/** Header node: [level, attr, inlines] */
+export interface HeaderNode extends ASTNode {
+  t: 'Header';
+  c: [number, Attr, Inline[]];
+}
+
+/** Code block node: [attr, code] */
+export interface CodeBlockNode extends ASTNode {
+  t: 'CodeBlock';
+  c: [Attr, string];
+}
+
+/** Block element types */
+export type Block = ParaNode | HeaderNode | CodeBlockNode | ASTNode;
+
+/** Meta value types */
+export interface MetaValue {
+  t: string;
+  c?: unknown;
+}
+
+/** Pandoc document AST */
+export interface PandocAST {
+  'pandoc-api-version': number[];
+  meta: Record<string, MetaValue>;
+  blocks: Block[];
+}
+
+// ===========================================
+// Options Types
+// ===========================================
+
+export interface PandocOptions {
+  extensions?: string;
+  wrap?: 'none' | 'auto' | 'preserve';
+  columns?: number;
+  standalone?: boolean;
+}
+
+export interface TransformerOptions extends PandocOptions {
+  markdownExtensions?: string;
+}
+
+/** Visitor callback type */
+export type ASTVisitor = (node: unknown, parent: unknown | null, key: string | number | null) => void;
+
+/** AST transformation function */
+export type ASTTransformFn = (ast: PandocAST) => PandocAST | Promise<PandocAST>;
+
+// ===========================================
+// Private Helper Functions
+// ===========================================
+
 /**
  * Execute a command and return stdout
- * @param {string} cmd - Command to run
- * @param {string[]} args - Command arguments
- * @param {string} stdin - Input to send to stdin
- * @returns {Promise<string>} stdout output
  */
-function exec(cmd, args, stdin = '') {
+function exec(cmd: string, args: string[], stdin: string = ''): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe']
@@ -23,15 +121,15 @@ function exec(cmd, args, stdin = '') {
     let stdout = '';
     let stderr = '';
     
-    proc.stdout.on('data', (data) => {
+    proc.stdout.on('data', (data: Buffer) => {
       stdout += data.toString();
     });
     
-    proc.stderr.on('data', (data) => {
+    proc.stderr.on('data', (data: Buffer) => {
       stderr += data.toString();
     });
     
-    proc.on('close', (code) => {
+    proc.on('close', (code: number | null) => {
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -39,7 +137,7 @@ function exec(cmd, args, stdin = '') {
       }
     });
     
-    proc.on('error', (err) => {
+    proc.on('error', (err: Error) => {
       reject(new Error(`Failed to spawn command: ${err.message}`));
     });
     
@@ -50,11 +148,14 @@ function exec(cmd, args, stdin = '') {
   });
 }
 
+// ===========================================
+// Exported Functions
+// ===========================================
+
 /**
  * Check if pandoc is available
- * @returns {Promise<boolean>}
  */
-export async function isPandocAvailable() {
+export async function isPandocAvailable(): Promise<boolean> {
   try {
     await exec('pandoc', ['--version']);
     return true;
@@ -65,9 +166,8 @@ export async function isPandocAvailable() {
 
 /**
  * Get pandoc version
- * @returns {Promise<string>}
  */
-export async function getPandocVersion() {
+export async function getPandocVersion(): Promise<string> {
   const output = await exec('pandoc', ['--version']);
   const match = output.match(/pandoc\s+([\d.]+)/);
   return match ? match[1] : 'unknown';
@@ -75,11 +175,8 @@ export async function getPandocVersion() {
 
 /**
  * Convert markdown to Pandoc JSON AST
- * @param {string} markdown - Markdown content
- * @param {Object} options - Pandoc options
- * @returns {Promise<Object>} Pandoc AST as JSON object
  */
-export async function markdownToAST(markdown, options = {}) {
+export async function markdownToAST(markdown: string, options: PandocOptions = {}): Promise<PandocAST> {
   const args = ['-f', 'markdown', '-t', 'json'];
   
   if (options.extensions) {
@@ -87,16 +184,13 @@ export async function markdownToAST(markdown, options = {}) {
   }
   
   const output = await exec('pandoc', args, markdown);
-  return JSON.parse(output);
+  return JSON.parse(output) as PandocAST;
 }
 
 /**
  * Convert Pandoc JSON AST to markdown
- * @param {Object} ast - Pandoc AST object
- * @param {Object} options - Pandoc options
- * @returns {Promise<string>} Markdown content
  */
-export async function astToMarkdown(ast, options = {}) {
+export async function astToMarkdown(ast: PandocAST, options: PandocOptions = {}): Promise<string> {
   const args = ['-f', 'json', '-t', 'markdown'];
   
   if (options.extensions) {
@@ -117,13 +211,13 @@ export async function astToMarkdown(ast, options = {}) {
 
 /**
  * Convert between formats using pandoc
- * @param {string} content - Input content
- * @param {string} fromFormat - Source format
- * @param {string} toFormat - Target format
- * @param {Object} options - Additional pandoc options
- * @returns {Promise<string>} Converted content
  */
-export async function convert(content, fromFormat, toFormat, options = {}) {
+export async function convert(
+  content: string, 
+  fromFormat: string, 
+  toFormat: string, 
+  options: PandocOptions = {}
+): Promise<string> {
   const args = ['-f', fromFormat, '-t', toFormat];
   
   if (options.wrap) {
@@ -136,17 +230,20 @@ export async function convert(content, fromFormat, toFormat, options = {}) {
   return await exec('pandoc', args, content);
 }
 
+// ===========================================
+// PandocTransformer Class
+// ===========================================
+
 /**
  * PandocTransformer - High-level class for document transformations
  */
 export class PandocTransformer {
+  options: PandocOptions;
+
   /**
    * Create a new transformer
-   * @param {Object} options - Transformer options
-   * @param {string} options.markdownExtensions - Pandoc markdown extensions
-   * @param {string} options.wrap - Text wrapping mode (none, auto, preserve)
    */
-  constructor(options = {}) {
+  constructor(options: TransformerOptions = {}) {
     this.options = {
       extensions: options.markdownExtensions || '',
       wrap: options.wrap || 'none',
@@ -156,29 +253,22 @@ export class PandocTransformer {
 
   /**
    * Parse markdown into AST
-   * @param {string} markdown - Markdown content
-   * @returns {Promise<Object>} Pandoc AST
    */
-  async parse(markdown) {
+  async parse(markdown: string): Promise<PandocAST> {
     return markdownToAST(markdown, this.options);
   }
 
   /**
    * Render AST back to markdown
-   * @param {Object} ast - Pandoc AST
-   * @returns {Promise<string>} Markdown content
    */
-  async render(ast) {
+  async render(ast: PandocAST): Promise<string> {
     return astToMarkdown(ast, this.options);
   }
 
   /**
    * Transform a document using an AST transformation function
-   * @param {string} markdown - Input markdown
-   * @param {Function} transformFn - Function that receives and returns AST
-   * @returns {Promise<string>} Transformed markdown
    */
-  async transform(markdown, transformFn) {
+  async transform(markdown: string, transformFn: ASTTransformFn): Promise<string> {
     const ast = await this.parse(markdown);
     const transformedAST = await transformFn(ast);
     return await this.render(transformedAST);
@@ -186,11 +276,8 @@ export class PandocTransformer {
 
   /**
    * Apply a transformation to a HedgeDoc client's document
-   * @param {HedgeDocClient} client - The HedgeDoc client
-   * @param {Function} transformFn - AST transformation function
-   * @returns {Promise<void>}
    */
-  async applyToClient(client, transformFn) {
+  async applyToClient(client: HedgeDocClientLike, transformFn: ASTTransformFn): Promise<void> {
     const original = client.getDocument();
     const transformed = await this.transform(original, transformFn);
     
@@ -201,81 +288,64 @@ export class PandocTransformer {
 
   /**
    * Convert markdown to AST (instance method)
-   * @param {string} markdown - Markdown content
-   * @returns {Promise<Object>} Pandoc AST
    */
-  async markdownToAST(markdown) {
+  async markdownToAST(markdown: string): Promise<PandocAST> {
     return markdownToAST(markdown, this.options);
   }
 
   /**
    * Convert AST to markdown (instance method)
-   * @param {Object} ast - Pandoc AST
-   * @returns {Promise<string>} Markdown content
    */
-  async astToMarkdown(ast) {
+  async astToMarkdown(ast: PandocAST): Promise<string> {
     return astToMarkdown(ast, this.options);
   }
 
   /**
    * Convert between formats (instance method)
-   * @param {string} content - Input content
-   * @param {string} fromFormat - Source format
-   * @param {string} toFormat - Target format
-   * @returns {Promise<string>} Converted content
    */
-  async convert(content, fromFormat, toFormat) {
+  async convert(content: string, fromFormat: string, toFormat: string): Promise<string> {
     return convert(content, fromFormat, toFormat, this.options);
   }
 
   /**
    * Walk the AST and call a callback on each node (instance method)
-   * @param {Object} ast - Pandoc AST
-   * @param {Function} callback - Function(node, parent, key)
    */
-  walkAST(ast, callback) {
+  walkAST(ast: PandocAST, callback: ASTVisitor): void {
     PandocTransformer.walk(ast, callback);
   }
 
   /**
    * Find all nodes of a specific type (instance method)
-   * @param {Object} ast - Pandoc AST
-   * @param {string} type - Node type (e.g., 'Header', 'Link', 'Image')
-   * @returns {Array} Array of matching nodes
    */
-  filterByType(ast, type) {
+  filterByType(ast: PandocAST, type: string): ASTNode[] {
     return PandocTransformer.findByType(ast, type);
   }
 
   /**
    * Replace text in all Str nodes
-   * @param {Object} ast - Pandoc AST
-   * @param {string|RegExp} search - Text to find
-   * @param {string} replace - Replacement text
    */
-  replaceText(ast, search, replace) {
+  replaceText(ast: PandocAST, search: string | RegExp, replace: string): void {
     this.walkAST(ast, (node) => {
-      if (node && node.t === 'Str' && typeof node.c === 'string') {
+      const n = node as ASTNode;
+      if (n && n.t === 'Str' && typeof n.c === 'string') {
         if (search instanceof RegExp) {
-          node.c = node.c.replace(search, replace);
+          n.c = n.c.replace(search, replace);
         } else {
-          node.c = node.c.split(search).join(replace);
+          n.c = n.c.split(search).join(replace);
         }
       }
     });
   }
 
   // ============================================
-  // AST Helper Methods
+  // AST Helper Methods (Static)
   // ============================================
 
   /**
    * Walk the AST and call a visitor function on each node
-   * @param {Object} ast - Pandoc AST
-   * @param {Function} visitor - Function(node, parent, key) called for each node
    */
-  static walk(ast, visitor) {
-    function walkNode(node, parent = null, key = null) {
+  static walk(ast: unknown, visitor: ASTVisitor): void {
+    function walkNode(node: unknown, parent: unknown | null = null, key: string | number | null = null): void {
       if (!node || typeof node !== 'object') return;
       
       visitor(node, parent, key);
@@ -283,7 +353,7 @@ export class PandocTransformer {
       if (Array.isArray(node)) {
         node.forEach((item, i) => walkNode(item, node, i));
       } else {
-        for (const [k, v] of Object.entries(node)) {
+        for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
           walkNode(v, node, k);
         }
       }
@@ -294,15 +364,13 @@ export class PandocTransformer {
 
   /**
    * Find all nodes of a specific type
-   * @param {Object} ast - Pandoc AST
-   * @param {string} type - Node type (e.g., 'Header', 'Para', 'CodeBlock')
-   * @returns {Array} Array of matching nodes
    */
-  static findByType(ast, type) {
-    const results = [];
+  static findByType(ast: unknown, type: string): ASTNode[] {
+    const results: ASTNode[] = [];
     this.walk(ast, (node) => {
-      if (node && node.t === type) {
-        results.push(node);
+      const n = node as ASTNode;
+      if (n && n.t === type) {
+        results.push(n);
       }
     });
     return results;
@@ -310,10 +378,8 @@ export class PandocTransformer {
 
   /**
    * Extract plain text from an AST node
-   * @param {Object} node - AST node or inline content array
-   * @returns {string} Plain text content
    */
-  static extractText(node) {
+  static extractText(node: unknown): string {
     if (!node) return '';
     
     if (typeof node === 'string') return node;
@@ -322,18 +388,20 @@ export class PandocTransformer {
       return node.map(n => this.extractText(n)).join('');
     }
     
-    if (node.t === 'Str') {
-      return node.c;
+    const n = node as ASTNode;
+    
+    if (n.t === 'Str') {
+      return n.c as string;
     }
-    if (node.t === 'Space') {
+    if (n.t === 'Space') {
       return ' ';
     }
-    if (node.t === 'SoftBreak' || node.t === 'LineBreak') {
+    if (n.t === 'SoftBreak' || n.t === 'LineBreak') {
       return '\n';
     }
     
-    if (node.c) {
-      return this.extractText(node.c);
+    if (n.c) {
+      return this.extractText(n.c);
     }
     
     return '';
@@ -341,23 +409,21 @@ export class PandocTransformer {
 
   /**
    * Create a simple text inline element
-   * @param {string} text - Text content
-   * @returns {Array} Array of inline elements
    */
-  static createText(text) {
+  static createText(text: string): Inline[] {
     const parts = text.split(/(\s+)/);
-    const inlines = [];
+    const inlines: Inline[] = [];
     
     for (const part of parts) {
       if (part === ' ') {
-        inlines.push({ t: 'Space' });
+        inlines.push({ t: 'Space' } as SpaceNode);
       } else if (part === '\n') {
-        inlines.push({ t: 'SoftBreak' });
+        inlines.push({ t: 'SoftBreak' } as SoftBreakNode);
       } else if (part.match(/^\s+$/)) {
         // Multiple spaces - just add one space
-        inlines.push({ t: 'Space' });
+        inlines.push({ t: 'Space' } as SpaceNode);
       } else if (part) {
-        inlines.push({ t: 'Str', c: part });
+        inlines.push({ t: 'Str', c: part } as StrNode);
       }
     }
     
@@ -366,10 +432,8 @@ export class PandocTransformer {
 
   /**
    * Create a paragraph node
-   * @param {string|Array} content - Text or inline elements
-   * @returns {Object} Para AST node
    */
-  static createPara(content) {
+  static createPara(content: string | Inline[]): ParaNode {
     const inlines = typeof content === 'string' 
       ? this.createText(content) 
       : content;
@@ -378,12 +442,8 @@ export class PandocTransformer {
 
   /**
    * Create a header node
-   * @param {number} level - Header level (1-6)
-   * @param {string|Array} content - Header text or inline elements
-   * @param {string} id - Optional header ID
-   * @returns {Object} Header AST node
    */
-  static createHeader(level, content, id = '') {
+  static createHeader(level: number, content: string | Inline[], id: string = ''): HeaderNode {
     const inlines = typeof content === 'string' 
       ? this.createText(content) 
       : content;
@@ -395,11 +455,8 @@ export class PandocTransformer {
 
   /**
    * Create a code block node
-   * @param {string} code - Code content
-   * @param {string} language - Optional language identifier
-   * @returns {Object} CodeBlock AST node
    */
-  static createCodeBlock(code, language = '') {
+  static createCodeBlock(code: string, language: string = ''): CodeBlockNode {
     return {
       t: 'CodeBlock',
       c: [['', language ? [language] : [], []], code]
