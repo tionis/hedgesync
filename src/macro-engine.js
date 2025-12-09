@@ -442,6 +442,9 @@ class MacroEngine {
     // Import TextOperation for position transformation
     const { TextOperation } = await import('./text-operation.js');
     
+    // Track rate limiting state to restore later
+    const wasRateLimitEnabled = this.client.isRateLimitEnabled();
+    
     try {
       // Build the command
       const cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
@@ -465,6 +468,10 @@ class MacroEngine {
         }
         insertPos = newIndex;
       }
+      
+      // Disable rate limiting during streaming to avoid queue issues
+      // We control the pace ourselves with delays between inserts
+      this.client.setRateLimitEnabled(false);
       
       // Delete the matched text first
       this.client.delete(insertPos, matchText.length);
@@ -611,6 +618,9 @@ class MacroEngine {
       if (macro.onError) {
         macro.onError(err);
       }
+    } finally {
+      // Always restore rate limiting
+      this.client.setRateLimitEnabled(wasRateLimitEnabled);
     }
   }
 
