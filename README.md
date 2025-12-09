@@ -681,24 +681,27 @@ The `macro` command provides command-line access to the macro system:
 
 ```bash
 # Text macro: replace literal text
-hedgesync macro <url> --text '::date' "$(date +%Y-%m-%d)"
-hedgesync macro <url> --text '::sig' 'Signed by Bot'
+hedgesync macro <url> --text '::date::=$(date +%Y-%m-%d)'
+hedgesync macro <url> --text '::sig::=Signed by Bot'
+
+# Multiple macros can be specified at once
+hedgesync macro <url> --text '::a::=AAA' --text '::b::=BBB' --text '::c::=CCC'
 
 # Regex macro: replace patterns
-hedgesync macro <url> --regex '/TODO/gi' 'DONE'
-hedgesync macro <url> --regex '/\bfoo\b/gi' 'bar'
+hedgesync macro <url> --regex '/TODO/gi=DONE'
+hedgesync macro <url> --regex '/\bfoo\b/gi=bar'
 
 # Built-in macros
-hedgesync macro <url> --built-in date      # Replace ::date with current date
-hedgesync macro <url> --built-in uuid      # Replace ::uuid with UUID
-hedgesync macro <url> --built-in counter   # Replace ::n with incrementing numbers
-hedgesync macro <url> --built-in snippet   # Replace ::todo with '- [ ] '
+hedgesync macro <url> --built-in       # Enable all built-in macros
 
 # Config file with multiple macros
 hedgesync macro <url> --config macros.json
 
 # Watch mode: continuously apply macros
-hedgesync macro <url> --built-in date --watch
+hedgesync macro <url> --built-in --watch
+
+# Mix and match different macro types
+hedgesync macro <url> --text '::sig::=Bot' --exec '/::date::/gi:date +%F' --built-in
 ```
 
 #### Exec Macros (Shell Command Execution)
@@ -717,6 +720,12 @@ hedgesync macro <url> --exec '/::echo\s+(.+?)::/gi:echo {1}'
 
 # System info: ::uptime:: → up 2 days, 3 hours
 hedgesync macro <url> --exec '/::uptime::/gi:uptime -p'
+
+# Multiple exec macros
+hedgesync macro <url> \
+  --exec '/::calc\s+(.+?)::/gi:echo {1} | bc -l' \
+  --exec '/::date::/gi:date +%F' \
+  --exec '/::uptime::/gi:uptime -p'
 
 # Date formatting: ::date YYYY-MM-DD:: → formatted date
 hedgesync macro <url> --exec '/::date\s+(.+?)::/gi:date +{1}'

@@ -44,6 +44,9 @@ function parseArgs(args) {
     options: {},
   };
 
+  // Options that can be specified multiple times (will be collected into arrays)
+  const multiValueOptions = new Set(['text', 'regex', 'exec']);
+
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
@@ -53,7 +56,15 @@ function parseArgs(args) {
       const nextArg = args[i + 1];
       
       if (nextArg && !nextArg.startsWith('-')) {
-        parsed.options[key] = nextArg;
+        if (multiValueOptions.has(key)) {
+          // Collect multiple values into an array
+          if (!parsed.options[key]) {
+            parsed.options[key] = [];
+          }
+          parsed.options[key].push(nextArg);
+        } else {
+          parsed.options[key] = nextArg;
+        }
         i += 2;
       } else {
         parsed.options[key] = true;
