@@ -681,10 +681,18 @@ async function testEvents(client) {
 // Main Test Runner
 // ============================================
 
+// Check if running in CI mode (skip server-dependent tests)
+const isCI = process.env.CI === 'true';
+
 async function runTests() {
   log(c.bold(c.cyan('\n🧪 hedgesync Feature Test Suite\n')));
-  log(c.dim(`Server: ${SERVER_URL}`));
-  log(c.dim(`Note:   ${NOTE_ID}`));
+  
+  if (isCI) {
+    log(c.yellow('Running in CI mode - skipping server-dependent tests\n'));
+  } else {
+    log(c.dim(`Server: ${SERVER_URL}`));
+    log(c.dim(`Note:   ${NOTE_ID}`));
+  }
   
   let client;
   
@@ -695,41 +703,46 @@ async function runTests() {
     // Test PandocTransformer (no connection needed, but needs pandoc)
     await testPandocTransformer();
     
-    // Connect to server
-    log(c.bold('\n🔌 Connecting to HedgeDoc...'));
-    client = new HedgeDocClient({
-      serverUrl: SERVER_URL,
-      noteId: NOTE_ID,
-      operationTimeout: 10000,
-      rateLimit: {
-        enabled: false // Disable rate limiting for tests to avoid timing issues
-      },
-      reconnect: {
-        enabled: true,
-        maxAttempts: 3
-      },
-      trackUndo: true,
-      undoGroupInterval: 500
-    });
-    
-    await client.connect();
-    log(c.green('  Connected successfully!'));
-    
-    // Run connected tests
-    await testConnection(client);
-    await testNoteInfo(client);
-    await testOnlineUsers(client);
-    await testBasicEditing(client);
-    await testRegexOperations(client);
-    await testLineOperations(client);
-    await testSetContent(client);
-    await testUpdateContent(client);
-    await testRateLimiting(client);
-    await testBatchOperations(client);
-    await testUndoRedo(client);
-    await testReconnection(client);
-    await testEvents(client);
-    await testMacroEngine(client);
+    if (isCI) {
+      // In CI mode, skip server-dependent tests
+      log(c.yellow('\n⏭️  Skipping server-dependent tests in CI mode'));
+    } else {
+      // Connect to server
+      log(c.bold('\n🔌 Connecting to HedgeDoc...'));
+      client = new HedgeDocClient({
+        serverUrl: SERVER_URL,
+        noteId: NOTE_ID,
+        operationTimeout: 10000,
+        rateLimit: {
+          enabled: false // Disable rate limiting for tests to avoid timing issues
+        },
+        reconnect: {
+          enabled: true,
+          maxAttempts: 3
+        },
+        trackUndo: true,
+        undoGroupInterval: 500
+      });
+      
+      await client.connect();
+      log(c.green('  Connected successfully!'));
+      
+      // Run connected tests
+      await testConnection(client);
+      await testNoteInfo(client);
+      await testOnlineUsers(client);
+      await testBasicEditing(client);
+      await testRegexOperations(client);
+      await testLineOperations(client);
+      await testSetContent(client);
+      await testUpdateContent(client);
+      await testRateLimiting(client);
+      await testBatchOperations(client);
+      await testUndoRedo(client);
+      await testReconnection(client);
+      await testEvents(client);
+      await testMacroEngine(client);
+    }
     
   } catch (error) {
     log(c.red(`\n❌ Test error: ${error.message}`));
