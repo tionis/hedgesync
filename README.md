@@ -33,6 +33,26 @@ Or with npm:
 npm install
 ```
 
+## Building Standalone Executable
+
+You can compile the CLI into a standalone executable that doesn't require Bun or Node.js to be installed:
+
+```bash
+# Build for current platform
+bun run build
+
+# Build for specific platforms
+bun run build:linux       # Linux x64
+bun run build:macos       # macOS x64 (Intel)
+bun run build:macos-arm   # macOS ARM64 (Apple Silicon)
+bun run build:windows     # Windows x64
+
+# Build for all platforms
+bun run build:all
+```
+
+Compiled binaries are placed in the `dist/` directory.
+
 ## CLI Usage
 
 The `hedgesync` CLI provides quick access to HedgeDoc documents from the command line.
