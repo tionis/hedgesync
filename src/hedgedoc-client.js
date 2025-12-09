@@ -545,6 +545,75 @@ export class HedgeDocClient extends EventEmitter {
   }
 
   /**
+   * Get document content with authorship information
+   * Returns the document along with information about who wrote each part.
+   * 
+   * @returns {Object} Object containing:
+   *   - content: The full document text
+   *   - authors: Object mapping userId to author profile (name, color, photo)
+   *   - authorship: Array of authorship spans, each containing:
+   *     - userId: The author's user ID (null for anonymous)
+   *     - start: Start position in document
+   *     - end: End position in document
+   *     - text: The actual text in this span
+   *     - author: The author's profile (name, color, photo) or null
+   *     - createdAt: When this span was created
+   *     - updatedAt: When this span was last modified
+   */
+  getDocumentWithAuthorship() {
+    const content = this.document;
+    const authors = this.noteInfo.authors || {};
+    const rawAuthorship = this.noteInfo.authorship || [];
+    
+    // Transform authorship into a more useful format
+    const authorship = rawAuthorship.map(([userId, start, end, createdAt, updatedAt]) => ({
+      userId: userId || null,
+      start,
+      end,
+      text: content.substring(start, end),
+      author: userId ? (authors[userId] || null) : null,
+      createdAt: createdAt ? new Date(createdAt) : null,
+      updatedAt: updatedAt ? new Date(updatedAt) : null
+    }));
+    
+    return {
+      content,
+      authors,
+      authorship,
+      // Helper: get text by author
+      getTextByAuthor: (authorId) => {
+        return authorship
+          .filter(span => span.userId === authorId)
+          .map(span => span.text)
+          .join('');
+      },
+      // Helper: get author at position
+      getAuthorAtPosition: (position) => {
+        for (const span of authorship) {
+          if (position >= span.start && position < span.end) {
+            return span.author;
+          }
+        }
+        return null;
+      }
+    };
+  }
+
+  /**
+   * Get authors who have contributed to this document
+   * @returns {Array} Array of author objects with userId, name, color, photo
+   */
+  getAuthors() {
+    const authors = this.noteInfo.authors || {};
+    return Object.entries(authors).map(([userId, profile]) => ({
+      userId,
+      name: profile.name || 'Anonymous',
+      color: profile.color || '#888888',
+      photo: profile.photo || null
+    }));
+  }
+
+  /**
    * Insert text at a position
    * @param {number} position - Position to insert at
    * @param {string} text - Text to insert

@@ -242,6 +242,8 @@ const client = new HedgeDocClient({
 | `disconnect()` | Disconnect from the server. |
 | `reconnect()` | Manually trigger a reconnection. |
 | `getDocument()` | Get the current document content as a string. |
+| `getDocumentWithAuthorship()` | Get document with authorship information (see below). |
+| `getAuthors()` | Get array of authors who have contributed to the document. |
 | `getRevision()` | Get the current revision number. |
 | `getNoteInfo()` | Get note metadata (title, permission, authors, etc.). |
 | `getOnlineUsers()` | Get array of currently online users. |
@@ -273,6 +275,51 @@ const client = new HedgeDocClient({
 | `configureRateLimit(opts)` | Configure rate limit settings. |
 | `setReconnectEnabled(bool)` | Enable/disable auto-reconnection. |
 | `configureReconnect(opts)` | Configure reconnection settings. |
+
+#### Authorship Information
+
+HedgeDoc tracks which user wrote each part of the document. Use `getDocumentWithAuthorship()` to get this information:
+
+```javascript
+const result = client.getDocumentWithAuthorship();
+
+// result.content - The full document text
+// result.authors - Object mapping userId to author profile
+// result.authorship - Array of authorship spans
+
+// Each span in authorship contains:
+for (const span of result.authorship) {
+  console.log(`User ${span.author?.name || 'Anonymous'} wrote:`);
+  console.log(`  "${span.text}" (chars ${span.start}-${span.end})`);
+  console.log(`  Created: ${span.createdAt}`);
+}
+
+// Helper: Get all text by a specific author
+const ericText = result.getTextByAuthor('user-id-123');
+
+// Helper: Get author at a position in the document
+const authorAt50 = result.getAuthorAtPosition(50);
+```
+
+#### User Identity
+
+When connecting to HedgeDoc:
+- **Logged-in users**: Display name comes from their HedgeDoc profile
+- **Anonymous users**: Display name is auto-generated as "Guest \<RandomSurname\>"
+
+⚠️ **Note**: HedgeDoc does not support setting a custom display name for anonymous connections. To appear with a custom name, you must:
+1. Create an account on the HedgeDoc server
+2. Log in and obtain a session cookie
+3. Use that cookie when connecting
+
+```javascript
+// With authentication (shows your profile name)
+const client = new HedgeDocClient({
+  serverUrl: 'https://hedgedoc.example.com',
+  noteId: 'my-note',
+  cookie: 'connect.sid=your-session-cookie'  // From browser after login
+});
+```
 
 #### Events
 

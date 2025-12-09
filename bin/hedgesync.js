@@ -139,6 +139,7 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'COMMANDS:')}
   ${c('green', 'get')}         Get document content
+  ${c('green', 'get --authors')} Get document with authorship information
   ${c('green', 'set')}         Set document content (from stdin or file)
   ${c('green', 'append')}      Append text to document
   ${c('green', 'prepend')}     Prepend text to document
@@ -148,6 +149,7 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'watch')}       Watch document for changes
   ${c('green', 'info')}        Get note metadata
   ${c('green', 'users')}       List online users
+  ${c('green', 'authors')}     List document authors and their contributions
   ${c('green', 'transform')}   Transform document with pandoc
   ${c('green', 'macro')}       Run macros on document (expand triggers, watch mode)
   ${c('green', 'help')}        Show this help message
@@ -273,14 +275,84 @@ async function cmdGet(args) {
   const client = await connect(args);
   
   try {
-    const content = client.getDocument();
+    const showAuthors = args.options.authors || args.options.A;
+    const json = args.options.json;
     const output = args.options.output || args.options.o;
     
-    if (output) {
-      await Bun.write(output, content);
-      console.error(c('green', `✓ Written to ${output}`));
+    if (showAuthors) {
+      // Wait for refresh data which contains authorship
+      await new Promise(resolve => {
+        client.once('refresh', resolve);
+        setTimeout(resolve, 1000);
+      });
+      
+      const result = client.getDocumentWithAuthorship();
+      
+      if (json) {
+        const jsonOutput = {
+          content: result.content,
+          authors: result.authors,
+          authorship: result.authorship.map(s => ({
+            userId: s.userId,
+            author: s.author?.name || null,
+            start: s.start,
+            end: s.end,
+            text: s.text,
+            createdAt: s.createdAt?.toISOString(),
+            updatedAt: s.updatedAt?.toISOString()
+          }))
+        };
+        
+        if (output) {
+          await Bun.write(output, JSON.stringify(jsonOutput, null, 2));
+          console.error(c('green', `✓ Written to ${output}`));
+        } else {
+          console.log(JSON.stringify(jsonOutput, null, 2));
+        }
+      } else {
+        // Human-readable format with colored authorship
+        let outputText = '';
+        const colors = ['cyan', 'yellow', 'magenta', 'green', 'blue'];
+        const authorColors = new Map();
+        let colorIndex = 0;
+        
+        for (const span of result.authorship) {
+          const authorId = span.userId || 'anonymous';
+          if (!authorColors.has(authorId)) {
+            authorColors.set(authorId, colors[colorIndex % colors.length]);
+            colorIndex++;
+          }
+          
+          const color = authorColors.get(authorId);
+          const authorName = span.author?.name || 'Anonymous';
+          outputText += c(color, span.text);
+        }
+        
+        // Print legend
+        console.error(c('bold', '=== Authors ==='));
+        for (const [authorId, color] of authorColors) {
+          const author = result.authors[authorId];
+          console.error(c(color, `█ ${author?.name || 'Anonymous'}`));
+        }
+        console.error();
+        
+        if (output) {
+          // For file output, strip colors
+          await Bun.write(output, result.content);
+          console.error(c('green', `✓ Written to ${output}`));
+        } else {
+          console.log(outputText);
+        }
+      }
     } else {
-      console.log(content);
+      const content = client.getDocument();
+      
+      if (output) {
+        await Bun.write(output, content);
+        console.error(c('green', `✓ Written to ${output}`));
+      } else {
+        console.log(content);
+      }
     }
   } finally {
     client.disconnect();
@@ -656,6 +728,92 @@ async function cmdUsers(args) {
   }
 }
 
+// Command: authors
+async function cmdAuthors(args) {
+  const client = await connect(args);
+  
+  try {
+    // Wait for refresh data which contains authorship
+    await new Promise(resolve => {
+      client.once('refresh', resolve);
+      setTimeout(resolve, 1000);
+    });
+    
+    const result = client.getDocumentWithAuthorship();
+    const json = args.options.json;
+    const verbose = args.options.verbose || args.options.v;
+    
+    // Calculate statistics per author
+    const authorStats = new Map();
+    for (const span of result.authorship) {
+      const authorId = span.userId || 'anonymous';
+      if (!authorStats.has(authorId)) {
+        authorStats.set(authorId, {
+          id: authorId,
+          name: span.author?.name || 'Anonymous',
+          color: span.author?.color || '#888888',
+          photo: span.author?.photo || null,
+          charCount: 0,
+          spanCount: 0,
+          firstEdit: span.createdAt,
+          lastEdit: span.updatedAt
+        });
+      }
+      const stats = authorStats.get(authorId);
+      stats.charCount += span.end - span.start;
+      stats.spanCount += 1;
+      if (span.createdAt && (!stats.firstEdit || span.createdAt < stats.firstEdit)) {
+        stats.firstEdit = span.createdAt;
+      }
+      if (span.updatedAt && (!stats.lastEdit || span.updatedAt > stats.lastEdit)) {
+        stats.lastEdit = span.updatedAt;
+      }
+    }
+    
+    const totalChars = result.content.length;
+    const stats = Array.from(authorStats.values()).sort((a, b) => b.charCount - a.charCount);
+    
+    if (json) {
+      console.log(JSON.stringify({
+        totalCharacters: totalChars,
+        authorCount: stats.length,
+        authors: stats.map(s => ({
+          ...s,
+          percentage: ((s.charCount / totalChars) * 100).toFixed(1),
+          firstEdit: s.firstEdit?.toISOString(),
+          lastEdit: s.lastEdit?.toISOString()
+        }))
+      }, null, 2));
+    } else {
+      console.log(c('bold', `Document Authors (${stats.length}):`));
+      console.log();
+      
+      for (const stat of stats) {
+        const pct = ((stat.charCount / totalChars) * 100).toFixed(1);
+        const bar = '█'.repeat(Math.round(pct / 5));
+        
+        console.log(`  ${c('cyan', stat.name)}`);
+        console.log(`    ${c('dim', bar)} ${pct}% (${stat.charCount} chars, ${stat.spanCount} regions)`);
+        
+        if (verbose) {
+          if (stat.firstEdit) {
+            console.log(`    First edit: ${stat.firstEdit.toLocaleString()}`);
+          }
+          if (stat.lastEdit) {
+            console.log(`    Last edit: ${stat.lastEdit.toLocaleString()}`);
+          }
+          if (stat.id !== 'anonymous') {
+            console.log(`    User ID: ${stat.id}`);
+          }
+        }
+        console.log();
+      }
+    }
+  } finally {
+    client.disconnect();
+  }
+}
+
 // Command: transform
 async function cmdTransform(args) {
   const client = await connect(args);
@@ -1016,6 +1174,9 @@ async function main() {
         break;
       case 'users':
         await cmdUsers(args);
+        break;
+      case 'authors':
+        await cmdAuthors(args);
         break;
       case 'transform':
         await cmdTransform(args);
