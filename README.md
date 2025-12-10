@@ -758,6 +758,25 @@ With streaming enabled:
 3. Multiple streaming commands can run concurrently
 4. The CLI waits for all streams to complete before exiting
 
+**Shell Execution Note:** Commands are executed via `sh -c "command"`, meaning there's an outer shell that interprets your command. This affects quoting:
+
+```bash
+# Problem: $i gets expanded by the OUTER shell (to empty string)
+--exec '/::run\s+(.+?)::/gi:bash -c "{1}"'
+# Document: ::run for i in 1 2 3; do echo $i; done::
+# Result: empty output (4 blank lines)
+
+# Solution 1: Use single quotes in the command template
+--exec "/::run\s+(.+?)::/gi:bash -c '{1}'"
+# Result: 1\n2\n3 (correct!)
+
+# Solution 2: Escape $ in the document
+# Document: ::run for i in 1 2 3; do echo \$i; done::
+# Result: 1\n2\n3 (correct!)
+```
+
+The outer shell allows pipes, redirects, and other shell features in your command templates, but requires awareness of quoting rules.
+
 **Security Note:** Exec macros execute arbitrary shell commands. Only use on documents you trust, and be careful with user-provided content.
 
 #### Macro Config File Format

@@ -235,13 +235,15 @@ ${c('yellow', 'EXAMPLES:')}
   
   # Execute shell command with regex captures as arguments
   # {0} = full match, {1}, {2}... = capture groups
+  # Note: Commands run via 'sh -c', so use single quotes for nested shells
   hedgesync macro https://md.example.com/abc123 --exec '/::calc\\s+(.+?)::/i:bc -l <<< {1}'
   
   # Embed file contents: ::file path/to/file.txt::
   hedgesync macro https://md.example.com/abc123 --exec '/::file\\s+(.+?)::/i:cat {1}'
   
-  # Run a script with arguments: ::run myscript.sh arg1 arg2::
-  hedgesync macro https://md.example.com/abc123 --exec '/::run\\s+(\\S+)\\s*(.*?)::/:./{1} {2}'
+  # Run arbitrary shell: ::run for i in 1 2 3; do echo \\$i; done::
+  # Use single quotes to prevent outer shell expansion of $vars
+  hedgesync macro https://md.example.com/abc123 --exec "/::run\\s+(.+?)::/i:bash -c '{1}'"
   
   # Stream long command output (shows progress)
   hedgesync macro https://md.example.com/abc123 --exec '/::slow::/i:sleep 1; echo done' --stream
