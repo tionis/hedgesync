@@ -18,6 +18,7 @@
  */
 
 import { HedgeDocClient, PandocTransformer, MacroEngine } from '../src/index.js';
+import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -63,7 +64,7 @@ function parseArgs(args: string[]): ParsedArgs {
   };
 
   // Options that can be specified multiple times (will be collected into arrays)
-  const multiValueOptions = new Set(['text', 'regex', 'exec']);
+  const multiValueOptions = new Set(['text', 'regex', 'exec', 'block']);
 
   let i = 0;
   while (i < args.length) {
@@ -247,6 +248,19 @@ ${c('yellow', 'EXAMPLES:')}
   
   # Stream long command output (shows progress)
   hedgesync macro https://md.example.com/abc123 --exec '/::slow::/i:sleep 1; echo done' --stream
+  
+  # Stream with state tracking (::trigger:: → ::trigger::→ while running, ::trigger::✓ when done)
+  hedgesync macro https://md.example.com/abc123 --exec '/::ask\\s+(.+?)::/i:llm "{1}"' --stream --track-state
+  
+  # Document context: use {DOC}, {BEFORE}, {AFTER} placeholders
+  # Great for LLM summarization that needs full document context
+  hedgesync macro https://md.example.com/abc123 --exec '/::summarize::/i:llm --context "{DOC}" "summarize this"' --stream
+  
+  # Block macros: transform content between ::BEGIN:name:: and ::END:name::
+  # Content is piped to stdin of the command
+  hedgesync macro https://md.example.com/abc123 --block 'sort:sort' --watch
+  hedgesync macro https://md.example.com/abc123 --block 'upper:tr a-z A-Z' --watch
+  hedgesync macro https://md.example.com/abc123 --block 'strikethrough:sed "s/.*$/~~&~~/"' --watch
   
   # With authentication cookie
   hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
@@ -935,7 +949,9 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
   const textMacros = ([] as string[]).concat((args.options.text || args.options.t || []) as string[]);
   const regexMacros = ([] as string[]).concat((args.options.regex || args.options.r || []) as string[]);
   const execMacros = ([] as string[]).concat((args.options.exec || args.options.e || []) as string[]);
+  const blockMacros = ([] as string[]).concat((args.options.block || args.options.B || []) as string[]);
   const streamOutput = args.options.stream || args.options.s;
+  const trackState = args.options['track-state'] || args.options.T;
   
   // Create macro engine
   const engine = new MacroEngine(client);
@@ -1062,6 +1078,9 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
     const [, pattern, flags, cmdTemplate] = execMatch;
     const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
     
+    // Check if command template uses document context placeholders
+    const usesDocContext = /\{DOC\}|\{BEFORE\}|\{AFTER\}/.test(cmdTemplate);
+    
     const buildCommand = (fullMatch: string, ...groups: string[]): string => {
       let cmd = cmdTemplate;
       cmd = cmd.replace(/\{0\}/g, fullMatch);
@@ -1071,26 +1090,68 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       return cmd;
     };
     
-    if (streamOutput) {
-      engine.addStreamingExecMacro(`exec:${pattern}`, regex, buildCommand, {
-        lineBuffered: true,
-        onStart: (match: string, pos: number) => {
-          if (!quiet) {
-            console.error(c('dim', `  Streaming: ${buildCommand(match)} at position ${pos}`));
-          }
-        },
-        onEnd: (exitCode: number) => {
-          if (!quiet) {
-            console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
-          }
-        },
-        onError: (err: Error) => {
-          console.error(c('red', `  Stream error: ${err.message}`));
-        }
+    const buildCommandWithContext = (ctx: { fullDocument: string; beforeMatch: string; afterMatch: string; matchText: string; groups: string[] }): string => {
+      let cmd = cmdTemplate;
+      // Replace document context placeholders
+      // Use shell-safe escaping for document content
+      const escapeForShell = (s: string): string => s.replace(/'/g, "'\\''");
+      cmd = cmd.replace(/\{DOC\}/g, escapeForShell(ctx.fullDocument));
+      cmd = cmd.replace(/\{BEFORE\}/g, escapeForShell(ctx.beforeMatch));
+      cmd = cmd.replace(/\{AFTER\}/g, escapeForShell(ctx.afterMatch));
+      cmd = cmd.replace(/\{0\}/g, ctx.matchText);
+      ctx.groups.forEach((g, i) => {
+        cmd = cmd.replace(new RegExp(`\\{${i + 1}\\}`, 'g'), g || '');
       });
+      return cmd;
+    };
+    
+    if (streamOutput) {
+      engine.addStreamingExecMacro(`exec:${pattern}`, regex, 
+        usesDocContext 
+          ? (match: string, ...groups: string[]) => buildCommand(match, ...groups)  // Will be overridden by contextCommandBuilder
+          : buildCommand, 
+        {
+          lineBuffered: true,
+          trackState: !!trackState,
+          useDocumentContext: usesDocContext,
+          onStart: (match: string, pos: number) => {
+            if (!quiet) {
+              console.error(c('dim', `  Streaming: ${buildCommand(match)} at position ${pos}`));
+            }
+          },
+          onEnd: (exitCode: number) => {
+            if (!quiet) {
+              console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
+            }
+          },
+          onError: (err: Error) => {
+            console.error(c('red', `  Stream error: ${err.message}`));
+          }
+        });
+      
+      // If using document context, we need to set up a custom context command builder
+      if (usesDocContext) {
+        const macroEntry = engine.macros.get(`exec:${pattern}`);
+        if (macroEntry && macroEntry.type === 'streaming') {
+          (macroEntry as StreamingMacro).contextCommandBuilder = (ctx: DocumentContext) => buildCommandWithContext(ctx);
+        }
+      }
     } else {
       engine.addRegexMacro(`exec:${pattern}`, regex, async (fullMatch: string, ...groups: string[]) => {
-        const cmd = buildCommand(fullMatch, ...groups);
+        let cmd: string;
+        if (usesDocContext) {
+          const doc = client.getDocument();
+          const idx = doc.indexOf(fullMatch);
+          cmd = buildCommandWithContext({
+            fullDocument: doc,
+            beforeMatch: idx >= 0 ? doc.substring(0, idx) : '',
+            afterMatch: idx >= 0 ? doc.substring(idx + fullMatch.length) : '',
+            matchText: fullMatch,
+            groups
+          });
+        } else {
+          cmd = buildCommand(fullMatch, ...groups);
+        }
         
         if (!quiet) {
           console.error(c('dim', `  Executing: ${cmd}`));
@@ -1105,6 +1166,52 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
           return fullMatch;
         }
       });
+    }
+  }
+  
+  // Add block macros from command line
+  // Format: --block 'blockname:command'
+  // Transforms content between ::BEGIN:blockname:: and ::END:blockname::
+  for (const macro of blockMacros) {
+    const blockMatch = macro.match(/^(\w+):(.+)$/);
+    if (!blockMatch) {
+      console.error(c('red', `Invalid block macro format: ${macro}`));
+      console.error(c('red', `  Expected: blockname:command (e.g., "sort:sort" or "upper:tr a-z A-Z")`));
+      process.exit(1);
+    }
+    
+    const [, blockName, cmdTemplate] = blockMatch;
+    
+    engine.addBlockMacro(blockName, async (content, ctx) => {
+      // Build the command - pass content via stdin
+      let cmd = cmdTemplate;
+      // Replace placeholders if present
+      cmd = cmd.replace(/\{CONTENT\}/g, content);
+      cmd = cmd.replace(/\{DOC\}/g, ctx.fullDocument);
+      cmd = cmd.replace(/\{BEFORE\}/g, ctx.beforeMatch);
+      cmd = cmd.replace(/\{AFTER\}/g, ctx.afterMatch);
+      
+      if (!quiet) {
+        console.error(c('dim', `  Block ${blockName}: ${cmd}`));
+      }
+      
+      try {
+        // Pipe content to the command
+        const proc = Bun.spawn(['sh', '-c', cmd], { 
+          stdout: 'pipe', 
+          stderr: 'pipe',
+          stdin: new Response(content).body
+        });
+        const stdout = await new Response(proc.stdout).text();
+        return stdout;
+      } catch (err) {
+        console.error(c('red', `  Block command failed: ${(err as Error).message}`));
+        return ctx.matchText; // Return original on error
+      }
+    });
+    
+    if (!quiet) {
+      console.error(c('cyan', `Registered block macro: ${blockName}`));
     }
   }
   

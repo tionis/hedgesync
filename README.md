@@ -779,6 +779,93 @@ The outer shell allows pipes, redirects, and other shell features in your comman
 
 **Security Note:** Exec macros execute arbitrary shell commands. Only use on documents you trust, and be careful with user-provided content.
 
+#### State Tracking
+
+Use `--track-state` to visually show when a macro is running and prevent re-triggering:
+
+```bash
+# While running: ::ask question:: → ::ask question::→
+# When done:     ::ask question::→ → ::ask question::✓ result
+hedgesync macro <url> --exec '/::ask\s+(.+?)::/gi:llm "{1}"' --stream --track-state
+
+# Custom markers (default: → for running, ✓ for done)
+# Configure via environment or config file
+```
+
+With state tracking:
+1. When a macro starts, a running marker (`→`) is appended to the trigger
+2. This prevents the same pattern from re-matching while executing
+3. When complete, the marker changes to done (`✓`) followed by output
+4. Useful for expensive operations (LLM calls, API requests) to show status
+
+#### Document Context Placeholders
+
+Access full document context in your commands using special placeholders:
+
+```bash
+# {DOC} = entire document content
+# {BEFORE} = text before the match
+# {AFTER} = text after the match
+
+# Summarize the entire document with an LLM
+hedgesync macro <url> --exec '/::summarize::/gi:llm --context "{DOC}" "summarize this document"' --stream
+
+# Generate a conclusion based on preceding content
+hedgesync macro <url> --exec '/::conclude::/gi:llm --context "{BEFORE}" "write a conclusion"' --stream
+
+# Answer a question using document context
+hedgesync macro <url> --exec '/::answer\s+(.+?)::/gi:llm --doc "{DOC}" --question "{1}"' --stream
+```
+
+This is particularly useful for LLM integrations where the model needs context beyond just the trigger text.
+
+#### Block Macros
+
+Process multi-line content between `::BEGIN:name::` and `::END:name::` markers:
+
+```bash
+# Sort lines between markers
+hedgesync macro <url> --block 'sort:sort' --watch
+
+# Convert to uppercase  
+hedgesync macro <url> --block 'upper:tr a-z A-Z' --watch
+
+# Strike through each line
+hedgesync macro <url> --block 'strike:sed "s/.*$/~~&~~/"' --watch
+
+# Number lines
+hedgesync macro <url> --block 'number:nl -ba' --watch
+
+# Multiple block handlers
+hedgesync macro <url> --block 'sort:sort' --block 'upper:tr a-z A-Z' --watch
+```
+
+Example document:
+```markdown
+Shopping list:
+::BEGIN:sort::
+bananas
+apples
+milk
+eggs
+::END:sort::
+```
+
+After macro runs:
+```markdown
+Shopping list:
+apples
+bananas
+eggs
+milk
+```
+
+Block macros:
+- Content between markers is piped to stdin of the command
+- Command output replaces the entire block (including markers)
+- Great for transformations that need multi-line input
+- Can be combined with watch mode for live processing
+
 #### Macro Config File Format
 
 ```json
@@ -807,6 +894,24 @@ The outer shell allows pipes, redirects, and other shell features in your comman
       "lineBuffered": true
     },
     {
+      "type": "exec",
+      "pattern": "/::ask\\s+(.+?)::/gi",
+      "command": "llm \"{1}\"",
+      "streaming": true,
+      "trackState": true,
+      "useDocumentContext": true
+    },
+    {
+      "type": "block",
+      "name": "sort",
+      "command": "sort"
+    },
+    {
+      "type": "block",
+      "name": "upper",
+      "command": "tr a-z A-Z"
+    },
+    {
       "type": "builtin",
       "name": "date"
     }
@@ -817,6 +922,12 @@ The outer shell allows pipes, redirects, and other shell features in your comman
 Config options for exec macros:
 - `streaming`: Set to `true` to enable live streaming output (default: `false`)
 - `lineBuffered`: When streaming, buffer by line instead of character (default: `true`)
+- `trackState`: Show running/done markers to prevent re-triggering (default: `false`)
+- `useDocumentContext`: Enable {DOC}, {BEFORE}, {AFTER} placeholders (default: `false`)
+
+Config options for block macros:
+- `name`: The block name that appears in `::BEGIN:name::` markers
+- `command`: Shell command to process the block content (receives content via stdin)
 
 See `examples/macros.json` for more examples.
 

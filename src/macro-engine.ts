@@ -67,16 +67,45 @@ interface StreamingCallbacks {
   onError?: (error: Error) => void;
 }
 
+/** State tracking configuration */
+interface StateTracking {
+  enabled: boolean;
+  runningMarker?: string;  // Default: '→'
+  doneMarker?: string;     // Default: '✓'
+}
+
+/** Document context for command building */
+interface DocumentContext {
+  fullDocument: string;
+  beforeMatch: string;
+  afterMatch: string;
+  matchIndex: number;
+  matchText: string;
+  groups: string[];
+}
+
 /** Streaming exec macro definition */
 interface StreamingMacro extends BaseMacro, StreamingCallbacks {
   type: 'streaming';
   name: string;
-  commandBuilder: (match: string, ...groups: string[]) => string | Promise<string>;
+  /** Basic command builder (match + groups) */
+  commandBuilder?: (match: string, ...groups: string[]) => string | Promise<string>;
+  /** Enhanced command builder with document context */
+  contextCommandBuilder?: (context: DocumentContext) => string | Promise<string>;
   lineBuffered: boolean;
+  stateTracking?: StateTracking;
+}
+
+/** Block macro definition - matches ::BEGIN:name:: ... ::END:name:: */
+interface BlockMacro extends BaseMacro {
+  type: 'block';
+  name: string;
+  blockName: string;
+  handler: (content: string, context: DocumentContext) => string | Promise<string>;
 }
 
 /** Union of all macro types */
-type Macro = TextMacro | RegexMacro | TemplateMacro | StreamingMacro;
+type Macro = TextMacro | RegexMacro | TemplateMacro | StreamingMacro | BlockMacro;
 
 /** Match info from pattern matching */
 interface MatchInfo {
@@ -145,6 +174,22 @@ interface TextMacroOptions {
 /** Streaming exec macro options */
 interface StreamingExecOptions extends StreamingCallbacks {
   lineBuffered?: boolean;
+  /** Enable state tracking (changes ::trigger:: to ::trigger::→ while running, ::trigger::✓ when done) */
+  trackState?: boolean;
+  /** Custom running marker (default: '→') */
+  runningMarker?: string;
+  /** Custom done marker (default: '✓') */
+  doneMarker?: string;
+  /** Use document context placeholders: {DOC}, {BEFORE}, {AFTER} */
+  useDocumentContext?: boolean;
+}
+
+/** Block macro options */
+interface BlockMacroOptions {
+  /** Callbacks for block processing */
+  onStart?: (blockName: string, content: string) => void;
+  onEnd?: (blockName: string, result: string) => void;
+  onError?: (error: Error) => void;
 }
 
 /** Built-in date macro result */
@@ -293,22 +338,68 @@ class MacroEngine {
     commandBuilder: (match: string, ...groups: string[]) => string | Promise<string>, 
     options: StreamingExecOptions = {}
   ): MacroEngine {
-    const { lineBuffered = true, onStart, onData, onEnd, onError } = options;
+    const { 
+      lineBuffered = true, 
+      onStart, 
+      onData, 
+      onEnd, 
+      onError,
+      trackState = false,
+      runningMarker = '→',
+      doneMarker = '✓',
+      useDocumentContext = false
+    } = options;
     
     // Ensure the pattern has the global flag
     const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
     const globalPattern = new RegExp(pattern.source, flags);
     
+    const stateTracking: StateTracking | undefined = trackState ? {
+      enabled: true,
+      runningMarker,
+      doneMarker
+    } : undefined;
+    
     this.macros.set(name, {
       type: 'streaming',
       name,
       pattern: globalPattern,
-      commandBuilder,
+      commandBuilder: useDocumentContext ? undefined : commandBuilder,
+      contextCommandBuilder: useDocumentContext ? (ctx: DocumentContext) => {
+        return commandBuilder(ctx.matchText, ...ctx.groups);
+      } : undefined,
       lineBuffered,
+      stateTracking,
       onStart,
       onData,
       onEnd,
       onError
+    });
+    
+    return this;
+  }
+
+  /**
+   * Register a block macro that transforms content between ::BEGIN:name:: and ::END:name::
+   */
+  addBlockMacro(
+    blockName: string,
+    handler: (content: string, context: DocumentContext) => string | Promise<string>,
+    options: BlockMacroOptions = {}
+  ): MacroEngine {
+    // Pattern matches ::BEGIN:name::\n...content...\n::END:name::
+    const escapedName = blockName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(
+      `::BEGIN:${escapedName}::\\n([\\s\\S]*?)\\n::END:${escapedName}::`,
+      'g'
+    );
+    
+    this.macros.set(`block:${blockName}`, {
+      type: 'block',
+      name: `block:${blockName}`,
+      blockName,
+      pattern,
+      handler
     });
     
     return this;
@@ -389,6 +480,21 @@ class MacroEngine {
         for (const [name, macro] of this.macros) {
           // Skip streaming macros in the sync loop - they're handled separately
           if (macro.type === 'streaming') {
+            continue;
+          }
+          
+          // Handle block macros
+          if (macro.type === 'block') {
+            const result = await this._applyBlockMacro(document, macro);
+            if (result.changed) {
+              document = result.document;
+              expansions.push({
+                macro: name,
+                matches: result.matches
+              });
+              madeChanges = true;
+              break;
+            }
             continue;
           }
           
@@ -544,6 +650,103 @@ class MacroEngine {
   }
 
   /**
+   * Apply a block macro to the document (::BEGIN:name:: ... ::END:name::)
+   */
+  private async _applyBlockMacro(document: string, macro: BlockMacro): Promise<MacroApplyResult> {
+    const matches: MacroMatch[] = [];
+    let changed = false;
+    let updatedDocument = document;
+
+    // Reset regex lastIndex
+    macro.pattern.lastIndex = 0;
+
+    // Find all matches first
+    let match: RegExpExecArray | null;
+    const allMatches: MatchInfo[] = [];
+    while ((match = macro.pattern.exec(document)) !== null) {
+      allMatches.push({
+        match: match[0],
+        groups: match.slice(1),  // groups[0] is the content between BEGIN and END
+        index: match.index
+      });
+      
+      // Prevent infinite loop on zero-length matches
+      if (match.index === macro.pattern.lastIndex) {
+        macro.pattern.lastIndex++;
+      }
+    }
+
+    // Process first match only (to keep indices valid)
+    for (const m of allMatches) {
+      const fullMatch = m.match;
+      const content = m.groups[0] || '';
+      const originalIndex = m.index;
+
+      try {
+        // Build document context
+        const context: DocumentContext = {
+          fullDocument: document,
+          beforeMatch: document.substring(0, originalIndex),
+          afterMatch: document.substring(originalIndex + fullMatch.length),
+          matchIndex: originalIndex,
+          matchText: fullMatch,
+          groups: m.groups
+        };
+
+        // Call the handler with content and context
+        const replacement = await Promise.resolve(macro.handler(content, context));
+        
+        if (replacement === null || replacement === undefined) {
+          continue;
+        }
+
+        // Re-fetch current document state after async operation
+        const currentDocument = this.client.getDocument();
+        
+        // Re-locate the match in the current document
+        let replaceIndex = originalIndex;
+        const currentTextAtPos = currentDocument.substring(replaceIndex, replaceIndex + fullMatch.length);
+        
+        if (currentTextAtPos !== fullMatch) {
+          const newIndex = currentDocument.indexOf(fullMatch);
+          if (newIndex === -1) {
+            console.error(`Block macro ${macro.blockName}: block no longer found, skipping`);
+            continue;
+          }
+          replaceIndex = newIndex;
+        }
+        
+        // Replace the entire block (including markers) with the result
+        this.client.replace(replaceIndex, fullMatch.length, replacement);
+        
+        matches.push({ 
+          match: fullMatch, 
+          replacement, 
+          index: replaceIndex 
+        } as RegexMacroMatch);
+        changed = true;
+        
+        updatedDocument = 
+          currentDocument.substring(0, replaceIndex) +
+          replacement +
+          currentDocument.substring(replaceIndex + fullMatch.length);
+          
+      } catch (err) {
+        console.error(`Block macro ${macro.blockName} error:`, err);
+      }
+
+      // Only process one match at a time
+      if (changed) break;
+    }
+
+    return {
+      changed,
+      matches,
+      document: updatedDocument
+    };
+  }
+
+  /**
    * Process streaming macros - these run asynchronously and stream output into the document
    */
   private async _processStreamingMacros(): Promise<StreamingStarted[]> {
@@ -620,15 +823,32 @@ class MacroEngine {
     const wasRateLimitEnabled = this.client.isRateLimitEnabled();
     
     try {
-      // Build the command
-      const cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
+      // Get current document for context
+      let currentDoc = this.client.getDocument();
+      
+      // Build the command using either commandBuilder or contextCommandBuilder
+      let cmd: string | undefined;
+      
+      if (macro.contextCommandBuilder) {
+        const context: DocumentContext = {
+          fullDocument: currentDoc,
+          beforeMatch: currentDoc.substring(0, originalIndex),
+          afterMatch: currentDoc.substring(originalIndex + matchText.length),
+          matchIndex: originalIndex,
+          matchText,
+          groups
+        };
+        cmd = await Promise.resolve(macro.contextCommandBuilder(context));
+      } else if (macro.commandBuilder) {
+        cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
+      }
       
       if (!cmd) {
         return; // Command builder returned nothing
       }
       
       // Re-fetch document and find current position of the match
-      let currentDoc = this.client.getDocument();
+      currentDoc = this.client.getDocument();
       let insertPos = originalIndex;
       
       // Verify match still exists at expected position
@@ -647,7 +867,18 @@ class MacroEngine {
       // We control the pace ourselves with delays between inserts
       this.client.setRateLimitEnabled(false);
       
-      // Delete the matched text first with retry
+      // State tracking: instead of deleting, replace with running marker
+      const stateTracking = macro.stateTracking;
+      let runningMarkerText = '';
+      let markerInsertPos = insertPos;
+      
+      if (stateTracking?.enabled) {
+        // Create the running marker version of the match
+        // e.g., ::ask prompt:: → ::ask prompt::→
+        runningMarkerText = matchText + (stateTracking.runningMarker || '→') + '\n';
+      }
+      
+      // Delete or replace the matched text with retry
       let deleteSuccess = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -663,7 +894,15 @@ class MacroEngine {
             insertPos = newIndex;
           }
           
-          this.client.delete(insertPos, matchText.length);
+          if (stateTracking?.enabled) {
+            // Replace with running marker
+            this.client.replace(insertPos, matchText.length, runningMarkerText);
+            markerInsertPos = insertPos + runningMarkerText.length;
+          } else {
+            // Just delete the match
+            this.client.delete(insertPos, matchText.length);
+            markerInsertPos = insertPos;
+          }
           deleteSuccess = true;
           break;
         } catch (err) {
@@ -682,9 +921,8 @@ class MacroEngine {
       // Small delay to let the delete operation settle
       await new Promise(r => setTimeout(r, 50));
       
-      // Track our cursor position - starts where we deleted the match
-      // This position will be updated when remote operations come in
-      let cursorPos = insertPos;
+      // Track our cursor position - starts after the running marker (or where we deleted)
+      let cursorPos = markerInsertPos;
       let aborted = false;
       let isInserting = false; // Flag to avoid double-counting our own inserts
       
@@ -818,6 +1056,23 @@ class MacroEngine {
         
         const exitCode = await proc.exited;
         
+        // State tracking: replace running marker with done marker
+        if (stateTracking?.enabled && !aborted) {
+          try {
+            const runningMarker = matchText + (stateTracking.runningMarker || '→') + '\n';
+            const doneMarker = matchText + (stateTracking.doneMarker || '✓') + '\n';
+            
+            // Find and replace the running marker
+            const doc = this.client.getDocument();
+            const markerIndex = doc.indexOf(runningMarker);
+            if (markerIndex !== -1) {
+              this.client.replace(markerIndex, runningMarker.length, doneMarker);
+            }
+          } catch (err) {
+            console.error(`Streaming macro ${name}: failed to update done marker:`, (err as Error).message);
+          }
+        }
+        
         // Callback: onEnd
         if (macro.onEnd) {
           macro.onEnd(exitCode, cursorPos);
@@ -931,10 +1186,15 @@ export type {
   RegexMacro,
   TemplateMacro,
   StreamingMacro,
+  BlockMacro,
   MacroMatch,
   Expansion,
   MacroInfo,
   TextMacroOptions,
   StreamingExecOptions,
-  StreamingCallbacks
+  StreamingCallbacks,
+  BlockMacroOptions,
+  StateTracking,
+  DocumentContext
 };
+
