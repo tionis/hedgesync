@@ -159,17 +159,278 @@ function getConnectionOptions(args: ParsedArgs): ConnectionOptions | null {
   return null;
 }
 
-// Print help message
-function printHelp(): void {
+// Subcommand-specific help texts
+const subcommandHelp: Record<string, string> = {
+  get: `
+${c('bold', 'hedgesync get')} - Get document content
+
+${c('yellow', 'USAGE:')}
+  hedgesync get <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-o, --output')}   Write output to file
+  ${c('cyan', '--json')}         Output in JSON format
+  ${c('cyan', '--authors')}      Include authorship information
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync get https://md.example.com/abc123
+  hedgesync get https://md.example.com/abc123 -o backup.md
+  hedgesync get https://md.example.com/abc123 --authors --json
+`,
+
+  set: `
+${c('bold', 'hedgesync set')} - Set document content
+
+${c('yellow', 'USAGE:')}
+  hedgesync set <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-f, --file')}     Read content from file (otherwise reads from stdin)
+
+${c('yellow', 'EXAMPLES:')}
+  echo "# Hello" | hedgesync set https://md.example.com/abc123
+  hedgesync set https://md.example.com/abc123 -f document.md
+`,
+
+  replace: `
+${c('bold', 'hedgesync replace')} - Search and replace in document
+
+${c('yellow', 'USAGE:')}
+  hedgesync replace <url> <search> <replacement> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-r, --regex')}    Treat search pattern as regex
+  ${c('cyan', '-a, --all, -g')}  Replace all occurrences (not just first)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync replace https://md.example.com/abc123 "old" "new"
+  hedgesync replace https://md.example.com/abc123 "\\\\d+" "NUM" --regex --all
+`,
+
+  macro: `
+${c('bold', 'hedgesync macro')} - Run macros on document (auto-expand triggers)
+
+${c('yellow', 'USAGE:')}
+  hedgesync macro <url> [options]
+
+${c('yellow', 'MACRO TYPES:')}
+  ${c('cyan', '--text')}         Text replacement: ${c('dim', "'::trigger::=replacement'")}
+  ${c('cyan', '--regex')}        Regex replacement: ${c('dim', "'/pattern/flags=replacement'")}
+  ${c('cyan', '--exec')}         Shell command: ${c('dim', "'/pattern/flags:command'")}
+  ${c('cyan', '--block')}        Block macro: ${c('dim', "'name:command'")}
+  ${c('cyan', '--built-in')}     Enable built-in macros (date, uuid, counter)
+  ${c('cyan', '--config')}       Load macros from JSON config file
+
+${c('yellow', 'EXEC OPTIONS:')}
+  ${c('cyan', '--stream')}       Stream command output live into document
+  ${c('cyan', '--track-state')}  Show →/✓ markers to prevent re-triggering
+
+${c('yellow', 'MODE OPTIONS:')}
+  ${c('cyan', '--watch')}        Run continuously, expanding triggers as they appear
+
+${c('yellow', 'PLACEHOLDERS:')}
+  Exec macros support these placeholders in commands:
+  ${c('cyan', '{0}')}            Full regex match
+  ${c('cyan', '{1}, {2}...')}    Capture groups
+  ${c('cyan', '{DOC}')}          Entire document content
+  ${c('cyan', '{BEFORE}')}       Text before the match
+  ${c('cyan', '{AFTER}')}        Text after the match
+
+${c('yellow', 'BLOCK MACRO SYNTAX:')}
+  In document:  ${c('dim', '::BEGIN:name::')} content ${c('dim', '::END:name::')}
+  Content is piped to stdin of the command, output replaces the block.
+
+${c('yellow', 'EXAMPLES:')}
+  # Simple text replacement
+  hedgesync macro <url> --text '::sig::=— Signed by Bot'
+  
+  # Shell command with capture group
+  hedgesync macro <url> --exec '/::calc\\s+(.+?)::/i:echo {1} | bc -l'
+  
+  # Streaming with state tracking (for LLMs)
+  hedgesync macro <url> --exec '/::ask\\s+(.+?)::/i:llm "{1}"' --stream --track-state
+  
+  # Document context for summarization
+  hedgesync macro <url> --exec '/::summarize::/i:llm --context "{DOC}"' --stream
+  
+  # Block macro to sort lines
+  hedgesync macro <url> --block 'sort:sort' --watch
+  
+  # Multiple macros from config file
+  hedgesync macro <url> --config macros.json --watch
+
+${c('yellow', 'SHELL EXECUTION NOTE:')}
+  Commands run via 'sh -c "command"'. Use single quotes in templates
+  to prevent outer shell expansion: ${c('dim', "--exec \"/::run (.+?)::/i:bash -c '{1}'\"" )}
+
+${c('yellow', 'SECURITY NOTE:')}
+  Exec macros run arbitrary shell commands. Only use on trusted documents.
+`,
+
+  watch: `
+${c('bold', 'hedgesync watch')} - Watch document for changes
+
+${c('yellow', 'USAGE:')}
+  hedgesync watch <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output changes in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync watch https://md.example.com/abc123
+  hedgesync watch https://md.example.com/abc123 --json
+`,
+
+  transform: `
+${c('bold', 'hedgesync transform')} - Transform document with pandoc
+
+${c('yellow', 'USAGE:')}
+  hedgesync transform <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--to <format>')}  Convert to format (html, latex, etc.)
+  ${c('cyan', '--demote')}       Demote all headers by one level
+  ${c('cyan', '--promote')}      Promote all headers by one level
+  ${c('cyan', '--shift <n>')}    Shift header levels by n
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync transform https://md.example.com/abc123 --demote
+  hedgesync transform https://md.example.com/abc123 --to html
+`,
+
+  authors: `
+${c('bold', 'hedgesync authors')} - List document authors and contributions
+
+${c('yellow', 'USAGE:')}
+  hedgesync authors <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-v, --verbose')}  Show detailed authorship with timestamps
+  ${c('cyan', '--json')}         Output in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync authors https://md.example.com/abc123
+  hedgesync authors https://md.example.com/abc123 -v
+  hedgesync authors https://md.example.com/abc123 --json
+`,
+
+  line: `
+${c('bold', 'hedgesync line')} - Get or set a specific line
+
+${c('yellow', 'USAGE:')}
+  hedgesync line <url> <line-number> [new-content]
+
+${c('yellow', 'ARGUMENTS:')}
+  ${c('cyan', '<line-number>')}  Line number (0-indexed)
+  ${c('cyan', '[new-content]')}  If provided, sets the line content
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync line https://md.example.com/abc123 0        # Get first line
+  hedgesync line https://md.example.com/abc123 0 "# Title"  # Set first line
+`,
+
+  append: `
+${c('bold', 'hedgesync append')} - Append text to document
+
+${c('yellow', 'USAGE:')}
+  hedgesync append <url> <text>
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync append https://md.example.com/abc123 "New content at end"
+  echo "More text" | hedgesync append https://md.example.com/abc123
+`,
+
+  prepend: `
+${c('bold', 'hedgesync prepend')} - Prepend text to document
+
+${c('yellow', 'USAGE:')}
+  hedgesync prepend <url> <text>
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync prepend https://md.example.com/abc123 "Content at start"
+`,
+
+  insert: `
+${c('bold', 'hedgesync insert')} - Insert text at position
+
+${c('yellow', 'USAGE:')}
+  hedgesync insert <url> <position> <text>
+
+${c('yellow', 'ARGUMENTS:')}
+  ${c('cyan', '<position>')}     Character position (0-indexed)
+  ${c('cyan', '<text>')}         Text to insert
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync insert https://md.example.com/abc123 0 "Start: "
+  hedgesync insert https://md.example.com/abc123 100 "[inserted]"
+`,
+
+  info: `
+${c('bold', 'hedgesync info')} - Get note metadata
+
+${c('yellow', 'USAGE:')}
+  hedgesync info <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync info https://md.example.com/abc123
+  hedgesync info https://md.example.com/abc123 --json
+`,
+
+  users: `
+${c('bold', 'hedgesync users')} - List online users
+
+${c('yellow', 'USAGE:')}
+  hedgesync users <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync users https://md.example.com/abc123
+`
+};
+
+// Print main help message (overview)
+function printHelp(subcommand?: string): void {
+  // If a specific subcommand is requested and exists, show its help
+  if (subcommand && subcommandHelp[subcommand]) {
+    console.log(subcommandHelp[subcommand]);
+    return;
+  }
+  
+  // Show overview help
   console.log(`
 ${c('bold', 'hedgesync')} - HedgeDoc CLI for document manipulation
 
 ${c('yellow', 'USAGE:')}
-  hedgesync <command> <url> [options] [arguments]
+  hedgesync <command> <url> [options]
+  hedgesync help <command>          ${c('dim', '# Show help for a specific command')}
 
 ${c('yellow', 'COMMANDS:')}
   ${c('green', 'get')}         Get document content
-  ${c('green', 'get --authors')} Get document with authorship information
   ${c('green', 'set')}         Set document content (from stdin or file)
   ${c('green', 'append')}      Append text to document
   ${c('green', 'prepend')}     Prepend text to document
@@ -179,91 +440,26 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'watch')}       Watch document for changes
   ${c('green', 'info')}        Get note metadata
   ${c('green', 'users')}       List online users
-  ${c('green', 'authors')}     List document authors and their contributions
+  ${c('green', 'authors')}     List document authors and contributions
   ${c('green', 'transform')}   Transform document with pandoc
-  ${c('green', 'macro')}       Run macros on document (expand triggers, watch mode)
-  ${c('green', 'help')}        Show this help message
+  ${c('green', 'macro')}       Run macros on document (expand triggers)
+  ${c('green', 'help')}        Show help (use 'help <command>' for details)
 
-${c('yellow', 'ARGUMENTS:')}
-  ${c('cyan', '<url>')}          Full HedgeDoc URL (required, e.g., https://md.example.com/abc123)
-
-${c('yellow', 'OPTIONS:')}
+${c('yellow', 'GLOBAL OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
-  ${c('cyan', '-f, --file')}     Read content from file
-  ${c('cyan', '-o, --output')}   Write output to file
   ${c('cyan', '-q, --quiet')}    Suppress non-essential output
-  ${c('cyan', '--json')}         Output in JSON format
   ${c('cyan', '--no-reconnect')} Disable auto-reconnection
-  ${c('cyan', '-r, --regex')}    Treat search pattern as regex (for replace)
-  ${c('cyan', '-a, --all')}      Replace all occurrences (for replace)
 
 ${c('yellow', 'EXAMPLES:')}
-  # Get document content
   hedgesync get https://md.example.com/abc123
-  
-  # Set document from stdin
-  echo "# Hello" | hedgesync set https://md.example.com/abc123
-  
-  # Set document from file
-  hedgesync set https://md.example.com/abc123 -f document.md
-  
-  # Append text
-  hedgesync append https://md.example.com/abc123 "New content"
-  
-  # Search and replace
-  hedgesync replace https://md.example.com/abc123 "old" "new"
-  
-  # Regex replace all
-  hedgesync replace https://md.example.com/abc123 "\\d+" "NUM" --regex --all
-  
-  # Watch for changes
-  hedgesync watch https://md.example.com/abc123
-  
-  # Get line 5 (0-indexed)
-  hedgesync line https://md.example.com/abc123 5
-  
-  # Set line 5
-  hedgesync line https://md.example.com/abc123 5 "New line content"
-  
-  # Run macros once (expand all triggers)
-  hedgesync macro https://md.example.com/abc123 --text "::date::=\\$(date -I)"
-  
-  # Run macros in watch mode (continuously expand triggers)
-  hedgesync macro https://md.example.com/abc123 --watch --text "::date::=\\$(date -I)"
-  
-  # Load macros from config file
-  hedgesync macro https://md.example.com/abc123 --config macros.json --watch
-  
-  # Execute shell command with regex captures as arguments
-  # {0} = full match, {1}, {2}... = capture groups
-  # Note: Commands run via 'sh -c', so use single quotes for nested shells
-  hedgesync macro https://md.example.com/abc123 --exec '/::calc\\s+(.+?)::/i:bc -l <<< {1}'
-  
-  # Embed file contents: ::file path/to/file.txt::
-  hedgesync macro https://md.example.com/abc123 --exec '/::file\\s+(.+?)::/i:cat {1}'
-  
-  # Run arbitrary shell: ::run for i in 1 2 3; do echo \\$i; done::
-  # Use single quotes to prevent outer shell expansion of $vars
-  hedgesync macro https://md.example.com/abc123 --exec "/::run\\s+(.+?)::/i:bash -c '{1}'"
-  
-  # Stream long command output (shows progress)
-  hedgesync macro https://md.example.com/abc123 --exec '/::slow::/i:sleep 1; echo done' --stream
-  
-  # Stream with state tracking (::trigger:: → ::trigger::→ while running, ::trigger::✓ when done)
-  hedgesync macro https://md.example.com/abc123 --exec '/::ask\\s+(.+?)::/i:llm "{1}"' --stream --track-state
-  
-  # Document context: use {DOC}, {BEFORE}, {AFTER} placeholders
-  # Great for LLM summarization that needs full document context
-  hedgesync macro https://md.example.com/abc123 --exec '/::summarize::/i:llm --context "{DOC}" "summarize this"' --stream
-  
-  # Block macros: transform content between ::BEGIN:name:: and ::END:name::
-  # Content is piped to stdin of the command
-  hedgesync macro https://md.example.com/abc123 --block 'sort:sort' --watch
-  hedgesync macro https://md.example.com/abc123 --block 'upper:tr a-z A-Z' --watch
-  hedgesync macro https://md.example.com/abc123 --block 'strikethrough:sed "s/.*$/~~&~~/"' --watch
-  
-  # With authentication cookie
-  hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
+  hedgesync set https://md.example.com/abc123 -f doc.md
+  hedgesync replace https://md.example.com/abc123 "old" "new" --all
+  hedgesync macro https://md.example.com/abc123 --exec '/::date::/i:date' --watch
+
+${c('yellow', 'MORE HELP:')}
+  hedgesync help get       ${c('dim', '# Help for get command')}
+  hedgesync help macro     ${c('dim', '# Help for macro command (detailed)')}
+  hedgesync help replace   ${c('dim', '# Help for replace command')}
 `);
 }
 
@@ -1310,7 +1506,15 @@ async function cmdExec(args: ParsedArgs): Promise<void> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   
-  if (!args.command || args.command === 'help' || args.options.help || args.options.h) {
+  // Handle help command with optional subcommand
+  if (args.command === 'help') {
+    const subcommand = args.positional[0];
+    printHelp(subcommand);
+    process.exit(0);
+  }
+  
+  // Handle --help flag or no command
+  if (!args.command || args.options.help || args.options.h) {
     printHelp();
     process.exit(0);
   }
