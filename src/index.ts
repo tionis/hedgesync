@@ -62,10 +62,14 @@ export type {
   RegexMacro,
   TemplateMacro,
   StreamingMacro,
+  BlockMacro,
   MacroMatch,
   Expansion,
   MacroInfo,
   TextMacroOptions,
   StreamingExecOptions,
-  StreamingCallbacks
+  StreamingCallbacks,
+  BlockMacroOptions,
+  DocumentContext,
+  StateTracking
 } from './macro-engine.js';

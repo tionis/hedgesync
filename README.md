@@ -642,6 +642,30 @@ macros.addTemplateMacro('vars', '${', '}', (name) => {
   return vars[name] || `[unknown: ${name}]`;
 });
 
+// Exec macros - execute shell commands
+macros.addExecMacro('calc', /::calc\s+(.+?)::/gi, 'echo {1} | bc -l');
+
+// Streaming exec macros - output streams live into document
+macros.addStreamingExecMacro('slow', /::slow::/gi, 'for i in 1 2 3; do echo $i; sleep 1; done', {
+  lineBuffered: true,
+  trackState: true,      // Show → while running, ✓ when done
+  useDocumentContext: true  // Enable {DOC}, {BEFORE}, {AFTER} placeholders
+});
+
+// Block macros - process content between ::BEGIN:name:: and ::END:name::
+macros.addBlockMacro('sort', (name, content, context) => {
+  const lines = content.trim().split('\n');
+  return lines.sort().join('\n');
+});
+
+// Block macro with shell command
+macros.addBlockMacro('uppercase', async (name, content) => {
+  const proc = Bun.spawn(['tr', 'a-z', 'A-Z'], { stdin: 'pipe' });
+  proc.stdin.write(content);
+  proc.stdin.end();
+  return await new Response(proc.stdout).text();
+});
+
 // Built-in helpers
 const { dateMacro, uuidMacro, counterMacro } = MacroEngine.builtins;
 macros.addTextMacro(...Object.values(dateMacro('::now', 'locale')));
@@ -703,6 +727,20 @@ hedgesync macro <url> --built-in --watch
 # Mix and match different macro types
 hedgesync macro <url> --text '::sig::=Bot' --exec '/::date::/gi:date +%F' --built-in
 ```
+
+#### Macro Command Options
+
+| Option | Description |
+|--------|-------------|
+| `--text 'trigger=replacement'` | Simple text replacement macro |
+| `--regex '/pattern/flags=replacement'` | Regex pattern replacement macro |
+| `--exec '/pattern/flags:command'` | Execute shell command on pattern match |
+| `--block 'name:command'` | Block macro for `::BEGIN:name::` ... `::END:name::` |
+| `--built-in` | Enable built-in macros (date, uuid, counter) |
+| `--config <file>` | Load macros from JSON config file |
+| `--watch` | Run continuously, applying macros as document changes |
+| `--stream` | Stream command output live into document |
+| `--track-state` | Show running/done markers (`→`/`✓`) to prevent re-triggering |
 
 #### Exec Macros (Shell Command Execution)
 
