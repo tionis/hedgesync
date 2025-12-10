@@ -213,61 +213,190 @@ ${c('yellow', 'EXAMPLES:')}
   macro: `
 ${c('bold', 'hedgesync macro')} - Run macros on document (auto-expand triggers)
 
+Macros watch a HedgeDoc document and automatically replace patterns with
+computed values. When a user types a trigger pattern, it gets expanded.
+
 ${c('yellow', 'USAGE:')}
   hedgesync macro <url> [options]
 
 ${c('yellow', 'MACRO TYPES:')}
-  ${c('cyan', '--text')}         Text replacement: ${c('dim', "'::trigger::=replacement'")}
-  ${c('cyan', '--regex')}        Regex replacement: ${c('dim', "'/pattern/flags=replacement'")}
-  ${c('cyan', '--exec')}         Shell command: ${c('dim', "'/pattern/flags:command'")}
-  ${c('cyan', '--block')}        Block macro: ${c('dim', "'name:command'")}
-  ${c('cyan', '--built-in')}     Enable built-in macros (date, uuid, counter)
-  ${c('cyan', '--config')}       Load macros from JSON config file
+  ${c('cyan', '--text')}         Simple text replacement
+                    Format: ${c('dim', "'trigger=replacement'")}
+                    Example: --text '::sig::=— Signed by Bot'
+                    When user types "::sig::" it becomes "— Signed by Bot"
+
+  ${c('cyan', '--regex')}        Regex pattern replacement
+                    Format: ${c('dim', "'/pattern/flags=replacement'")}
+                    Example: --regex '/TODO/gi=DONE'
+                    All "TODO" (case-insensitive) becomes "DONE"
+
+  ${c('cyan', '--exec')}         Execute shell command on match
+                    Format: ${c('dim', "'/pattern/flags:shell-command'")}
+                    The matched text is replaced with command output.
+                    Use {0} for full match, {1},{2}... for capture groups.
+                    Example: --exec '/::calc\\s+(.+?)::/i:echo {1} | bc -l'
+                    "::calc 2+2::" becomes "4"
+
+  ${c('cyan', '--block')}        Transform multi-line content blocks
+                    Format: ${c('dim', "'blockname:shell-command'")}
+                    See BLOCK MACROS section below for details.
+
+  ${c('cyan', '--built-in')}     Enable built-in macros (::date::, ::uuid::, etc.)
+  ${c('cyan', '--config')}       Load macro definitions from JSON file
 
 ${c('yellow', 'EXEC OPTIONS:')}
-  ${c('cyan', '--stream')}       Stream command output live into document
-  ${c('cyan', '--track-state')}  Show →/✓ markers to prevent re-triggering
+  ${c('cyan', '--stream')}       Stream command output into document as it runs.
+                    Useful for slow commands (LLMs, builds) to show progress.
+
+  ${c('cyan', '--track-state')}  Prevent re-triggering while command runs.
+                    Appends "→" while running, changes to "✓" when done.
+                    Example: "::ask hi::" → "::ask hi::→" → "::ask hi::✓ Hello!"
 
 ${c('yellow', 'MODE OPTIONS:')}
-  ${c('cyan', '--watch')}        Run continuously, expanding triggers as they appear
+  ${c('cyan', '--watch')}        Run continuously, expanding triggers as they appear.
+                    Without --watch, macros run once and exit.
 
-${c('yellow', 'PLACEHOLDERS:')}
-  Exec macros support these placeholders in commands:
-  ${c('cyan', '{0}')}            Full regex match
-  ${c('cyan', '{1}, {2}...')}    Capture groups
-  ${c('cyan', '{DOC}')}          Entire document content
-  ${c('cyan', '{BEFORE}')}       Text before the match
-  ${c('cyan', '{AFTER}')}        Text after the match
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+${c('yellow', 'DOCUMENT CONTEXT PLACEHOLDERS')}
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
 
-${c('yellow', 'BLOCK MACRO SYNTAX:')}
-  In document:  ${c('dim', '::BEGIN:name::')} content ${c('dim', '::END:name::')}
-  Content is piped to stdin of the command, output replaces the block.
+When using --exec, you can access the full document in your command:
 
-${c('yellow', 'EXAMPLES:')}
-  # Simple text replacement
-  hedgesync macro <url> --text '::sig::=— Signed by Bot'
+  ${c('cyan', '{0}')}       The full matched text (the trigger itself)
+  ${c('cyan', '{1}')}       First capture group from the regex
+  ${c('cyan', '{2}...')}    Additional capture groups
+  ${c('cyan', '{DOC}')}     ${c('bold', 'The entire document content')}
+  ${c('cyan', '{BEFORE}')}  All text before the match
+  ${c('cyan', '{AFTER}')}   All text after the match
+
+${c('green', 'Example: Summarize document with an LLM')}
   
-  # Shell command with capture group
-  hedgesync macro <url> --exec '/::calc\\s+(.+?)::/i:echo {1} | bc -l'
-  
-  # Streaming with state tracking (for LLMs)
-  hedgesync macro <url> --exec '/::ask\\s+(.+?)::/i:llm "{1}"' --stream --track-state
-  
-  # Document context for summarization
-  hedgesync macro <url> --exec '/::summarize::/i:llm --context "{DOC}"' --stream
-  
-  # Block macro to sort lines
-  hedgesync macro <url> --block 'sort:sort' --watch
-  
-  # Multiple macros from config file
+  Document contains:
+    # My Notes
+    Some long content here...
+    ::summarize::
+    More content...
+
+  Command:
+    hedgesync macro <url> --exec '/::summarize::/i:llm "Summarize: {DOC}"' --stream
+
+  The {DOC} placeholder is replaced with the entire document text, so the
+  LLM receives the full context. Output replaces "::summarize::".
+
+${c('green', 'Example: Generate conclusion from preceding text')}
+
+  hedgesync macro <url> --exec '/::conclude::/i:llm "Write conclusion for: {BEFORE}"'
+
+  Uses only the text before the trigger as context.
+
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+${c('yellow', 'BLOCK MACROS')}
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+
+Block macros transform content between special markers. Unlike --exec which
+replaces a single trigger, --block operates on multi-line regions.
+
+${c('green', 'Syntax in document:')}
+  ::BEGIN:blockname::
+  content line 1
+  content line 2
+  ...
+  ::END:blockname::
+
+${c('green', 'How it works:')}
+  1. The content between BEGIN and END is extracted
+  2. Content is piped to stdin of the shell command
+  3. Command output replaces the entire block (including markers)
+
+${c('green', 'Example: Sort a list')}
+
+  CLI:
+    hedgesync macro <url> --block 'sort:sort' --watch
+
+  Document before:
+    Shopping list:
+    ::BEGIN:sort::
+    bananas
+    apples
+    milk
+    eggs
+    ::END:sort::
+
+  Document after (markers removed, content sorted):
+    Shopping list:
+    apples
+    bananas
+    eggs
+    milk
+
+${c('green', 'Example: Convert to uppercase')}
+
+  CLI:
+    hedgesync macro <url> --block 'upper:tr a-z A-Z' --watch
+
+  Document:
+    ::BEGIN:upper::
+    hello world
+    ::END:upper::
+
+  Result:
+    HELLO WORLD
+
+${c('green', 'Example: Number lines')}
+
+  CLI:
+    hedgesync macro <url> --block 'number:nl -ba' --watch
+
+${c('green', 'Example: Format as markdown table')}
+
+  CLI:
+    hedgesync macro <url> --block 'table:column -t -s ","' --watch
+
+  Document:
+    ::BEGIN:table::
+    Name,Age,City
+    Alice,30,NYC
+    Bob,25,LA
+    ::END:table::
+
+${c('green', 'Multiple block handlers:')}
+  hedgesync macro <url> --block 'sort:sort' --block 'upper:tr a-z A-Z' --watch
+
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+${c('yellow', 'MORE EXAMPLES')}
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+
+${c('green', 'Calculator:')}
+  hedgesync macro <url> --exec '/::calc\\s+(.+?)::/i:echo {1} | bc -l' --watch
+  "::calc 2+2::" → "4"
+  "::calc sqrt(2)::" → "1.41421356..."
+
+${c('green', 'Embed file contents:')}
+  hedgesync macro <url> --exec '/::file\\s+(.+?)::/i:cat {1}' --watch
+  "::file README.md::" → (contents of README.md)
+
+${c('green', 'Current date/time:')}
+  hedgesync macro <url> --exec '/::now::/i:date' --watch
+  "::now::" → "Tue Dec 10 14:30:00 UTC 2025"
+
+${c('green', 'LLM with streaming and state tracking:')}
+  hedgesync macro <url> \\
+    --exec '/::ask\\s+(.+?)::/i:llm "{1}"' \\
+    --stream --track-state --watch
+
+  "::ask What is 2+2?::" → "::ask What is 2+2::→" → "::ask What is 2+2::✓ 2+2 equals 4."
+
+${c('green', 'Load from config file:')}
   hedgesync macro <url> --config macros.json --watch
 
 ${c('yellow', 'SHELL EXECUTION NOTE:')}
-  Commands run via 'sh -c "command"'. Use single quotes in templates
-  to prevent outer shell expansion: ${c('dim', "--exec \"/::run (.+?)::/i:bash -c '{1}'\"" )}
+  Commands run via 'sh -c "command"'. Use single quotes in the command
+  template to prevent the outer shell from expanding variables:
+  ${c('dim', "--exec \"/::run (.+?)::/i:bash -c '{1}'\"")}
 
 ${c('yellow', 'SECURITY NOTE:')}
-  Exec macros run arbitrary shell commands. Only use on trusted documents.
+  Exec and block macros run arbitrary shell commands. Only use on documents
+  you trust. Malicious document content could execute harmful commands.
 `,
 
   watch: `
