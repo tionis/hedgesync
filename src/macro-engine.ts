@@ -647,8 +647,37 @@ class MacroEngine {
       // We control the pace ourselves with delays between inserts
       this.client.setRateLimitEnabled(false);
       
-      // Delete the matched text first
-      this.client.delete(insertPos, matchText.length);
+      // Delete the matched text first with retry
+      let deleteSuccess = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          // Re-verify position before delete in case document changed
+          currentDoc = this.client.getDocument();
+          const verifyText = currentDoc.substring(insertPos, insertPos + matchText.length);
+          if (verifyText !== matchText) {
+            const newIndex = currentDoc.indexOf(matchText);
+            if (newIndex === -1) {
+              console.error(`Streaming macro ${name}: match "${matchText}" no longer found`);
+              return;
+            }
+            insertPos = newIndex;
+          }
+          
+          this.client.delete(insertPos, matchText.length);
+          deleteSuccess = true;
+          break;
+        } catch (err) {
+          if (attempt < 2) {
+            console.error(`Streaming macro ${name}: delete failed (attempt ${attempt + 1}/3):`, (err as Error).message);
+            await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+          } else {
+            console.error(`Streaming macro ${name}: delete failed after 3 attempts:`, (err as Error).message);
+            return;
+          }
+        }
+      }
+      
+      if (!deleteSuccess) return;
       
       // Small delay to let the delete operation settle
       await new Promise(r => setTimeout(r, 50));
@@ -685,36 +714,48 @@ class MacroEngine {
       const decoder = new TextDecoder();
       let lineBuffer = '';
       
-      // Helper to safely insert text at tracked cursor position
-      const safeInsert = async (text: string): Promise<boolean> => {
+      // Helper to safely insert text at tracked cursor position with retry
+      const safeInsert = async (text: string, maxRetries = 3): Promise<boolean> => {
         if (aborted) return false;
         
-        // Get current document state
-        const doc = this.client.getDocument();
-        
-        // Bounds check - clamp to valid range
-        const insertAt = Math.max(0, Math.min(cursorPos, doc.length));
-        
-        if (insertAt !== cursorPos) {
-          // Position was out of bounds, adjust it
-          cursorPos = insertAt;
-        }
-        
-        try {
-          isInserting = true;
-          this.client.insert(insertAt, text);
-          // Move our cursor forward by the inserted length
-          cursorPos += text.length;
-          isInserting = false;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          // Get current document state fresh for each attempt
+          const doc = this.client.getDocument();
           
-          // Small delay to let OT process the operation
-          await new Promise(r => setTimeout(r, 30));
-          return true;
-        } catch (err) {
-          isInserting = false;
-          console.error(`Streaming macro ${name}: insert failed:`, (err as Error).message);
-          return false;
+          // Bounds check - clamp to valid range
+          const insertAt = Math.max(0, Math.min(cursorPos, doc.length));
+          
+          if (insertAt !== cursorPos) {
+            // Position was out of bounds, adjust it
+            cursorPos = insertAt;
+          }
+          
+          try {
+            isInserting = true;
+            this.client.insert(insertAt, text);
+            // Move our cursor forward by the inserted length
+            cursorPos += text.length;
+            isInserting = false;
+            
+            // Small delay to let OT process the operation
+            await new Promise(r => setTimeout(r, 30));
+            return true;
+          } catch (err) {
+            isInserting = false;
+            
+            if (attempt < maxRetries - 1) {
+              // Wait a bit and let OT settle before retrying
+              console.error(`Streaming macro ${name}: insert failed (attempt ${attempt + 1}/${maxRetries}):`, (err as Error).message);
+              await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+              // Re-sync cursor position from document length in case of desync
+              cursorPos = Math.min(cursorPos, this.client.getDocument().length);
+            } else {
+              console.error(`Streaming macro ${name}: insert failed after ${maxRetries} attempts:`, (err as Error).message);
+              return false;
+            }
+          }
         }
+        return false;
       };
       
       try {

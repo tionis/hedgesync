@@ -1332,20 +1332,37 @@ export class HedgeDocClient extends EventEmitter {
 
   private _handleAck(revision: number): void {
     if (this.otClient) {
-      this.otClient.serverAck(revision);
+      try {
+        this.otClient.serverAck(revision);
+      } catch (err) {
+        this.emit('ot-error', { type: 'ack', revision, error: err });
+        // Try to resync by emitting a refresh event
+        this.refresh();
+      }
     }
   }
 
   private _handleOperation(clientId: string, revision: number, operation: OperationJSON, selection: unknown): void {
     if (this.otClient) {
-      const op = TextOperation.fromJSON(operation);
-      this.otClient.applyServer(revision, op);
+      try {
+        const op = TextOperation.fromJSON(operation);
+        this.otClient.applyServer(revision, op);
+      } catch (err) {
+        this.emit('ot-error', { type: 'operation', clientId, revision, operation, error: err });
+        // Try to resync by requesting a refresh
+        this.refresh();
+      }
     }
   }
 
   private _handleOperations(head: number, operations: OperationJSON[]): void {
     if (this.otClient) {
-      this.otClient.applyOperations(head, operations);
+      try {
+        this.otClient.applyOperations(head, operations);
+      } catch (err) {
+        this.emit('ot-error', { type: 'operations', head, error: err });
+        this.refresh();
+      }
     }
   }
 
