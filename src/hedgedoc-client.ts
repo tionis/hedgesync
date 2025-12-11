@@ -688,6 +688,13 @@ export class HedgeDocClient extends EventEmitter {
   }
 
   /**
+   * Check if the OT client is in synchronized state (no pending operations)
+   */
+  isSynchronized(): boolean {
+    return this.otClient ? this.otClient.isSynchronized() : true;
+  }
+
+  /**
    * Get document content with authorship information
    */
   getDocumentWithAuthorship(): DocumentWithAuthorship {
