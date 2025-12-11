@@ -252,6 +252,12 @@ ${c('yellow', 'EXEC OPTIONS:')}
                     Appends "→" while running, changes to "✓" when done.
                     Example: "::ask hi::" → "::ask hi::→" → "::ask hi::✓ Hello!"
 
+${c('yellow', 'FILTER OPTIONS:')}
+  ${c('cyan', '--user-filter')}  Only trigger macros for edits from users matching this
+                    regex pattern. Matches against the user's display name.
+                    Example: --user-filter 'Alice|Bob' (only Alice or Bob)
+                    Example: --user-filter '^Guest' (only guest users)
+
 ${c('yellow', 'MODE OPTIONS:')}
   ${c('cyan', '--watch')}        Run continuously, expanding triggers as they appear.
                     Without --watch, macros run once and exit.
@@ -539,6 +545,54 @@ ${c('yellow', 'OPTIONS:')}
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync users https://md.example.com/abc123
+`,
+
+  demo: `
+${c('bold', 'hedgesync demo')} - Demo/fun commands
+
+${c('yellow', 'USAGE:')}
+  hedgesync demo <subcommand> <url> [options]
+
+${c('yellow', 'SUBCOMMANDS:')}
+  ${c('green', 'decay')}   Delete characters typed by specified users after a delay
+
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+${c('yellow', 'DECAY MODE')}
+${c('yellow', '─────────────────────────────────────────────────────────────────────────────')}
+
+Makes text typed by matching users "decay" (disappear) character by character
+after a configurable delay. Each character is deleted in order, creating a
+typewriter-in-reverse effect.
+
+${c('yellow', 'USAGE:')}
+  hedgesync demo decay <url> --user <regex> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '--user <regex>')}   ${c('bold', 'Required.')} Regex pattern to match usernames.
+                     Only text from matching users will decay.
+  ${c('cyan', '--delay <ms>')}     Delay before decay starts (default: 5000ms)
+  ${c('cyan', '--char-delay <ms>')} Time between each character deletion (default: 50ms)
+  ${c('cyan', '-c, --cookie')}     Session cookie for authentication
+
+${c('yellow', 'EXAMPLES:')}
+  # Decay text from all Guest users after 3 seconds
+  hedgesync demo decay https://md.example.com/abc123 --user '^Guest' --delay 3000
+
+  # Decay text from specific user immediately, slowly
+  hedgesync demo decay https://md.example.com/abc123 --user 'Alice' --delay 0 --char-delay 200
+
+  # Decay everyone's text (use with caution!)
+  hedgesync demo decay https://md.example.com/abc123 --user '.*' --delay 10000
+
+${c('yellow', 'HOW IT WORKS:')}
+  1. Watches for remote edits from users matching --user regex
+  2. When an insert is detected, schedules deletion after --delay ms
+  3. Characters are deleted one by one with --char-delay between each
+  4. Deletions respect concurrent edits (positions are tracked)
+
+${c('yellow', 'NOTE:')}
+  This is a fun demo for presentations. The decay only affects NEW text
+  typed after the command starts, not existing document content.
 `
 };
 
@@ -572,6 +626,7 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'authors')}     List document authors and contributions
   ${c('green', 'transform')}   Transform document with pandoc
   ${c('green', 'macro')}       Run macros on document (expand triggers)
+  ${c('green', 'demo')}        Demo/fun commands (decay, etc.)
   ${c('green', 'help')}        Show help (use 'help <command>' for details)
 
 ${c('yellow', 'GLOBAL OPTIONS:')}
@@ -588,7 +643,7 @@ ${c('yellow', 'EXAMPLES:')}
 ${c('yellow', 'MORE HELP:')}
   hedgesync help get       ${c('dim', '# Help for get command')}
   hedgesync help macro     ${c('dim', '# Help for macro command (detailed)')}
-  hedgesync help replace   ${c('dim', '# Help for replace command')}
+  hedgesync help demo      ${c('dim', '# Help for demo commands')}
 `);
 }
 
@@ -1277,9 +1332,24 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
   const blockMacros = ([] as string[]).concat((args.options.block || args.options.B || []) as string[]);
   const streamOutput = args.options.stream || args.options.s;
   const trackState = args.options['track-state'] || args.options.T;
+  const userFilterStr = args.options['user-filter'] || args.options.U;
   
-  // Create macro engine
-  const engine = new MacroEngine(client);
+  // Parse user filter regex
+  let userFilter: RegExp | undefined;
+  if (userFilterStr && typeof userFilterStr === 'string') {
+    try {
+      userFilter = new RegExp(userFilterStr);
+      if (!quiet) {
+        console.error(c('cyan', `User filter: /${userFilterStr}/ (only matching users trigger macros)`));
+      }
+    } catch (e) {
+      console.error(c('red', `Invalid user filter regex: ${userFilterStr}`));
+      process.exit(1);
+    }
+  }
+  
+  // Create macro engine with options
+  const engine = new MacroEngine(client, { userFilter });
   
   // Built-in macros
   if (args.options['built-in'] || args.options.b) {
@@ -1596,6 +1666,177 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
 }
 
 // Command: exec (run a script)
+// Command: demo (demo/showcase commands)
+async function cmdDemo(args: ParsedArgs): Promise<void> {
+  const subcommand = args.positional[1];
+  
+  if (!subcommand) {
+    console.error(c('red', 'Error: Demo subcommand required'));
+    console.error(c('cyan', 'Available demo commands: decay'));
+    process.exit(1);
+  }
+  
+  switch (subcommand) {
+    case 'decay':
+      await cmdDemoDecay(args);
+      break;
+    default:
+      console.error(c('red', `Unknown demo command: ${subcommand}`));
+      console.error(c('cyan', 'Available demo commands: decay'));
+      process.exit(1);
+  }
+}
+
+// Demo: decay - delete characters typed by a user after a delay
+async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
+  const url = args.positional[2];
+  
+  if (!url) {
+    console.error(c('red', 'Error: URL required'));
+    console.error(c('cyan', 'Usage: hedgesync demo decay <url> [--user <regex>] [--delay <ms>] [--char-delay <ms>]'));
+    process.exit(1);
+  }
+  
+  // Override positional for connect()
+  args.positional[0] = url;
+  
+  const userPatternStr = args.options.user || args.options.u;
+  const delayStr = String(args.options.delay || args.options.d || '3000');
+  const charDelayStr = String(args.options['char-delay'] || args.options.c || '50');
+  const delay = parseInt(delayStr, 10);
+  const charDelay = parseInt(charDelayStr, 10);
+  const quiet = args.options.quiet || args.options.q;
+  
+  let userPattern: RegExp | undefined;
+  if (userPatternStr && typeof userPatternStr === 'string') {
+    try {
+      userPattern = new RegExp(userPatternStr);
+    } catch (e) {
+      console.error(c('red', `Invalid user regex: ${userPatternStr}`));
+      process.exit(1);
+    }
+  }
+  
+  if (!userPattern) {
+    console.error(c('red', 'Error: --user <regex> is required to avoid decaying your own text'));
+    process.exit(1);
+  }
+  
+  const client = await connect(args);
+  
+  if (!quiet) {
+    console.error(c('cyan', `Decay demo started - user pattern: /${userPatternStr}/`));
+    console.error(c('cyan', `  Delay: ${delay}ms, Char delay: ${charDelay}ms`));
+    console.error(c('yellow', 'Press Ctrl+C to stop'));
+  }
+  
+  // Track pending deletions
+  interface PendingDeletion {
+    position: number;
+    length: number;
+    scheduledTime: number;
+  }
+  
+  const pendingDeletions: PendingDeletion[] = [];
+  let processingDeletions = false;
+  
+  // Process deletions in order
+  async function processDeletions() {
+    if (processingDeletions) return;
+    processingDeletions = true;
+    
+    while (pendingDeletions.length > 0) {
+      const now = Date.now();
+      const next = pendingDeletions[0];
+      
+      if (next.scheduledTime > now) {
+        // Wait until it's time
+        await new Promise(resolve => setTimeout(resolve, next.scheduledTime - now));
+      }
+      
+      // Get current document to verify position
+      const doc = client.getDocument();
+      if (next.position < doc.length) {
+        // Delete one character at a time with char-delay
+        for (let i = 0; i < next.length && next.position < doc.length; i++) {
+          const currentDoc = client.getDocument();
+          if (next.position < currentDoc.length) {
+            // Check what char we're deleting
+            const charToDelete = currentDoc[next.position];
+            if (!quiet) {
+              const displayChar = charToDelete === '\n' ? '↵' : charToDelete;
+              console.error(c('magenta', `  Decaying: '${displayChar}' at position ${next.position}`));
+            }
+            await client.delete(next.position, 1);
+            if (charDelay > 0 && i < next.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, charDelay));
+            }
+          }
+        }
+      }
+      
+      pendingDeletions.shift();
+    }
+    
+    processingDeletions = false;
+  }
+  
+  // Listen for remote changes
+  client.on('change', (event) => {
+    // Only process remote inserts
+    if (!event.remote) return;
+    if (event.type !== 'insert') return;
+    
+    // Check user filter
+    const userName = event.user?.name || '';
+    if (!userPattern!.test(userName)) return;
+    
+    if (!quiet) {
+      const displayText = event.text!.length > 20 
+        ? event.text!.slice(0, 20) + '...' 
+        : event.text!.replace(/\n/g, '↵');
+      console.error(c('yellow', `Scheduling decay: "${displayText}" from user "${userName}" in ${delay}ms`));
+    }
+    
+    // Adjust pending deletion positions for the new insert
+    for (const pending of pendingDeletions) {
+      if (pending.position >= event.position) {
+        pending.position += event.text!.length;
+      }
+    }
+    
+    // Schedule deletion
+    pendingDeletions.push({
+      position: event.position,
+      length: event.text!.length,
+      scheduledTime: Date.now() + delay
+    });
+    
+    // Start processing if not already
+    processDeletions();
+  });
+  
+  // Also adjust positions when any deletion happens (including our own)
+  client.on('change', (event) => {
+    if (event.type !== 'delete') return;
+    
+    const deleteEnd = event.position + (event.deletedText?.length || 0);
+    
+    for (const pending of pendingDeletions) {
+      if (pending.position >= deleteEnd) {
+        // Shift left by the deleted amount
+        pending.position -= (event.deletedText?.length || 0);
+      } else if (pending.position > event.position) {
+        // Partially overlaps - adjust to deletion point
+        pending.position = event.position;
+      }
+    }
+  });
+  
+  // Keep running
+  await new Promise(() => {});
+}
+
 async function cmdExec(args: ParsedArgs): Promise<void> {
   const scriptPath = args.positional[1];
   
@@ -1688,6 +1929,9 @@ async function main(): Promise<void> {
         break;
       case 'macro':
         await cmdMacro(args);
+        break;
+      case 'demo':
+        await cmdDemo(args);
         break;
       case 'exec':
         await cmdExec(args);

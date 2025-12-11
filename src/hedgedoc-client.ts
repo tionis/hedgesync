@@ -108,6 +108,10 @@ interface UndoEntry {
 export interface ChangeEvent {
   type: 'local' | 'remote';
   operation: TextOperation;
+  /** Client ID of the user who made the change (only for remote changes) */
+  clientId?: string;
+  /** User info of who made the change (only for remote changes, if available) */
+  user?: UserInfo;
 }
 
 /** Doc event data */
@@ -186,6 +190,9 @@ export class HedgeDocClient extends EventEmitter {
   private _operationTimeout: ReturnType<typeof setTimeout> | null;
   private _operationTimeoutMs: number;
   
+  /** Last client ID that made a remote change (for user attribution) */
+  _lastRemoteClientId: string | null;
+  
   // Rate limiting
   private _rateLimit: Required<RateLimitConfig>;
   private _lastOperationTime: number;
@@ -256,6 +263,9 @@ export class HedgeDocClient extends EventEmitter {
     
     // Track if user is logged in (for permission checking)
     this._isLoggedIn = false;
+    
+    // Last remote client ID (for user attribution)
+    this._lastRemoteClientId = null;
     
     // Pending operation tracking for timeout detection
     this._pendingOperation = null;
@@ -1345,6 +1355,8 @@ export class HedgeDocClient extends EventEmitter {
   private _handleOperation(clientId: string, revision: number, operation: OperationJSON, selection: unknown): void {
     if (this.otClient) {
       try {
+        // Store the clientId for user attribution in change events
+        this._lastRemoteClientId = clientId;
         const op = TextOperation.fromJSON(operation);
         this.otClient.applyServer(revision, op);
       } catch (err) {
@@ -1717,7 +1729,16 @@ class OTClientImpl extends OTClient {
     }
     
     this.hedgeDocClient.emit('document', this.hedgeDocClient.document);
-    this.hedgeDocClient.emit('change', { type: 'remote', operation });
+    
+    // Include user info in change event
+    const clientId = this.hedgeDocClient._lastRemoteClientId;
+    const user = clientId ? this.hedgeDocClient.users.get(clientId) : undefined;
+    this.hedgeDocClient.emit('change', { 
+      type: 'remote', 
+      operation,
+      clientId: clientId || undefined,
+      user
+    });
   }
 
   getOperations(base: number, head: number): void {

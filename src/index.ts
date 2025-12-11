@@ -71,5 +71,6 @@ export type {
   StreamingCallbacks,
   BlockMacroOptions,
   DocumentContext,
-  StateTracking
+  StateTracking,
+  MacroEngineOptions
 } from './macro-engine.js';

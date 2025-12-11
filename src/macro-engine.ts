@@ -19,6 +19,14 @@ interface HedgeDocClientLike {
   setRateLimitEnabled(enabled: boolean): void;
 }
 
+/** User info (mirrors HedgeDoc's UserInfo) */
+interface UserInfo {
+  id: string;
+  name?: string;
+  color?: string;
+  photo?: string;
+}
+
 // ===========================================
 // Types
 // ===========================================
@@ -27,6 +35,10 @@ interface HedgeDocClientLike {
 interface ChangeEvent {
   type: 'local' | 'remote';
   operation?: TextOperation;
+  /** Client ID of the user who made the change (only for remote changes) */
+  clientId?: string;
+  /** User info of who made the change (only for remote changes, if available) */
+  user?: UserInfo;
 }
 
 /** Base macro definition */
@@ -224,6 +236,12 @@ interface MacroInfo {
   pattern: string;
 }
 
+/** Options for MacroEngine */
+interface MacroEngineOptions {
+  /** Regex pattern to filter users by name. Only changes from matching users trigger macros. */
+  userFilter?: RegExp;
+}
+
 // ===========================================
 // MacroEngine Class
 // ===========================================
@@ -232,6 +250,8 @@ class MacroEngine {
   client: HedgeDocClientLike;
   macros: Map<string, Macro>;
   enabled: boolean;
+  /** Regex pattern to filter users by name */
+  userFilter: RegExp | null;
   private _processing: boolean;
   private _changeHandler: ((event: ChangeEvent) => Promise<void>) | null;
   private _debounceTimer: ReturnType<typeof setTimeout> | null;
@@ -240,10 +260,11 @@ class MacroEngine {
   /**
    * Create a MacroEngine
    */
-  constructor(client: HedgeDocClientLike) {
+  constructor(client: HedgeDocClientLike, options: MacroEngineOptions = {}) {
     this.client = client;
     this.macros = new Map();
     this.enabled = true;
+    this.userFilter = options.userFilter || null;
     this._processing = false;
     this._changeHandler = null;
     this._debounceTimer = null;
@@ -421,6 +442,14 @@ class MacroEngine {
       // Only process on REMOTE changes to avoid infinite loops
       // (our own replacements are local changes)
       if (event.type === 'remote') {
+        // Check user filter if set
+        if (this.userFilter) {
+          const userName = event.user?.name || '';
+          if (!this.userFilter.test(userName)) {
+            return; // User doesn't match filter, skip
+          }
+        }
+        
         // Debounce to avoid rapid processing
         if (this._debounceTimer) {
           clearTimeout(this._debounceTimer);
@@ -1179,6 +1208,7 @@ class MacroEngine {
   };
 }
 
+
 export { MacroEngine };
 export type {
   Macro,
@@ -1195,6 +1225,7 @@ export type {
   StreamingCallbacks,
   BlockMacroOptions,
   StateTracking,
-  DocumentContext
+  DocumentContext,
+  MacroEngineOptions
 };
 
