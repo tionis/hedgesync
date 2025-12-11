@@ -1950,43 +1950,51 @@ async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
   
   // Process deletions in order
   async function processDeletions() {
-    if (processingDeletions) return;
+    if (processingDeletions) {
+      return;
+    }
     processingDeletions = true;
     
-    while (pendingDeletions.length > 0) {
-      const now = Date.now();
-      const next = pendingDeletions[0];
-      
-      if (next.scheduledTime > now) {
-        // Wait until it's time
-        await new Promise(resolve => setTimeout(resolve, next.scheduledTime - now));
-      }
-      
-      // Get current document to verify position
-      const doc = client.getDocument();
-      if (next.position < doc.length) {
+    try {
+      while (pendingDeletions.length > 0) {
+        const now = Date.now();
+        const next = pendingDeletions[0];
+        
+        const waitTime = next.scheduledTime - now;
+        if (waitTime > 0) {
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+        
         // Delete one character at a time with char-delay
-        for (let i = 0; i < next.length && next.position < doc.length; i++) {
+        for (let i = 0; i < next.length; i++) {
           const currentDoc = client.getDocument();
           if (next.position < currentDoc.length) {
-            // Check what char we're deleting
             const charToDelete = currentDoc[next.position];
             if (!quiet) {
               const displayChar = charToDelete === '\n' ? '↵' : charToDelete;
               console.error(c('magenta', `  Decaying: '${displayChar}' at position ${next.position}`));
             }
-            await client.delete(next.position, 1);
+            try {
+              await client.delete(next.position, 1);
+            } catch (err) {
+              console.error(c('red', `  Delete failed: ${(err as Error).message}`));
+              break;
+            }
             if (charDelay > 0 && i < next.length - 1) {
               await new Promise(resolve => setTimeout(resolve, charDelay));
             }
+          } else {
+            break;
           }
         }
+        
+        pendingDeletions.shift();
       }
-      
-      pendingDeletions.shift();
+    } catch (err) {
+      console.error(c('red', `processDeletions error: ${(err as Error).message}`));
+    } finally {
+      processingDeletions = false;
     }
-    
-    processingDeletions = false;
   }
   
   // Listen for remote changes
@@ -2027,18 +2035,26 @@ async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
     }
     
     // Start processing if not already
-    processDeletions();
+    if (!quiet) {
+      console.error(c('cyan', `  Calling processDeletions(), queue size: ${pendingDeletions.length}`));
+    }
+    processDeletions().catch(err => {
+      console.error(c('red', `processDeletions error: ${(err as Error).message}`));
+    });
   });
   
-  // Also adjust positions when deletions happen (including our own)
+  // Adjust positions when OUR OWN deletions happen (local changes only)
+  // Remote changes are already handled in the first listener
   client.on('change', (event) => {
+    // Only handle local changes here - remote changes handled above
+    if (event.type !== 'local') return;
     if (!event.operation) return;
     
-    // Extract deletes from the operation
+    // Extract position adjustments from the operation
     let position = 0;
     for (const op of event.operation.ops) {
       if (typeof op === 'string') {
-        // Insert - adjust positions after this point
+        // Our own insert - adjust positions after this point
         for (const pending of pendingDeletions) {
           if (pending.position >= position) {
             pending.position += op.length;
@@ -2049,7 +2065,7 @@ async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
         // Retain - skip forward
         position += op;
       } else if (op < 0) {
-        // Delete - adjust positions
+        // Our own delete - adjust positions
         const deleteLen = -op;
         const deleteEnd = position + deleteLen;
         
