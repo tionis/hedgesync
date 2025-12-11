@@ -17,7 +17,7 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
@@ -406,18 +406,52 @@ ${c('yellow', 'SECURITY NOTE:')}
 `,
 
   watch: `
-${c('bold', 'hedgesync watch')} - Watch document for changes
+${c('bold', 'hedgesync watch')} - Watch document for changes in real-time
 
 ${c('yellow', 'USAGE:')}
   hedgesync watch <url> [options]
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
-  ${c('cyan', '--json')}         Output changes in JSON format
+  ${c('cyan', '--json')}         Output changes as formatted JSON
+  ${c('cyan', '--ndjson')}       Output as newline-delimited JSON (for scripting)
+  ${c('cyan', '-e, --events')}   Watch all events with detailed info (ops, users, cursors)
+  ${c('cyan', '-q, --quiet')}    Suppress connection status messages
+
+${c('yellow', 'OUTPUT MODES:')}
+  ${c('green', 'Default:')}      Prints full document on each change
+  ${c('green', '--events:')}     Prints each operation with user info, positions, etc.
+  ${c('green', '--ndjson:')}     Machine-readable, one JSON object per line
+
+${c('yellow', 'EVENTS (--events mode):')}
+  ${c('cyan', 'change')}         Document edit (insert/delete with user info)
+  ${c('cyan', 'cursor:focus')}   User focused their cursor
+  ${c('cyan', 'cursor:activity')} User cursor position changed
+  ${c('cyan', 'cursor:blur')}    User unfocused
+  ${c('cyan', 'user:left')}      User disconnected
+  ${c('cyan', 'users')}          Online user list update
+  ${c('cyan', 'connect')}        Connected to server
+  ${c('cyan', 'disconnect')}     Lost connection
+  ${c('cyan', 'permission')}     Permission change
 
 ${c('yellow', 'EXAMPLES:')}
+  # Watch and print document on changes
   hedgesync watch https://md.example.com/abc123
+
+  # Watch all events in detail (debug/monitor)
+  hedgesync watch https://md.example.com/abc123 --events
+
+  # Machine-readable output for piping to other tools
+  hedgesync watch https://md.example.com/abc123 --events --ndjson | jq .
+
+  # Watch with JSON output
   hedgesync watch https://md.example.com/abc123 --json
+
+${c('yellow', 'USE CASES:')}
+  - Debug HedgeDoc collaboration issues
+  - Monitor document activity
+  - Build integrations (pipe --ndjson to scripts)
+  - Watch for specific changes
 `,
 
   transform: `
@@ -1046,54 +1080,185 @@ async function cmdWatch(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
   
   const json = args.options.json;
+  const ndjson = args.options.ndjson;
   const quiet = args.options.quiet || args.options.q;
+  const eventsMode = args.options.events || args.options.e;
   
-  if (!quiet && !json) {
-    console.error(c('cyan', 'Watching for changes... (Ctrl+C to stop)'));
+  // Helper to output events
+  const outputEvent = (eventType: string, data: unknown) => {
+    const timestamp = new Date().toISOString();
+    if (ndjson) {
+      console.log(JSON.stringify({ event: eventType, timestamp, ...data as object }));
+    } else if (json) {
+      console.log(JSON.stringify({ type: eventType, timestamp, data }, null, 2));
+    } else {
+      console.log(c('dim', `[${timestamp}]`) + ' ' + c('cyan', eventType));
+      if (data && typeof data === 'object') {
+        for (const [key, value] of Object.entries(data as object)) {
+          if (value !== undefined && value !== null) {
+            const displayValue = typeof value === 'object' 
+              ? JSON.stringify(value)
+              : String(value);
+            console.log(`  ${c('yellow', key)}: ${displayValue}`);
+          }
+        }
+      }
+      console.log();
+    }
+  };
+  
+  if (!quiet && !json && !ndjson) {
+    if (eventsMode) {
+      console.error(c('cyan', 'Watching all events... (Ctrl+C to stop)'));
+    } else {
+      console.error(c('cyan', 'Watching for changes... (Ctrl+C to stop)'));
+      console.error(c('dim', 'Tip: Use --events for detailed operation events, --ndjson for scripting'));
+    }
   }
   
-  let lastContent = client.getDocument();
-  
-  client.on('document', (content: string) => {
-    if (content !== lastContent) {
-      if (json) {
-        console.log(JSON.stringify({
-          type: 'change',
-          timestamp: new Date().toISOString(),
-          content: content,
-        }));
-      } else {
-        console.log(c('dim', `--- ${new Date().toISOString()} ---`));
-        console.log(content);
-        console.log();
+  if (eventsMode) {
+    // Detailed event mode - watch all events with full information
+    
+    // Change events with operation details
+    client.on('change', (event) => {
+      const inserts: Array<{position: number, text: string}> = [];
+      const deletes: Array<{position: number, length: number}> = [];
+      
+      if (event.operation) {
+        let position = 0;
+        for (const op of event.operation.ops) {
+          if (typeof op === 'string') {
+            inserts.push({ position, text: op });
+            position += op.length;
+          } else if (op > 0) {
+            position += op;
+          } else if (op < 0) {
+            deletes.push({ position, length: -op });
+          }
+        }
       }
-      lastContent = content;
-    }
-  });
-  
-  client.on('users', (users: Array<{ name?: string; id: string }>) => {
-    if (json) {
-      console.log(JSON.stringify({
-        type: 'users',
-        timestamp: new Date().toISOString(),
-        users: users,
+      
+      outputEvent('change', {
+        source: event.type,
+        clientId: event.clientId,
+        user: event.user ? {
+          id: event.user.id,
+          name: event.user.name,
+          color: event.user.color
+        } : undefined,
+        inserts: inserts.length > 0 ? inserts : undefined,
+        deletes: deletes.length > 0 ? deletes : undefined,
+        operation: event.operation ? event.operation.ops : undefined
+      });
+    });
+    
+    // Cursor events
+    client.on('cursor:focus', (user) => {
+      outputEvent('cursor:focus', { user });
+    });
+    
+    client.on('cursor:activity', (user) => {
+      outputEvent('cursor:activity', { 
+        clientId: user.id,
+        name: user.name,
+        color: user.color,
+        cursor: user.cursor
+      });
+    });
+    
+    client.on('cursor:blur', (data) => {
+      outputEvent('cursor:blur', data);
+    });
+    
+    // User events
+    client.on('user:left', (clientId: string) => {
+      outputEvent('user:left', { clientId });
+    });
+    
+    client.on('users', (users: Map<string, UserInfo>) => {
+      const userList = Array.from(users.entries()).map(([id, user]) => ({
+        clientId: id,
+        ...user
       }));
-    } else if (!quiet) {
-      console.error(c('dim', `Online: ${users.map(u => u.name || u.id).join(', ')}`));
-    }
-  });
-  
-  client.on('disconnect', (reason: string) => {
-    if (!quiet) {
-      console.error(c('yellow', `Disconnected: ${reason}`));
-    }
-  });
-  
-  client.on('reconnect:success', () => {
-    if (!quiet) {
-      console.error(c('green', 'Reconnected'));
-    }
-  });
+      outputEvent('users', { count: userList.length, users: userList });
+    });
+    
+    // Connection events
+    client.on('connect', () => {
+      outputEvent('connect', {});
+    });
+    
+    client.on('disconnect', (reason: string) => {
+      outputEvent('disconnect', { reason });
+    });
+    
+    client.on('reconnect:success', (data) => {
+      outputEvent('reconnect:success', data);
+    });
+    
+    // Document events
+    client.on('document', (content: string) => {
+      outputEvent('document', { 
+        length: content.length,
+        preview: content.slice(0, 100) + (content.length > 100 ? '...' : '')
+      });
+    });
+    
+    // Info/permission events
+    client.on('permission', (permission: string) => {
+      outputEvent('permission', { permission });
+    });
+    
+    client.on('info', (data) => {
+      outputEvent('info', data);
+    });
+    
+  } else {
+    // Simple mode - just document changes and users
+    let lastContent = client.getDocument();
+    
+    client.on('document', (content: string) => {
+      if (content !== lastContent) {
+        if (json || ndjson) {
+          console.log(JSON.stringify({
+            type: 'change',
+            timestamp: new Date().toISOString(),
+            content: content,
+          }));
+        } else {
+          console.log(c('dim', `--- ${new Date().toISOString()} ---`));
+          console.log(content);
+          console.log();
+        }
+        lastContent = content;
+      }
+    });
+    
+    client.on('users', (users: Map<string, UserInfo>) => {
+      const userList = Array.from(users.values());
+      if (json || ndjson) {
+        console.log(JSON.stringify({
+          type: 'users',
+          timestamp: new Date().toISOString(),
+          users: userList,
+        }));
+      } else if (!quiet) {
+        console.error(c('dim', `Online: ${userList.map(u => u.name || u.id).join(', ')}`));
+      }
+    });
+    
+    client.on('disconnect', (reason: string) => {
+      if (!quiet) {
+        console.error(c('yellow', `Disconnected: ${reason}`));
+      }
+    });
+    
+    client.on('reconnect:success', () => {
+      if (!quiet) {
+        console.error(c('green', 'Reconnected'));
+      }
+    });
+  }
   
   // Keep running until interrupted
   process.on('SIGINT', () => {
@@ -1116,11 +1281,22 @@ async function cmdInfo(args: ParsedArgs): Promise<void> {
       setTimeout(resolve, 1000); // Timeout fallback
     });
     
+    // Also request online users
+    client.requestOnlineUsers();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
     const info = client.getNoteInfo();
+    const users = client.getOnlineUsers();
     const json = args.options.json;
     
     if (json) {
-      console.log(JSON.stringify(info, null, 2));
+      console.log(JSON.stringify({
+        ...info,
+        revision: client.getRevision(),
+        length: client.getDocument().length,
+        lines: client.getLineCount(),
+        onlineUsers: users
+      }, null, 2));
     } else {
       console.log(`${c('bold', 'Title:')} ${info.title || '(untitled)'}`);
       console.log(`${c('bold', 'Permission:')} ${info.permission}`);
@@ -1130,6 +1306,17 @@ async function cmdInfo(args: ParsedArgs): Promise<void> {
       console.log(`${c('bold', 'Revision:')} ${client.getRevision()}`);
       console.log(`${c('bold', 'Length:')} ${client.getDocument().length} characters`);
       console.log(`${c('bold', 'Lines:')} ${client.getLineCount()}`);
+      
+      // Show online users
+      if (users.length === 0) {
+        console.log(`${c('bold', 'Online:')} ${c('dim', '(no other users)')}`);
+      } else {
+        console.log(`${c('bold', 'Online:')} ${users.length} user${users.length === 1 ? '' : 's'}`);
+        for (const user of users) {
+          const colorDot = user.color ? c('bold', '●') : '';
+          console.log(`  ${colorDot} ${user.name || user.id}${user.id !== user.name ? c('dim', ` (${user.id.slice(0, 8)}...)`) : ''}`);
+        }
+      }
     }
   } finally {
     client.disconnect();
@@ -1668,7 +1855,7 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
 // Command: exec (run a script)
 // Command: demo (demo/showcase commands)
 async function cmdDemo(args: ParsedArgs): Promise<void> {
-  const subcommand = args.positional[1];
+  const subcommand = args.positional[0];
   
   if (!subcommand) {
     console.error(c('red', 'Error: Demo subcommand required'));
@@ -1689,7 +1876,7 @@ async function cmdDemo(args: ParsedArgs): Promise<void> {
 
 // Demo: decay - delete characters typed by a user after a delay
 async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
-  const url = args.positional[2];
+  const url = args.positional[1];
   
   if (!url) {
     console.error(c('red', 'Error: URL required'));
@@ -1740,6 +1927,27 @@ async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
   const pendingDeletions: PendingDeletion[] = [];
   let processingDeletions = false;
   
+  // Extract inserts from an operation
+  // Returns array of {position, text} for each insert
+  function extractInserts(operation: { ops: (string | number)[] }): Array<{position: number, text: string}> {
+    const inserts: Array<{position: number, text: string}> = [];
+    let position = 0;
+    
+    for (const op of operation.ops) {
+      if (typeof op === 'string') {
+        // Insert operation
+        inserts.push({ position, text: op });
+        position += op.length;
+      } else if (op > 0) {
+        // Retain operation - skip forward
+        position += op;
+      }
+      // Delete operations (negative) don't advance position in target doc
+    }
+    
+    return inserts;
+  }
+  
   // Process deletions in order
   async function processDeletions() {
     if (processingDeletions) return;
@@ -1783,52 +1991,76 @@ async function cmdDemoDecay(args: ParsedArgs): Promise<void> {
   
   // Listen for remote changes
   client.on('change', (event) => {
-    // Only process remote inserts
-    if (!event.remote) return;
-    if (event.type !== 'insert') return;
+    // Only process remote changes
+    if (event.type !== 'remote') return;
+    if (!event.operation) return;
     
     // Check user filter
     const userName = event.user?.name || '';
     if (!userPattern!.test(userName)) return;
     
-    if (!quiet) {
-      const displayText = event.text!.length > 20 
-        ? event.text!.slice(0, 20) + '...' 
-        : event.text!.replace(/\n/g, '↵');
-      console.error(c('yellow', `Scheduling decay: "${displayText}" from user "${userName}" in ${delay}ms`));
-    }
+    // Extract inserts from the operation
+    const inserts = extractInserts(event.operation);
+    if (inserts.length === 0) return;
     
-    // Adjust pending deletion positions for the new insert
-    for (const pending of pendingDeletions) {
-      if (pending.position >= event.position) {
-        pending.position += event.text!.length;
+    for (const insert of inserts) {
+      if (!quiet) {
+        const displayText = insert.text.length > 20 
+          ? insert.text.slice(0, 20) + '...' 
+          : insert.text.replace(/\n/g, '↵');
+        console.error(c('yellow', `Scheduling decay: "${displayText}" from user "${userName}" in ${delay}ms`));
       }
+      
+      // Adjust pending deletion positions for the new insert
+      for (const pending of pendingDeletions) {
+        if (pending.position >= insert.position) {
+          pending.position += insert.text.length;
+        }
+      }
+      
+      // Schedule deletion
+      pendingDeletions.push({
+        position: insert.position,
+        length: insert.text.length,
+        scheduledTime: Date.now() + delay
+      });
     }
-    
-    // Schedule deletion
-    pendingDeletions.push({
-      position: event.position,
-      length: event.text!.length,
-      scheduledTime: Date.now() + delay
-    });
     
     // Start processing if not already
     processDeletions();
   });
   
-  // Also adjust positions when any deletion happens (including our own)
+  // Also adjust positions when deletions happen (including our own)
   client.on('change', (event) => {
-    if (event.type !== 'delete') return;
+    if (!event.operation) return;
     
-    const deleteEnd = event.position + (event.deletedText?.length || 0);
-    
-    for (const pending of pendingDeletions) {
-      if (pending.position >= deleteEnd) {
-        // Shift left by the deleted amount
-        pending.position -= (event.deletedText?.length || 0);
-      } else if (pending.position > event.position) {
-        // Partially overlaps - adjust to deletion point
-        pending.position = event.position;
+    // Extract deletes from the operation
+    let position = 0;
+    for (const op of event.operation.ops) {
+      if (typeof op === 'string') {
+        // Insert - adjust positions after this point
+        for (const pending of pendingDeletions) {
+          if (pending.position >= position) {
+            pending.position += op.length;
+          }
+        }
+        position += op.length;
+      } else if (op > 0) {
+        // Retain - skip forward
+        position += op;
+      } else if (op < 0) {
+        // Delete - adjust positions
+        const deleteLen = -op;
+        const deleteEnd = position + deleteLen;
+        
+        for (const pending of pendingDeletions) {
+          if (pending.position >= deleteEnd) {
+            pending.position -= deleteLen;
+          } else if (pending.position > position) {
+            pending.position = position;
+          }
+        }
+        // Position doesn't advance for delete in target
       }
     }
   });
