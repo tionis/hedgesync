@@ -22,10 +22,10 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 
 ## Compatibility
 
-- **HedgeDoc 1.x with Socket.IO v3+/v4**: Full support
-- **HedgeDoc subpath deployments**: Supports deployments at subpaths (e.g., `https://example.com/hedgedoc/note-id`)
+- **HedgeDoc 1.x** (versions **1.10.4** and later): Full support
+- **Subpath deployments**: Supports deployments at subpaths (e.g., `https://example.com/hedgedoc/note-id`)
 
-> **Note**: HedgeDoc servers using Socket.IO v2 (typically older installations from before 2021) are not supported. Please upgrade your HedgeDoc server.
+> **Note**: HedgeDoc versions before 1.10.4 use Socket.IO v2, which is not supported due to protocol incompatibilities. HedgeDoc 2.x is also not supported as it uses a different real-time backend (Y.js instead of OT).
 
 ## Installation
 
@@ -1028,9 +1028,9 @@ You can get the session cookie from your browser's developer tools after logging
 
 ## Compatibility
 
-- **HedgeDoc**: Tested with HedgeDoc 1.x (uses OT-based real-time sync)
+- **HedgeDoc**: Version 1.10.4 or later (uses OT-based real-time sync with Socket.IO v4)
 - **Runtime**: Bun (recommended) or Node.js 18+
-- **HedgeDoc 2.x**: Not compatible (uses Y.js instead of OT)
+- **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (uses Y.js instead of OT)
 
 ## License
 
