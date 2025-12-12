@@ -33,11 +33,66 @@ interface ConnectionOptions {
   serverUrl: string;
   noteId: string;
   cookie?: string;
+  headers?: Record<string, string>;
 }
 
 interface ParsedUrl {
   serverUrl: string;
   noteId: string;
+}
+
+// Parse custom headers from CLI args and environment variable
+// Format: "Header-Name: value" or "Header-Name=value"
+function parseHeaders(args: ParsedArgs): Record<string, string> {
+  const headers: Record<string, string> = {};
+  
+  // Parse from HEDGEDOC_HEADERS environment variable (JSON format or semicolon-separated)
+  const envHeaders = process.env.HEDGEDOC_HEADERS;
+  if (envHeaders) {
+    try {
+      // Try parsing as JSON first
+      const parsed = JSON.parse(envHeaders);
+      if (typeof parsed === 'object' && parsed !== null) {
+        Object.assign(headers, parsed);
+      }
+    } catch {
+      // Fall back to semicolon-separated format: "Header1: value1; Header2: value2"
+      for (const part of envHeaders.split(';')) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        
+        const colonIndex = trimmed.indexOf(':');
+        const equalIndex = trimmed.indexOf('=');
+        const sepIndex = colonIndex > 0 ? colonIndex : equalIndex;
+        
+        if (sepIndex > 0) {
+          const key = trimmed.substring(0, sepIndex).trim();
+          const value = trimmed.substring(sepIndex + 1).trim();
+          if (key) headers[key] = value;
+        }
+      }
+    }
+  }
+  
+  // Parse from --header / -H arguments (these override env vars)
+  const headerArgs = ([] as string[]).concat(
+    (args.options.header || []) as string[],
+    (args.options.H || []) as string[]
+  );
+  
+  for (const header of headerArgs) {
+    const colonIndex = header.indexOf(':');
+    const equalIndex = header.indexOf('=');
+    const sepIndex = colonIndex > 0 ? colonIndex : equalIndex;
+    
+    if (sepIndex > 0) {
+      const key = header.substring(0, sepIndex).trim();
+      const value = header.substring(sepIndex + 1).trim();
+      if (key) headers[key] = value;
+    }
+  }
+  
+  return headers;
 }
 
 // ANSI colors for terminal output
@@ -64,7 +119,7 @@ function parseArgs(args: string[]): ParsedArgs {
   };
 
   // Options that can be specified multiple times (will be collected into arrays)
-  const multiValueOptions = new Set(['text', 'regex', 'exec', 'block']);
+  const multiValueOptions = new Set(['text', 'regex', 'exec', 'block', 'header', 'H']);
 
   let i = 0;
   while (i < args.length) {
@@ -94,7 +149,15 @@ function parseArgs(args: string[]): ParsedArgs {
       const nextArg = args[i + 1];
       
       if (nextArg && !nextArg.startsWith('-')) {
-        parsed.options[key] = nextArg;
+        if (multiValueOptions.has(key)) {
+          // Collect multiple values into an array
+          if (!parsed.options[key]) {
+            parsed.options[key] = [];
+          }
+          (parsed.options[key] as string[]).push(nextArg);
+        } else {
+          parsed.options[key] = nextArg;
+        }
         i += 2;
       } else {
         parsed.options[key] = true;
@@ -147,6 +210,7 @@ function parseUrl(url: string): ParsedUrl | null {
 function getConnectionOptions(args: ParsedArgs): ConnectionOptions | null {
   const url = args.positional[0] || args.options.url || args.options.u;
   const cookie = (args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE) as string | undefined;
+  const headers = parseHeaders(args);
   
   if (!url || typeof url !== 'string') {
     return null;
@@ -160,6 +224,7 @@ function getConnectionOptions(args: ParsedArgs): ConnectionOptions | null {
       serverUrl: parsed.serverUrl,
       noteId: parsed.noteId,
       cookie,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
     };
   }
   
@@ -171,11 +236,13 @@ function getConnectionOptions(args: ParsedArgs): ConnectionOptions | null {
 interface APIOptions {
   serverUrl: string;
   cookie?: string;
+  headers?: Record<string, string>;
 }
 
 function getAPIOptions(args: ParsedArgs, explicitUrl?: string): APIOptions | null {
   const url = explicitUrl || args.positional[0] || args.options.url || args.options.u || args.options.server || args.options.s;
   const cookie = (args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE) as string | undefined;
+  const headers = parseHeaders(args);
   
   if (!url || typeof url !== 'string') {
     return null;
@@ -188,6 +255,7 @@ function getAPIOptions(args: ParsedArgs, explicitUrl?: string): APIOptions | nul
       return {
         serverUrl: parsed.serverUrl,
         cookie,
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
       };
     }
     
@@ -196,6 +264,7 @@ function getAPIOptions(args: ParsedArgs, explicitUrl?: string): APIOptions | nul
     return {
       serverUrl: `${urlObj.protocol}//${urlObj.host}${urlObj.pathname.replace(/\/$/, '')}`,
       cookie,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
     };
   } catch {
     return null;
@@ -256,6 +325,8 @@ ${c('yellow', 'USAGE:')}
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
   ${c('cyan', '-f, --file')}     Read content from file (otherwise reads from stdin)
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   echo "# Hello" | hedgesync set https://md.example.com/abc123
@@ -272,6 +343,8 @@ ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
   ${c('cyan', '-r, --regex')}    Treat search pattern as regex
   ${c('cyan', '-a, --all, -g')}  Replace all occurrences (not just first)
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync replace https://md.example.com/abc123 "old" "new"
@@ -534,6 +607,8 @@ ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '--demote')}       Demote all headers by one level
   ${c('cyan', '--promote')}      Promote all headers by one level
   ${c('cyan', '--shift <n>')}    Shift header levels by n
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync transform https://md.example.com/abc123 --demote
@@ -569,6 +644,8 @@ ${c('yellow', 'ARGUMENTS:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync line https://md.example.com/abc123 0        # Get first line
@@ -583,6 +660,8 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync append https://md.example.com/abc123 "New content at end"
@@ -597,6 +676,8 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync prepend https://md.example.com/abc123 "Content at start"
@@ -614,6 +695,8 @@ ${c('yellow', 'ARGUMENTS:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output result in JSON format
+  ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync insert https://md.example.com/abc123 0 "Start: "
@@ -662,6 +745,7 @@ ${c('yellow', 'USAGE:')}
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication
   ${c('cyan', '-o, --output')}   Write output to file
+  ${c('cyan', '--json')}         Output result in JSON format
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync download https://md.example.com/abc123
@@ -679,6 +763,7 @@ ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-n, --name')}     Custom alias/name for the note (requires FreeURL mode)
   ${c('cyan', '-f, --file')}     Initial content from file
   ${c('cyan', '-q, --quiet')}    Only output the new note ID
+  ${c('cyan', '--json')}         Output result in JSON format
 
 ${c('yellow', 'EXAMPLES:')}
   # Create empty note with random ID
@@ -741,6 +826,7 @@ ${c('yellow', 'USAGE:')}
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
   ${c('cyan', '-o, --output')}   Output file path (required, should end in .zip)
+  ${c('cyan', '--json')}         Output result in JSON format
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync export https://md.example.com -o my-notes.zip -c 'connect.sid=...'
@@ -773,6 +859,7 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+  ${c('cyan', '--json')}         Output result in JSON format
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync pin https://md.example.com/abc123
@@ -787,6 +874,7 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+  ${c('cyan', '--json')}         Output result in JSON format
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync history-delete https://md.example.com/abc123
@@ -853,14 +941,27 @@ ${c('yellow', 'HTTP API COMMANDS:')} ${c('dim', '(no realtime connection require
 
 ${c('yellow', 'GLOBAL OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
+  ${c('cyan', '-H, --header')}   Custom HTTP header (can be used multiple times)
+                    Format: "Header-Name: value" or "Header-Name=value"
+                    Also reads from HEDGEDOC_HEADERS env var (JSON or semicolon-separated)
   ${c('cyan', '-q, --quiet')}    Suppress non-essential output
+  ${c('cyan', '--json')}         Output in JSON format (for scripting)
   ${c('cyan', '--no-reconnect')} Disable auto-reconnection
+
+${c('yellow', 'ENVIRONMENT VARIABLES:')}
+  ${c('cyan', 'HEDGEDOC_COOKIE')}   Session cookie (same as -c/--cookie)
+  ${c('cyan', 'HEDGEDOC_HEADERS')}  Custom headers as JSON or semicolon-separated
+                        Example: '{"X-Auth": "token"}' or 'X-Auth: token; X-Foo: bar'
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync get https://md.example.com/abc123
   hedgesync set https://md.example.com/abc123 -f doc.md
   hedgesync replace https://md.example.com/abc123 "old" "new" --all
   hedgesync macro https://md.example.com/abc123 --exec '/::date::/i:date' --watch
+  
+  ${c('dim', '# With custom headers for reverse proxy auth:')}
+  hedgesync get https://md.example.com/abc123 -H "X-Auth-Token: mytoken"
+  HEDGEDOC_HEADERS='{"Authorization": "Bearer token"}' hedgesync get https://...
 
 ${c('yellow', 'MORE HELP:')}
   hedgesync help get       ${c('dim', '# Help for get command')}
@@ -1020,6 +1121,8 @@ async function cmdGet(args: ParsedArgs): Promise<void> {
 // Command: set
 async function cmdSet(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     let content: string;
@@ -1034,17 +1137,28 @@ async function cmdSet(args: ParsedArgs): Promise<void> {
     }
     
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission' }));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
+    const oldLength = client.getDocument().length;
     client.updateContent(content);
     
     // Wait a bit for the operation to be sent
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const quiet = args.options.quiet || args.options.q;
-    if (!quiet) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ 
+        success: true, 
+        action: 'set',
+        length: content.length,
+        previousLength: oldLength
+      }));
+    } else if (!quiet) {
       console.error(c('green', '✓ Document updated'));
     }
   } finally {
@@ -1055,6 +1169,8 @@ async function cmdSet(args: ParsedArgs): Promise<void> {
 // Command: append
 async function cmdAppend(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     let text: string;
@@ -1069,18 +1185,30 @@ async function cmdAppend(args: ParsedArgs): Promise<void> {
     }
     
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission' }));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
     const doc = client.getDocument();
+    const position = doc.length;
     const separator = doc.endsWith('\n') ? '' : '\n';
-    client.insert(doc.length, separator + text);
+    const insertedText = separator + text;
+    client.insert(position, insertedText);
     
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const quiet = args.options.quiet || args.options.q;
-    if (!quiet) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ 
+        success: true, 
+        action: 'append',
+        position,
+        length: insertedText.length
+      }));
+    } else if (!quiet) {
       console.error(c('green', '✓ Content appended'));
     }
   } finally {
@@ -1091,6 +1219,8 @@ async function cmdAppend(args: ParsedArgs): Promise<void> {
 // Command: prepend
 async function cmdPrepend(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     let text: string;
@@ -1105,17 +1235,28 @@ async function cmdPrepend(args: ParsedArgs): Promise<void> {
     }
     
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission' }));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
     const separator = text.endsWith('\n') ? '' : '\n';
-    client.insert(0, text + separator);
+    const insertedText = text + separator;
+    client.insert(0, insertedText);
     
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const quiet = args.options.quiet || args.options.q;
-    if (!quiet) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ 
+        success: true, 
+        action: 'prepend',
+        position: 0,
+        length: insertedText.length
+      }));
+    } else if (!quiet) {
       console.error(c('green', '✓ Content prepended'));
     }
   } finally {
@@ -1126,12 +1267,18 @@ async function cmdPrepend(args: ParsedArgs): Promise<void> {
 // Command: insert
 async function cmdInsert(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     const position = parseInt(args.positional[1], 10);
     
     if (isNaN(position)) {
-      console.error(c('red', 'Error: Position must be a number'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'Position must be a number' }));
+      } else {
+        console.error(c('red', 'Error: Position must be a number'));
+      }
       process.exit(1);
     }
     
@@ -1147,7 +1294,11 @@ async function cmdInsert(args: ParsedArgs): Promise<void> {
     }
     
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission' }));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
@@ -1155,8 +1306,14 @@ async function cmdInsert(args: ParsedArgs): Promise<void> {
     
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const quiet = args.options.quiet || args.options.q;
-    if (!quiet) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ 
+        success: true, 
+        action: 'insert',
+        position,
+        length: text.length
+      }));
+    } else if (!quiet) {
       console.error(c('green', `✓ Inserted at position ${position}`));
     }
   } finally {
@@ -1167,19 +1324,29 @@ async function cmdInsert(args: ParsedArgs): Promise<void> {
 // Command: replace
 async function cmdReplace(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     const search = args.positional[1];
     const replacement = args.positional[2] || '';
     
     if (!search) {
-      console.error(c('red', 'Error: Search pattern required'));
-      console.error('Usage: hedgesync replace <url> <search> [replacement]');
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'Search pattern required' }));
+      } else {
+        console.error(c('red', 'Error: Search pattern required'));
+        console.error('Usage: hedgesync replace <url> <search> [replacement]');
+      }
       process.exit(1);
     }
     
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission' }));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
@@ -1200,8 +1367,15 @@ async function cmdReplace(args: ParsedArgs): Promise<void> {
     
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const quiet = args.options.quiet || args.options.q;
-    if (!quiet) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ 
+        success: true, 
+        action: 'replace',
+        pattern: search,
+        replacement,
+        count
+      }));
+    } else if (!quiet) {
       console.error(c('green', `✓ Replaced ${count} occurrence(s)`));
     }
   } finally {
@@ -1212,12 +1386,18 @@ async function cmdReplace(args: ParsedArgs): Promise<void> {
 // Command: line
 async function cmdLine(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     const lineNum = parseInt(args.positional[1], 10);
     
     if (isNaN(lineNum) || lineNum < 0) {
-      console.error(c('red', 'Error: Line number must be a non-negative integer'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'Line number must be a non-negative integer' }, null, 2));
+      } else {
+        console.error(c('red', 'Error: Line number must be a non-negative integer'));
+      }
       process.exit(1);
     }
     
@@ -1225,7 +1405,11 @@ async function cmdLine(args: ParsedArgs): Promise<void> {
     if (args.positional.length > 2 || args.options.file || args.options.f) {
       // Setting a line
       if (!client.canEdit()) {
-        console.error(c('red', 'Error: No edit permission for this document'));
+        if (jsonOutput) {
+          console.log(JSON.stringify({ success: false, error: 'No edit permission for this document' }, null, 2));
+        } else {
+          console.error(c('red', 'Error: No edit permission for this document'));
+        }
         process.exit(1);
       }
       
@@ -1242,8 +1426,9 @@ async function cmdLine(args: ParsedArgs): Promise<void> {
       
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      const quiet = args.options.quiet || args.options.q;
-      if (!quiet) {
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'set-line', line: lineNum, length: content.length }, null, 2));
+      } else if (!quiet) {
         console.error(c('green', `✓ Line ${lineNum} updated`));
       }
     } else {
@@ -1251,11 +1436,19 @@ async function cmdLine(args: ParsedArgs): Promise<void> {
       const line = client.getLine(lineNum);
       
       if (line === null) {
-        console.error(c('red', `Error: Line ${lineNum} does not exist`));
+        if (jsonOutput) {
+          console.log(JSON.stringify({ success: false, error: `Line ${lineNum} does not exist` }, null, 2));
+        } else {
+          console.error(c('red', `Error: Line ${lineNum} does not exist`));
+        }
         process.exit(1);
       }
       
-      console.log(line);
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'get-line', line: lineNum, content: line }, null, 2));
+      } else {
+        console.log(line);
+      }
     }
   } finally {
     client.disconnect();
@@ -1460,6 +1653,7 @@ async function cmdWatch(args: ParsedArgs): Promise<void> {
 // Command: info
 async function cmdInfo(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
   
   try {
     // Wait for refresh to complete
@@ -1474,10 +1668,11 @@ async function cmdInfo(args: ParsedArgs): Promise<void> {
     
     const info = client.getNoteInfo();
     const users = client.getOnlineUsers();
-    const json = args.options.json;
     
-    if (json) {
+    if (jsonOutput) {
       console.log(JSON.stringify({
+        success: true,
+        action: 'info',
         ...info,
         revision: client.getRevision(),
         length: client.getDocument().length,
@@ -1520,10 +1715,10 @@ async function cmdUsers(args: ParsedArgs): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 500));
     
     const users = client.getOnlineUsers();
-    const json = args.options.json;
+    const jsonOutput = args.options.json;
     
-    if (json) {
-      console.log(JSON.stringify(users, null, 2));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: true, action: 'users', count: users.length, users }, null, 2));
     } else {
       if (users.length === 0) {
         console.log(c('dim', 'No other users online'));
@@ -1597,6 +1792,8 @@ async function cmdAuthors(args: ParsedArgs): Promise<void> {
     
     if (json) {
       console.log(JSON.stringify({
+        success: true,
+        action: 'authors',
         totalCharacters: totalChars,
         authorCount: stats.length,
         authors: stats.map(s => ({
@@ -1639,17 +1836,22 @@ async function cmdAuthors(args: ParsedArgs): Promise<void> {
 // Command: transform
 async function cmdTransform(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
+  const jsonOutput = args.options.json;
+  const quiet = args.options.quiet || args.options.q;
   
   try {
     if (!client.canEdit()) {
-      console.error(c('red', 'Error: No edit permission for this document'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: 'No edit permission for this document' }, null, 2));
+      } else {
+        console.error(c('red', 'Error: No edit permission for this document'));
+      }
       process.exit(1);
     }
     
     const pandoc = new PandocTransformer();
     
     const doc = client.getDocument();
-    const quiet = args.options.quiet || args.options.q;
     
     // Check what operation to perform
     if (args.options.demote) {
@@ -1663,7 +1865,11 @@ async function cmdTransform(args: ParsedArgs): Promise<void> {
         });
         return ast;
       });
-      if (!quiet) console.error(c('green', '✓ Headers demoted'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'transform', operation: 'demote' }, null, 2));
+      } else if (!quiet) {
+        console.error(c('green', '✓ Headers demoted'));
+      }
     } else if (args.options.promote) {
       // Promote headers by one level
       await pandoc.applyToClient(client, (ast) => {
@@ -1675,17 +1881,29 @@ async function cmdTransform(args: ParsedArgs): Promise<void> {
         });
         return ast;
       });
-      if (!quiet) console.error(c('green', '✓ Headers promoted'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'transform', operation: 'promote' }, null, 2));
+      } else if (!quiet) {
+        console.error(c('green', '✓ Headers promoted'));
+      }
     } else if (args.options.to && typeof args.options.to === 'string') {
       // Convert to another format and output
       const output = await pandoc.convert(doc, 'markdown', args.options.to);
-      console.log(output);
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'transform', operation: 'convert', format: args.options.to, content: output }, null, 2));
+      } else {
+        console.log(output);
+      }
     } else {
       // Just parse and re-render (normalizes the document)
       const normalized = await pandoc.transform(doc, ast => ast);
       client.updateContent(normalized);
       await new Promise(resolve => setTimeout(resolve, 500));
-      if (!quiet) console.error(c('green', '✓ Document normalized'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'transform', operation: 'normalize' }, null, 2));
+      } else if (!quiet) {
+        console.error(c('green', '✓ Document normalized'));
+      }
     }
   } finally {
     client.disconnect();
@@ -2017,7 +2235,7 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       const results = await engine.expand();
       
       if (json) {
-        console.log(JSON.stringify({ results }, null, 2));
+        console.log(JSON.stringify({ success: true, action: 'macro', results }, null, 2));
       } else {
         if (results.length === 0) {
           if (!quiet) console.error(c('yellow', 'No macros expanded'));
@@ -2085,8 +2303,14 @@ async function cmdExec(args: ParsedArgs): Promise<void> {
 // Command: download (via HTTP API)
 async function cmdDownload(args: ParsedArgs): Promise<void> {
   const url = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!url) {
-    console.error(c('red', 'Error: URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: URL required'));
+    }
     process.exit(1);
   }
 
@@ -2099,11 +2323,24 @@ async function cmdDownload(args: ParsedArgs): Promise<void> {
     const outputFile = (args.options.output || args.options.o) as string | undefined;
     if (outputFile) {
       writeFileSync(outputFile, content, 'utf-8');
-      console.error(c('green', `Downloaded to ${outputFile}`));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'download', noteId, file: outputFile, length: content.length }, null, 2));
+      } else {
+        console.error(c('green', `Downloaded to ${outputFile}`));
+      }
     } else {
-      console.log(content);
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'download', noteId, content }, null, 2));
+      } else {
+        console.log(content);
+      }
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2111,8 +2348,14 @@ async function cmdDownload(args: ParsedArgs): Promise<void> {
 // Command: create (new note via HTTP API)
 async function cmdCreate(args: ParsedArgs): Promise<void> {
   const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!serverUrl) {
-    console.error(c('red', 'Error: Server URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+    }
     process.exit(1);
   }
 
@@ -2125,7 +2368,11 @@ async function cmdCreate(args: ParsedArgs): Promise<void> {
   let content = '';
   if (inputFile) {
     if (!existsSync(inputFile)) {
-      console.error(c('red', `Error: File not found: ${inputFile}`));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: false, error: `File not found: ${inputFile}` }, null, 2));
+      } else {
+        console.error(c('red', `Error: File not found: ${inputFile}`));
+      }
       process.exit(1);
     }
     content = readFileSync(inputFile, 'utf-8');
@@ -2142,14 +2389,22 @@ async function cmdCreate(args: ParsedArgs): Promise<void> {
       noteId = await api.createNote(content || undefined);
     }
 
-    if (quiet) {
+    const apiOpts = getAPIOptions(args, serverUrl)!;
+    const fullUrl = apiOpts.serverUrl + '/' + noteId;
+    
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: true, action: 'create', noteId, alias: alias || null, url: fullUrl }, null, 2));
+    } else if (quiet) {
       console.log(noteId);
     } else {
-      const apiOpts = getAPIOptions(args, serverUrl)!;
-      const fullUrl = apiOpts.serverUrl + '/' + noteId;
       console.log(c('green', 'Created note:'), fullUrl);
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2157,15 +2412,20 @@ async function cmdCreate(args: ParsedArgs): Promise<void> {
 // Command: revisions (list or fetch revisions)
 async function cmdRevisions(args: ParsedArgs): Promise<void> {
   const url = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!url) {
-    console.error(c('red', 'Error: URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: URL required'));
+    }
     process.exit(1);
   }
 
   const revisionId = args.positional[1];
   const api = createAPIClient(args, url);
   const noteId = parseNoteId(url);
-  const jsonOutput = args.options.json;
   const outputFile = (args.options.output || args.options.o) as string | undefined;
 
   try {
@@ -2175,9 +2435,13 @@ async function cmdRevisions(args: ParsedArgs): Promise<void> {
       
       if (outputFile) {
         writeFileSync(outputFile, revision.content, 'utf-8');
-        console.error(c('green', `Revision saved to ${outputFile}`));
+        if (jsonOutput) {
+          console.log(JSON.stringify({ success: true, action: 'get-revision', noteId, revisionId, file: outputFile, length: revision.content.length }, null, 2));
+        } else {
+          console.error(c('green', `Revision saved to ${outputFile}`));
+        }
       } else if (jsonOutput) {
-        console.log(JSON.stringify(revision, null, 2));
+        console.log(JSON.stringify({ success: true, action: 'get-revision', noteId, revisionId, revision }, null, 2));
       } else {
         console.log(revision.content);
       }
@@ -2186,7 +2450,7 @@ async function cmdRevisions(args: ParsedArgs): Promise<void> {
       const revisions = await api.listRevisions(noteId);
       
       if (jsonOutput) {
-        console.log(JSON.stringify(revisions, null, 2));
+        console.log(JSON.stringify({ success: true, action: 'list-revisions', noteId, count: revisions.revision.length, revisions: revisions.revision }, null, 2));
       } else {
         console.log(c('bold', 'Revisions for note:'), noteId);
         console.log();
@@ -2201,6 +2465,11 @@ async function cmdRevisions(args: ParsedArgs): Promise<void> {
       }
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2208,25 +2477,34 @@ async function cmdRevisions(args: ParsedArgs): Promise<void> {
 // Command: me (user profile)
 async function cmdMe(args: ParsedArgs): Promise<void> {
   const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!serverUrl) {
-    console.error(c('red', 'Error: Server URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+    }
     process.exit(1);
   }
 
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   if (!cookie) {
-    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Cookie required (use -c or HEDGEDOC_COOKIE environment variable)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    }
     process.exit(1);
   }
 
   const api = createAPIClient(args, serverUrl);
-  const jsonOutput = args.options.json;
 
   try {
     const profile = await api.getProfile();
     
     if (jsonOutput) {
-      console.log(JSON.stringify(profile, null, 2));
+      console.log(JSON.stringify({ success: true, action: 'get-profile', profile }, null, 2));
     } else {
       console.log(c('bold', 'User Profile'));
       console.log();
@@ -2236,6 +2514,11 @@ async function cmdMe(args: ParsedArgs): Promise<void> {
       if (profile.photo) console.log(`  ${c('cyan', 'Photo:')}      ${profile.photo}`);
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2243,31 +2526,56 @@ async function cmdMe(args: ParsedArgs): Promise<void> {
 // Command: export (download all notes as zip)
 async function cmdExport(args: ParsedArgs): Promise<void> {
   const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!serverUrl) {
-    console.error(c('red', 'Error: Server URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+    }
     process.exit(1);
   }
 
   const outputFile = (args.options.output || args.options.o) as string | undefined;
   if (!outputFile) {
-    console.error(c('red', 'Error: Output file required (use -o <filename.zip>)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Output file required (use -o <filename.zip>)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Output file required (use -o <filename.zip>)'));
+    }
     process.exit(1);
   }
 
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   if (!cookie) {
-    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Cookie required (use -c or HEDGEDOC_COOKIE environment variable)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    }
     process.exit(1);
   }
 
   const api = createAPIClient(args, serverUrl);
 
   try {
-    console.error(c('cyan', 'Exporting notes...'));
+    if (!jsonOutput) {
+      console.error(c('cyan', 'Exporting notes...'));
+    }
     const zipData = await api.downloadExport();
     writeFileSync(outputFile, Buffer.from(zipData));
-    console.error(c('green', `Exported to ${outputFile}`));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: true, action: 'export', file: outputFile, size: zipData.byteLength }, null, 2));
+    } else {
+      console.error(c('green', `Exported to ${outputFile}`));
+    }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2275,19 +2583,28 @@ async function cmdExport(args: ParsedArgs): Promise<void> {
 // Command: history (show/manage history)
 async function cmdHistory(args: ParsedArgs): Promise<void> {
   const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!serverUrl) {
-    console.error(c('red', 'Error: Server URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+    }
     process.exit(1);
   }
 
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   if (!cookie) {
-    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Cookie required (use -c or HEDGEDOC_COOKIE environment variable)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    }
     process.exit(1);
   }
 
   const api = createAPIClient(args, serverUrl);
-  const jsonOutput = args.options.json;
   const pinnedOnly = args.options.pinned;
   const deleteAll = args.options.delete;
 
@@ -2295,7 +2612,11 @@ async function cmdHistory(args: ParsedArgs): Promise<void> {
     if (deleteAll) {
       // deleteHistory fetches CSRF token internally
       await api.deleteHistory();
-      console.log(c('green', 'History deleted'));
+      if (jsonOutput) {
+        console.log(JSON.stringify({ success: true, action: 'delete-history' }, null, 2));
+      } else {
+        console.log(c('green', 'History deleted'));
+      }
       return;
     }
 
@@ -2307,7 +2628,7 @@ async function cmdHistory(args: ParsedArgs): Promise<void> {
     }
 
     if (jsonOutput) {
-      console.log(JSON.stringify(entries, null, 2));
+      console.log(JSON.stringify({ success: true, action: 'list-history', count: entries.length, entries }, null, 2));
     } else {
       console.log(c('bold', 'Note History'));
       console.log();
@@ -2332,6 +2653,11 @@ async function cmdHistory(args: ParsedArgs): Promise<void> {
       }
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2339,14 +2665,24 @@ async function cmdHistory(args: ParsedArgs): Promise<void> {
 // Command: pin/unpin (toggle pin status in history)
 async function cmdPin(args: ParsedArgs, pin: boolean): Promise<void> {
   const url = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!url) {
-    console.error(c('red', 'Error: URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: URL required'));
+    }
     process.exit(1);
   }
 
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   if (!cookie) {
-    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Cookie required (use -c or HEDGEDOC_COOKIE environment variable)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    }
     process.exit(1);
   }
 
@@ -2355,8 +2691,17 @@ async function cmdPin(args: ParsedArgs, pin: boolean): Promise<void> {
 
   try {
     await api.setHistoryPinned(noteId, pin);
-    console.log(c('green', pin ? 'Note pinned' : 'Note unpinned'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: true, action: pin ? 'pin' : 'unpin', noteId }, null, 2));
+    } else {
+      console.log(c('green', pin ? 'Note pinned' : 'Note unpinned'));
+    }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2364,14 +2709,24 @@ async function cmdPin(args: ParsedArgs, pin: boolean): Promise<void> {
 // Command: history-delete (remove note from history)
 async function cmdHistoryDelete(args: ParsedArgs): Promise<void> {
   const url = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!url) {
-    console.error(c('red', 'Error: URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: URL required'));
+    }
     process.exit(1);
   }
 
   const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
   if (!cookie) {
-    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Cookie required (use -c or HEDGEDOC_COOKIE environment variable)' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    }
     process.exit(1);
   }
 
@@ -2380,8 +2735,17 @@ async function cmdHistoryDelete(args: ParsedArgs): Promise<void> {
 
   try {
     await api.deleteFromHistory(noteId);
-    console.log(c('green', 'Note removed from history'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: true, action: 'history-delete', noteId }, null, 2));
+    } else {
+      console.log(c('green', 'Note removed from history'));
+    }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
@@ -2389,19 +2753,24 @@ async function cmdHistoryDelete(args: ParsedArgs): Promise<void> {
 // Command: status (server status)
 async function cmdStatus(args: ParsedArgs): Promise<void> {
   const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  
   if (!serverUrl) {
-    console.error(c('red', 'Error: Server URL required'));
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+    }
     process.exit(1);
   }
 
   const api = createAPIClient(args, serverUrl);
-  const jsonOutput = args.options.json;
 
   try {
     const status = await api.getStatus();
 
     if (jsonOutput) {
-      console.log(JSON.stringify(status, null, 2));
+      console.log(JSON.stringify({ success: true, action: 'status', status }, null, 2));
     } else {
       console.log(c('bold', 'Server Status'));
       console.log();
@@ -2416,6 +2785,11 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
       console.log(`  ${c('cyan', 'Disconnect Queue:')}     ${status.disconnectSocketQueueLength}`);
     }
   } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ success: false, error: message }, null, 2));
+      process.exit(1);
+    }
     handleAPIError(err);
   }
 }
