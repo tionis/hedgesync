@@ -17,9 +17,9 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 
 // Types
@@ -165,6 +165,66 @@ function getConnectionOptions(args: ParsedArgs): ConnectionOptions | null {
   
   // URL parsing failed
   return null;
+}
+
+// Get API options from args (server URL only, no note ID required for some commands)
+interface APIOptions {
+  serverUrl: string;
+  cookie?: string;
+}
+
+function getAPIOptions(args: ParsedArgs, explicitUrl?: string): APIOptions | null {
+  const url = explicitUrl || args.positional[0] || args.options.url || args.options.u || args.options.server || args.options.s;
+  const cookie = (args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE) as string | undefined;
+  
+  if (!url || typeof url !== 'string') {
+    return null;
+  }
+  
+  try {
+    // If this looks like a full note URL, extract just the server
+    const parsed = parseUrl(url);
+    if (parsed) {
+      return {
+        serverUrl: parsed.serverUrl,
+        cookie,
+      };
+    }
+    
+    // Otherwise, assume it's just a server URL
+    const urlObj = new URL(url);
+    return {
+      serverUrl: `${urlObj.protocol}//${urlObj.host}${urlObj.pathname.replace(/\/$/, '')}`,
+      cookie,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Create an API client from args
+function createAPIClient(args: ParsedArgs, explicitUrl?: string): HedgeDocAPI {
+  const opts = getAPIOptions(args, explicitUrl);
+  
+  if (!opts) {
+    console.error(c('red', 'Error: Server URL is required'));
+    console.error('Usage: hedgesync <command> <server-url> [options]');
+    process.exit(1);
+  }
+  
+  return new HedgeDocAPI(opts);
+}
+
+// Extract note ID from URL
+function parseNoteId(url: string): string {
+  const parsed = parseUrl(url);
+  if (parsed) {
+    return parsed.noteId;
+  }
+  
+  // If parseUrl fails, assume URL is just the note ID
+  // Strip any trailing slashes
+  return url.replace(/\/$/, '').split('/').pop() || url;
 }
 
 // Subcommand-specific help texts
@@ -587,6 +647,163 @@ ${c('yellow', 'OPTIONS:')}
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync users https://md.example.com/abc123
+`,
+
+  // =========================================
+  // HTTP API Commands (no Socket.IO required)
+  // =========================================
+
+  download: `
+${c('bold', 'hedgesync download')} - Download note content via HTTP API
+
+${c('yellow', 'USAGE:')}
+  hedgesync download <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-o, --output')}   Write output to file
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync download https://md.example.com/abc123
+  hedgesync download https://md.example.com/abc123 -o note.md
+`,
+
+  create: `
+${c('bold', 'hedgesync create')} - Create a new note
+
+${c('yellow', 'USAGE:')}
+  hedgesync create <server-url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '-n, --name')}     Custom alias/name for the note (requires FreeURL mode)
+  ${c('cyan', '-f, --file')}     Initial content from file
+  ${c('cyan', '-q, --quiet')}    Only output the new note ID
+
+${c('yellow', 'EXAMPLES:')}
+  # Create empty note with random ID
+  hedgesync create https://md.example.com
+
+  # Create note with custom alias (requires FreeURL mode)
+  hedgesync create https://md.example.com -n my-note-name
+
+  # Create note with initial content
+  echo "# Hello World" | hedgesync create https://md.example.com
+  hedgesync create https://md.example.com -f document.md
+`,
+
+  revisions: `
+${c('bold', 'hedgesync revisions')} - List or fetch note revisions
+
+${c('yellow', 'USAGE:')}
+  hedgesync revisions <url> [revision-id] [options]
+
+${c('yellow', 'ARGUMENTS:')}
+  ${c('cyan', '[revision-id]')}  Specific revision timestamp to fetch (optional)
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication
+  ${c('cyan', '--json')}         Output in JSON format
+  ${c('cyan', '-o, --output')}   Write revision content to file
+
+${c('yellow', 'EXAMPLES:')}
+  # List all revisions
+  hedgesync revisions https://md.example.com/abc123
+
+  # Get a specific revision
+  hedgesync revisions https://md.example.com/abc123 1570921051959
+
+  # Save revision to file
+  hedgesync revisions https://md.example.com/abc123 1570921051959 -o old-version.md
+`,
+
+  me: `
+${c('bold', 'hedgesync me')} - Show current user profile
+
+${c('yellow', 'USAGE:')}
+  hedgesync me <server-url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+  ${c('cyan', '--json')}         Output in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync me https://md.example.com -c 'connect.sid=...'
+  HEDGEDOC_COOKIE='connect.sid=...' hedgesync me https://md.example.com
+`,
+
+  'export': `
+${c('bold', 'hedgesync export')} - Export all user notes as a zip archive
+
+${c('yellow', 'USAGE:')}
+  hedgesync export <server-url> -o <output-file> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+  ${c('cyan', '-o, --output')}   Output file path (required, should end in .zip)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync export https://md.example.com -o my-notes.zip -c 'connect.sid=...'
+`,
+
+  history: `
+${c('bold', 'hedgesync history')} - Show note history
+
+${c('yellow', 'USAGE:')}
+  hedgesync history <server-url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+  ${c('cyan', '--json')}         Output in JSON format
+  ${c('cyan', '--pinned')}       Show only pinned notes
+  ${c('cyan', '--delete')}       Delete entire history (use with caution!)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync history https://md.example.com -c 'connect.sid=...'
+  hedgesync history https://md.example.com --pinned
+  hedgesync history https://md.example.com --delete
+`,
+
+  pin: `
+${c('bold', 'hedgesync pin')} - Pin or unpin a note in history
+
+${c('yellow', 'USAGE:')}
+  hedgesync pin <url> [options]
+  hedgesync unpin <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync pin https://md.example.com/abc123
+  hedgesync unpin https://md.example.com/abc123
+`,
+
+  'history-delete': `
+${c('bold', 'hedgesync history-delete')} - Delete a note from history
+
+${c('yellow', 'USAGE:')}
+  hedgesync history-delete <url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for authentication (required)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync history-delete https://md.example.com/abc123
+`,
+
+  status: `
+${c('bold', 'hedgesync status')} - Show server status
+
+${c('yellow', 'USAGE:')}
+  hedgesync status <server-url> [options]
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '--json')}         Output in JSON format
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync status https://md.example.com
+  hedgesync status https://md.example.com --json
 `
 };
 
@@ -621,6 +838,18 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'transform')}   Transform document with pandoc
   ${c('green', 'macro')}       Run macros on document (expand triggers)
   ${c('green', 'help')}        Show help (use 'help <command>' for details)
+
+${c('yellow', 'HTTP API COMMANDS:')} ${c('dim', '(no realtime connection required)')}
+  ${c('green', 'download')}    Download note content
+  ${c('green', 'create')}      Create a new note
+  ${c('green', 'revisions')}   List or fetch note revisions
+  ${c('green', 'me')}          Show current user profile
+  ${c('green', 'export')}      Export all notes as zip archive
+  ${c('green', 'history')}     Show/manage note history
+  ${c('green', 'pin')}         Pin a note in history
+  ${c('green', 'unpin')}       Unpin a note from history
+  ${c('green', 'history-delete')} Remove note from history
+  ${c('green', 'status')}      Show server status
 
 ${c('yellow', 'GLOBAL OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
@@ -1849,6 +2078,363 @@ async function cmdExec(args: ParsedArgs): Promise<void> {
   }
 }
 
+// ============================================
+// HTTP API Commands (no Socket.IO required)
+// ============================================
+
+// Command: download (via HTTP API)
+async function cmdDownload(args: ParsedArgs): Promise<void> {
+  const url = args.positional[0];
+  if (!url) {
+    console.error(c('red', 'Error: URL required'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, url);
+  const noteId = parseNoteId(url);
+
+  try {
+    const content = await api.downloadNote(noteId);
+    
+    const outputFile = (args.options.output || args.options.o) as string | undefined;
+    if (outputFile) {
+      writeFileSync(outputFile, content, 'utf-8');
+      console.error(c('green', `Downloaded to ${outputFile}`));
+    } else {
+      console.log(content);
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: create (new note via HTTP API)
+async function cmdCreate(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  if (!serverUrl) {
+    console.error(c('red', 'Error: Server URL required'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, serverUrl);
+  const alias = (args.options.name || args.options.n) as string | undefined;
+  const inputFile = (args.options.file || args.options.f) as string | undefined;
+  const quiet = args.options.quiet || args.options.q;
+
+  // Get initial content (from stdin, file, or empty)
+  let content = '';
+  if (inputFile) {
+    if (!existsSync(inputFile)) {
+      console.error(c('red', `Error: File not found: ${inputFile}`));
+      process.exit(1);
+    }
+    content = readFileSync(inputFile, 'utf-8');
+  } else if (!process.stdin.isTTY) {
+    // Read from stdin
+    content = await readStdin();
+  }
+
+  try {
+    let noteId: string;
+    if (alias) {
+      noteId = await api.createNoteWithAlias(alias, content);
+    } else {
+      noteId = await api.createNote(content || undefined);
+    }
+
+    if (quiet) {
+      console.log(noteId);
+    } else {
+      const apiOpts = getAPIOptions(args, serverUrl)!;
+      const fullUrl = apiOpts.serverUrl + '/' + noteId;
+      console.log(c('green', 'Created note:'), fullUrl);
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: revisions (list or fetch revisions)
+async function cmdRevisions(args: ParsedArgs): Promise<void> {
+  const url = args.positional[0];
+  if (!url) {
+    console.error(c('red', 'Error: URL required'));
+    process.exit(1);
+  }
+
+  const revisionId = args.positional[1];
+  const api = createAPIClient(args, url);
+  const noteId = parseNoteId(url);
+  const jsonOutput = args.options.json;
+  const outputFile = (args.options.output || args.options.o) as string | undefined;
+
+  try {
+    if (revisionId) {
+      // Fetch a specific revision
+      const revision = await api.getRevision(noteId, revisionId);
+      
+      if (outputFile) {
+        writeFileSync(outputFile, revision.content, 'utf-8');
+        console.error(c('green', `Revision saved to ${outputFile}`));
+      } else if (jsonOutput) {
+        console.log(JSON.stringify(revision, null, 2));
+      } else {
+        console.log(revision.content);
+      }
+    } else {
+      // List all revisions
+      const revisions = await api.listRevisions(noteId);
+      
+      if (jsonOutput) {
+        console.log(JSON.stringify(revisions, null, 2));
+      } else {
+        console.log(c('bold', 'Revisions for note:'), noteId);
+        console.log();
+        for (const rev of revisions.revision) {
+          const date = new Date(rev.time);
+          const dateStr = date.toLocaleString();
+          const lengthStr = rev.length ? ` (${rev.length} chars)` : '';
+          console.log(`  ${c('cyan', String(rev.time))}  ${dateStr}${lengthStr}`);
+        }
+        console.log();
+        console.log(`Total: ${revisions.revision.length} revision(s)`);
+      }
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: me (user profile)
+async function cmdMe(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  if (!serverUrl) {
+    console.error(c('red', 'Error: Server URL required'));
+    process.exit(1);
+  }
+
+  const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
+  if (!cookie) {
+    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, serverUrl);
+  const jsonOutput = args.options.json;
+
+  try {
+    const profile = await api.getProfile();
+    
+    if (jsonOutput) {
+      console.log(JSON.stringify(profile, null, 2));
+    } else {
+      console.log(c('bold', 'User Profile'));
+      console.log();
+      console.log(`  ${c('cyan', 'Status:')}     ${profile.status}`);
+      if (profile.id) console.log(`  ${c('cyan', 'ID:')}         ${profile.id}`);
+      if (profile.name) console.log(`  ${c('cyan', 'Name:')}       ${profile.name}`);
+      if (profile.photo) console.log(`  ${c('cyan', 'Photo:')}      ${profile.photo}`);
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: export (download all notes as zip)
+async function cmdExport(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  if (!serverUrl) {
+    console.error(c('red', 'Error: Server URL required'));
+    process.exit(1);
+  }
+
+  const outputFile = (args.options.output || args.options.o) as string | undefined;
+  if (!outputFile) {
+    console.error(c('red', 'Error: Output file required (use -o <filename.zip>)'));
+    process.exit(1);
+  }
+
+  const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
+  if (!cookie) {
+    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, serverUrl);
+
+  try {
+    console.error(c('cyan', 'Exporting notes...'));
+    const zipData = await api.downloadExport();
+    writeFileSync(outputFile, Buffer.from(zipData));
+    console.error(c('green', `Exported to ${outputFile}`));
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: history (show/manage history)
+async function cmdHistory(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  if (!serverUrl) {
+    console.error(c('red', 'Error: Server URL required'));
+    process.exit(1);
+  }
+
+  const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
+  if (!cookie) {
+    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, serverUrl);
+  const jsonOutput = args.options.json;
+  const pinnedOnly = args.options.pinned;
+  const deleteAll = args.options.delete;
+
+  try {
+    if (deleteAll) {
+      // deleteHistory fetches CSRF token internally
+      await api.deleteHistory();
+      console.log(c('green', 'History deleted'));
+      return;
+    }
+
+    const history = await api.getHistory();
+    let entries = history.history;
+
+    if (pinnedOnly) {
+      entries = entries.filter(e => e.pinned);
+    }
+
+    if (jsonOutput) {
+      console.log(JSON.stringify(entries, null, 2));
+    } else {
+      console.log(c('bold', 'Note History'));
+      console.log();
+      
+      if (entries.length === 0) {
+        console.log('  (no notes in history)');
+      } else {
+        for (const entry of entries) {
+          const pin = entry.pinned ? c('yellow', '★ ') : '  ';
+          const date = new Date(entry.time);
+          const dateStr = date.toLocaleString();
+          const title = entry.text || '(untitled)';
+          console.log(`${pin}${c('cyan', entry.id)}`);
+          console.log(`    Title: ${title}`);
+          console.log(`    Updated: ${dateStr}`);
+          if (entry.tags && entry.tags.length > 0) {
+            console.log(`    Tags: ${entry.tags.join(', ')}`);
+          }
+          console.log();
+        }
+        console.log(`Total: ${entries.length} note(s)`);
+      }
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: pin/unpin (toggle pin status in history)
+async function cmdPin(args: ParsedArgs, pin: boolean): Promise<void> {
+  const url = args.positional[0];
+  if (!url) {
+    console.error(c('red', 'Error: URL required'));
+    process.exit(1);
+  }
+
+  const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
+  if (!cookie) {
+    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, url);
+  const noteId = parseNoteId(url);
+
+  try {
+    await api.setHistoryPinned(noteId, pin);
+    console.log(c('green', pin ? 'Note pinned' : 'Note unpinned'));
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: history-delete (remove note from history)
+async function cmdHistoryDelete(args: ParsedArgs): Promise<void> {
+  const url = args.positional[0];
+  if (!url) {
+    console.error(c('red', 'Error: URL required'));
+    process.exit(1);
+  }
+
+  const cookie = args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE;
+  if (!cookie) {
+    console.error(c('red', 'Error: Cookie required (use -c or HEDGEDOC_COOKIE environment variable)'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, url);
+  const noteId = parseNoteId(url);
+
+  try {
+    await api.deleteFromHistory(noteId);
+    console.log(c('green', 'Note removed from history'));
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Command: status (server status)
+async function cmdStatus(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  if (!serverUrl) {
+    console.error(c('red', 'Error: Server URL required'));
+    process.exit(1);
+  }
+
+  const api = createAPIClient(args, serverUrl);
+  const jsonOutput = args.options.json;
+
+  try {
+    const status = await api.getStatus();
+
+    if (jsonOutput) {
+      console.log(JSON.stringify(status, null, 2));
+    } else {
+      console.log(c('bold', 'Server Status'));
+      console.log();
+      console.log(`  ${c('cyan', 'Online Users:')}         ${status.onlineUsers}`);
+      console.log(`  ${c('cyan', 'Online Notes:')}         ${status.onlineNotes}`);
+      console.log(`  ${c('cyan', 'Distinct Online:')}      ${status.distinctOnlineUsers}`);
+      console.log(`  ${c('cyan', 'Notes Created:')}        ${status.notesCount}`);
+      console.log(`  ${c('cyan', 'Registered Users:')}     ${status.registeredUsers}`);
+      console.log(`  ${c('cyan', 'Online Registered:')}    ${status.onlineRegisteredUsers}`);
+      console.log(`  ${c('cyan', 'Distinct Registered:')}  ${status.distinctOnlineRegisteredUsers}`);
+      console.log(`  ${c('cyan', 'Connection Queue:')}     ${status.connectionSocketQueueLength}`);
+      console.log(`  ${c('cyan', 'Disconnect Queue:')}     ${status.disconnectSocketQueueLength}`);
+    }
+  } catch (err) {
+    handleAPIError(err);
+  }
+}
+
+// Helper function to handle API errors consistently
+function handleAPIError(err: unknown): never {
+  if (err instanceof HedgeDocAPIError) {
+    console.error(c('red', `Error: ${err.message}`));
+    if (err.statusCode === 401 || err.statusCode === 403) {
+      console.error(c('dim', 'Hint: Make sure your session cookie is valid'));
+    }
+  } else if (err instanceof Error) {
+    console.error(c('red', `Error: ${err.message}`));
+  } else {
+    console.error(c('red', 'Unknown error occurred'));
+  }
+  process.exit(1);
+}
+
 // Main entry point
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -1910,6 +2496,39 @@ async function main(): Promise<void> {
       case 'exec':
         await cmdExec(args);
         break;
+      
+      // HTTP API commands (no Socket.IO required)
+      case 'download':
+        await cmdDownload(args);
+        break;
+      case 'create':
+        await cmdCreate(args);
+        break;
+      case 'revisions':
+        await cmdRevisions(args);
+        break;
+      case 'me':
+        await cmdMe(args);
+        break;
+      case 'export':
+        await cmdExport(args);
+        break;
+      case 'history':
+        await cmdHistory(args);
+        break;
+      case 'pin':
+        await cmdPin(args, true);
+        break;
+      case 'unpin':
+        await cmdPin(args, false);
+        break;
+      case 'history-delete':
+        await cmdHistoryDelete(args);
+        break;
+      case 'status':
+        await cmdStatus(args);
+        break;
+      
       default:
         console.error(c('red', `Unknown command: ${args.command}`));
         process.exit(1);

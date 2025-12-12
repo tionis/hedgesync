@@ -33,6 +33,20 @@ export type {
 export { OTClient } from './ot-client.js';
 export type { Transformable } from './ot-client.js';
 
+// HTTP API client
+export { HedgeDocAPI, HedgeDocAPIError } from './hedgedoc-api.js';
+export type {
+  HedgeDocAPIOptions,
+  NoteMetadata,
+  NotePermission,
+  UserProfile,
+  HistoryEntry,
+  RevisionInfo,
+  Revision,
+  ServerStatus,
+  ServerConfig
+} from './hedgedoc-api.js';
+
 // Pandoc integration
 export { 
   PandocTransformer, 
