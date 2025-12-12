@@ -46,3 +46,6 @@ package-lock.json
 
 # Debug files
 examples/debug-*.js
+
+# Temporary state doc files
+TODO.md

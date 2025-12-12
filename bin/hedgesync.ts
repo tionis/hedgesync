@@ -1559,13 +1559,16 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
   
   // Add text macros from command line
   for (const macro of textMacros) {
-    const match = macro.match(/^(.+?)=(.+)$/);
-    if (!match) {
+    // Allow empty replacement (pattern=)
+    const eqIndex = macro.indexOf('=');
+    if (eqIndex === -1 || eqIndex === 0) {
       console.error(c('red', `Invalid text macro format: ${macro}`));
+      console.error(c('dim', 'Expected format: trigger=replacement or trigger= (for empty replacement)'));
       process.exit(1);
     }
     
-    const [, trigger, replacement] = match;
+    const trigger = macro.slice(0, eqIndex);
+    const replacement = macro.slice(eqIndex + 1);
     if (replacement.startsWith('$(') && replacement.endsWith(')')) {
       const cmd = replacement.slice(2, -1);
       engine.addTextMacro(trigger, async () => {

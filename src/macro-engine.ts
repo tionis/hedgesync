@@ -646,7 +646,19 @@ class MacroEngine {
           continue;
         }
         
-        this.client.replace(replaceIndex, replaceLength, replacement!);
+        // Try to apply the replacement - wrap in try/catch to handle OT errors gracefully
+        try {
+          this.client.replace(replaceIndex, replaceLength, replacement!);
+        } catch (replaceErr) {
+          const errMsg = (replaceErr as Error).message || '';
+          // OT composition errors mean the document changed while we were processing
+          // Just skip this match and let the next iteration handle it
+          if (errMsg.includes('base length') || errMsg.includes('target length') || errMsg.includes('Position out of bounds')) {
+            console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: document changed during processing, will retry`);
+            continue;
+          }
+          throw replaceErr; // Re-throw unexpected errors
+        }
         
         if (macro.type === 'text') {
           matches.push({ trigger: macro.trigger, replacement: replacement!, index: replaceIndex } as TextMacroMatch);
@@ -746,7 +758,16 @@ class MacroEngine {
         }
         
         // Replace the entire block (including markers) with the result
-        this.client.replace(replaceIndex, fullMatch.length, replacement);
+        try {
+          this.client.replace(replaceIndex, fullMatch.length, replacement);
+        } catch (replaceErr) {
+          const errMsg = (replaceErr as Error).message || '';
+          if (errMsg.includes('base length') || errMsg.includes('target length') || errMsg.includes('Position out of bounds')) {
+            console.error(`Block macro ${macro.blockName}: document changed during processing, will retry`);
+            continue;
+          }
+          throw replaceErr;
+        }
         
         matches.push({ 
           match: fullMatch, 
