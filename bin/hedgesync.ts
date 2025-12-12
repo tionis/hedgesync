@@ -114,6 +114,7 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 // Parse a HedgeDoc URL into server URL and note ID
+// Handles subpath deployments like https://example.com/hedgedoc/noteId
 function parseUrl(url: string): ParsedUrl | null {
   if (!url) return null;
   
@@ -125,8 +126,15 @@ function parseUrl(url: string): ParsedUrl | null {
       return null;
     }
     
+    // The last path segment is the note ID
     const noteId = pathParts[pathParts.length - 1];
-    const serverUrl = `${parsed.protocol}//${parsed.host}`;
+    
+    // Everything before the note ID is the base path (if any)
+    const basePath = pathParts.length > 1 
+      ? '/' + pathParts.slice(0, -1).join('/')
+      : '';
+    
+    const serverUrl = `${parsed.protocol}//${parsed.host}${basePath}`;
     
     return { serverUrl, noteId };
   } catch {

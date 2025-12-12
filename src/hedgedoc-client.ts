@@ -425,10 +425,30 @@ export class HedgeDocClient extends EventEmitter {
       // Detect if we're running in Bun
       const isBun = typeof Bun !== 'undefined';
       
+      // Extract base path from serverUrl for Socket.IO
+      // e.g., https://example.com/hedgedoc -> path = /hedgedoc/socket.io/
+      // Socket.IO needs to connect to the origin only (without path), but use the path option
+      // for the actual Socket.IO endpoint. Otherwise, it interprets the URL path as a namespace.
+      let socketPath = '/socket.io/';
+      let socketUrl = this.serverUrl;
+      try {
+        const urlObj = new URL(this.serverUrl);
+        if (urlObj.pathname && urlObj.pathname !== '/') {
+          socketPath = urlObj.pathname.replace(/\/$/, '') + '/socket.io/';
+          // Connect to origin only
+          socketUrl = urlObj.origin;
+        }
+      } catch {
+        // If URL parsing fails, use defaults
+      }
+      
       const socketOptions = {
+        path: socketPath,
         query: {
           noteId: this.noteId
         },
+        // Bun has issues with XHR polling, so use websocket-only in Bun
+        // Node.js works fine with polling as fallback
         transports: isBun ? ['websocket'] as ('websocket')[] : ['polling', 'websocket'] as ('polling' | 'websocket')[],
         withCredentials: true,
         extraHeaders: {
@@ -437,7 +457,7 @@ export class HedgeDocClient extends EventEmitter {
         reconnection: false
       };
 
-      this.socket = io(this.serverUrl, socketOptions);
+      this.socket = io(socketUrl, socketOptions);
 
       // Connection events
       this.socket.on('connect', () => {

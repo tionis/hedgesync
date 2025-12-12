@@ -20,6 +20,13 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 - ↩️ **Undo/Redo** - track edit history with grouping
 - 💻 **CLI tool** - command-line interface for scripting
 
+## Compatibility
+
+- **HedgeDoc 1.x with Socket.IO v3+/v4**: Full support
+- **HedgeDoc subpath deployments**: Supports deployments at subpaths (e.g., `https://example.com/hedgedoc/note-id`)
+
+> **Note**: HedgeDoc servers using Socket.IO v2 (typically older installations from before 2021) are not supported. Please upgrade your HedgeDoc server.
+
 ## Installation
 
 ```bash
