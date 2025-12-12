@@ -98,6 +98,8 @@ export interface HedgeDocAPIOptions {
   serverUrl: string;
   /** Session cookie for authentication (e.g., "connect.sid=...") */
   cookie?: string;
+  /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
+  headers?: Record<string, string>;
 }
 
 // ===========================================
@@ -127,11 +129,13 @@ export class HedgeDocAPIError extends Error {
 export class HedgeDocAPI {
   private serverUrl: string;
   private cookie: string | null;
+  private customHeaders: Record<string, string>;
   private csrfToken: string | null = null;
   
   constructor(options: HedgeDocAPIOptions) {
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
     this.cookie = options.cookie || null;
+    this.customHeaders = options.headers || {};
   }
   
   // ===========================================
@@ -149,6 +153,7 @@ export class HedgeDocAPI {
     
     const headers: Record<string, string> = {
       'Accept': 'application/json',
+      ...this.customHeaders,
       ...(options.headers as Record<string, string> || {}),
     };
     
@@ -373,9 +378,12 @@ export class HedgeDocAPI {
    */
   async downloadExport(): Promise<ArrayBuffer> {
     const url = `${this.serverUrl}/me/export`;
-    const response = await fetch(url, {
-      headers: this.cookie ? { 'Cookie': this.cookie } : {},
-    });
+    const headers: Record<string, string> = { ...this.customHeaders };
+    if (this.cookie) {
+      headers['Cookie'] = this.cookie;
+    }
+    
+    const response = await fetch(url, { headers });
     
     if (!response.ok) {
       throw new HedgeDocAPIError(`Failed to download export: ${response.statusText}`, response.status);

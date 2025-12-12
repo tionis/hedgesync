@@ -29,6 +29,8 @@ export interface HedgeDocClientOptions {
   serverUrl: string;
   noteId: string;
   cookie?: string | null;
+  /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
+  headers?: Record<string, string>;
   operationTimeout?: number;
   rateLimit?: RateLimitConfig;
   reconnect?: ReconnectConfig;
@@ -175,6 +177,7 @@ export class HedgeDocClient extends EventEmitter {
   serverUrl: string;
   noteId: string;
   cookie: string | null;
+  customHeaders: Record<string, string>;
   socket: Socket | null;
   document: string;
   revision: number;
@@ -235,6 +238,7 @@ export class HedgeDocClient extends EventEmitter {
     this.serverUrl = options.serverUrl.replace(/\/$/, ''); // Remove trailing slash
     this.noteId = options.noteId;
     this.cookie = options.cookie || null;
+    this.customHeaders = options.headers || {};
     
     this.socket = null;
     this.document = '';
@@ -452,6 +456,7 @@ export class HedgeDocClient extends EventEmitter {
         transports: isBun ? ['websocket'] as ('websocket')[] : ['polling', 'websocket'] as ('polling' | 'websocket')[],
         withCredentials: true,
         extraHeaders: {
+          ...this.customHeaders,
           Cookie: cookie
         },
         reconnection: false
