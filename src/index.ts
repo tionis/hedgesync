@@ -47,6 +47,25 @@ export type {
   ServerConfig
 } from './hedgedoc-api.js';
 
+// Authentication
+export { 
+  normalizeCookie, 
+  extractSessionId,
+  loginWithEmail, 
+  loginWithLDAP, 
+  loginWithOIDC,
+  detectAuthMethods,
+  AuthError 
+} from './auth.js';
+export type { 
+  AuthResult,
+  EmailAuthOptions,
+  LDAPAuthOptions,
+  OIDCAuthOptions,
+  AutoAuthOptions,
+  ServerAuthMethods
+} from './auth.js';
+
 // Pandoc integration
 export { 
   PandocTransformer, 

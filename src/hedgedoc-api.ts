@@ -11,6 +11,8 @@
  * - Server status
  */
 
+import { normalizeCookie } from './auth.js';
+
 // ===========================================
 // Types
 // ===========================================
@@ -134,7 +136,7 @@ export class HedgeDocAPI {
   
   constructor(options: HedgeDocAPIOptions) {
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
-    this.cookie = options.cookie || null;
+    this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
     this.customHeaders = options.headers || {};
   }
   

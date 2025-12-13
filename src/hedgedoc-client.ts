@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { io, Socket } from 'socket.io-client';
 import { TextOperation, OperationJSON } from './text-operation.js';
 import { OTClient, Transformable } from './ot-client.js';
+import { normalizeCookie } from './auth.js';
 
 // ===========================================
 // Types
@@ -237,7 +238,7 @@ export class HedgeDocClient extends EventEmitter {
 
     this.serverUrl = options.serverUrl.replace(/\/$/, ''); // Remove trailing slash
     this.noteId = options.noteId;
-    this.cookie = options.cookie || null;
+    this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
     this.customHeaders = options.headers || {};
     
     this.socket = null;

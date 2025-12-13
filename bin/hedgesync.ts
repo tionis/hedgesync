@@ -17,7 +17,7 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, AuthError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
@@ -892,6 +892,47 @@ ${c('yellow', 'OPTIONS:')}
 ${c('yellow', 'EXAMPLES:')}
   hedgesync status https://md.example.com
   hedgesync status https://md.example.com --json
+`,
+
+  login: `
+${c('bold', 'hedgesync login')} - Authenticate and get session cookie
+
+${c('yellow', 'USAGE:')}
+  hedgesync login <server-url> --method <method> [options]
+
+${c('yellow', 'METHODS:')}
+  ${c('cyan', 'email')}     Email/password authentication (default)
+  ${c('cyan', 'ldap')}      LDAP username/password authentication
+  ${c('cyan', 'oidc')}      OIDC/OAuth2 authentication (opens browser)
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-m, --method')}     Auth method: email, ldap, or oidc (default: email)
+  ${c('cyan', '-u, --username')}   Username or email address
+  ${c('cyan', '-p, --password')}   Password
+  ${c('cyan', '--port')}           Local port for OIDC callback (default: random)
+  ${c('cyan', '--timeout')}        OIDC auth timeout in seconds (default: 300)
+  ${c('cyan', '--json')}           Output in JSON format
+  ${c('cyan', '-q, --quiet')}      Suppress progress messages
+
+${c('yellow', 'EXAMPLES:')}
+  ${c('dim', '# Email/password authentication:')}
+  hedgesync login https://md.example.com -u user@example.com -p secret
+  
+  ${c('dim', '# LDAP authentication:')}
+  hedgesync login https://md.example.com --method ldap -u myuser -p secret
+  
+  ${c('dim', '# OIDC (opens browser):')}
+  hedgesync login https://md.example.com --method oidc
+  
+  ${c('dim', '# Get cookie in JSON format for scripting:')}
+  hedgesync login https://md.example.com -u user@example.com -p secret --json
+  
+  ${c('dim', '# Use the returned cookie:')}
+  export HEDGEDOC_COOKIE="$(hedgesync login https://md.example.com -u user@example.com -p secret --json | jq -r .cookie)"
+
+${c('yellow', 'NOTES:')}
+  The session cookie can be used with -c/--cookie or HEDGEDOC_COOKIE env var.
+  Cookie values can be provided with or without the 'connect.sid=' prefix.
 `
 };
 
@@ -938,6 +979,7 @@ ${c('yellow', 'HTTP API COMMANDS:')} ${c('dim', '(no realtime connection require
   ${c('green', 'unpin')}       Unpin a note from history
   ${c('green', 'history-delete')} Remove note from history
   ${c('green', 'status')}      Show server status
+  ${c('green', 'login')}       Authenticate and get session cookie
 
 ${c('yellow', 'GLOBAL OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
@@ -2794,6 +2836,155 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
   }
 }
 
+// Command: login (authenticate and get session cookie)
+async function cmdLogin(args: ParsedArgs): Promise<void> {
+  const serverUrl = args.positional[0];
+  const jsonOutput = args.options.json;
+  const method = (args.options.method || args.options.m || 'email') as string;
+  const username = (args.options.username || args.options.u || args.options.user) as string;
+  const password = (args.options.password || args.options.p) as string;
+  const quiet = args.options.quiet || args.options.q;
+  
+  if (!serverUrl) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
+    } else {
+      console.error(c('red', 'Error: Server URL required'));
+      console.error('Usage: hedgesync login <server-url> --method <email|ldap|oidc> [options]');
+    }
+    process.exit(1);
+  }
+  
+  // Parse custom headers
+  const headers = parseHeaders(args);
+  
+  try {
+    let result;
+    
+    switch (method.toLowerCase()) {
+      case 'email': {
+        if (!username || !password) {
+          if (jsonOutput) {
+            console.log(JSON.stringify({ success: false, error: 'Email and password required for email auth' }, null, 2));
+          } else {
+            console.error(c('red', 'Error: Email and password required for email authentication'));
+            console.error('Usage: hedgesync login <server-url> --method email -u <email> -p <password>');
+          }
+          process.exit(1);
+        }
+        
+        if (!quiet && !jsonOutput) {
+          console.error(c('dim', `Authenticating with email ${username}...`));
+        }
+        
+        result = await loginWithEmail({
+          serverUrl,
+          email: username,
+          password,
+          headers
+        });
+        break;
+      }
+      
+      case 'ldap': {
+        if (!username || !password) {
+          if (jsonOutput) {
+            console.log(JSON.stringify({ success: false, error: 'Username and password required for LDAP auth' }, null, 2));
+          } else {
+            console.error(c('red', 'Error: Username and password required for LDAP authentication'));
+            console.error('Usage: hedgesync login <server-url> --method ldap -u <username> -p <password>');
+          }
+          process.exit(1);
+        }
+        
+        if (!quiet && !jsonOutput) {
+          console.error(c('dim', `Authenticating with LDAP as ${username}...`));
+        }
+        
+        result = await loginWithLDAP({
+          serverUrl,
+          username,
+          password,
+          headers
+        });
+        break;
+      }
+      
+      case 'oidc':
+      case 'oauth2':
+      case 'oauth': {
+        if (!quiet && !jsonOutput) {
+          console.error(c('dim', 'Starting OIDC authentication...'));
+          console.error(c('dim', 'A browser window will open for you to complete the login.'));
+        }
+        
+        const callbackPort = args.options.port ? parseInt(args.options.port as string, 10) : undefined;
+        const timeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : undefined;
+        
+        result = await loginWithOIDC({
+          serverUrl,
+          headers,
+          callbackPort,
+          timeout
+        });
+        break;
+      }
+      
+      default:
+        if (jsonOutput) {
+          console.log(JSON.stringify({ success: false, error: `Unknown auth method: ${method}` }, null, 2));
+        } else {
+          console.error(c('red', `Error: Unknown authentication method: ${method}`));
+          console.error('Supported methods: email, ldap, oidc');
+        }
+        process.exit(1);
+    }
+    
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        success: true,
+        action: 'login',
+        method: method.toLowerCase(),
+        sessionId: result.sessionId,
+        cookie: result.cookie,
+        acquiredAt: result.acquiredAt.toISOString()
+      }, null, 2));
+    } else {
+      console.log(c('green', '✓ Authentication successful'));
+      console.log();
+      console.log(c('bold', 'Session Cookie:'));
+      console.log(result.cookie);
+      console.log();
+      console.log(c('dim', 'Usage:'));
+      console.log(c('dim', `  hedgesync get <url> -c "${result.cookie}"`));
+      console.log(c('dim', '  # or'));
+      console.log(c('dim', `  export HEDGEDOC_COOKIE="${result.cookie}"`));
+    }
+    
+  } catch (err) {
+    if (jsonOutput) {
+      const message = err instanceof Error ? err.message : String(err);
+      const statusCode = err instanceof AuthError ? err.statusCode : undefined;
+      console.log(JSON.stringify({ success: false, error: message, statusCode }, null, 2));
+      process.exit(1);
+    }
+    
+    if (err instanceof AuthError) {
+      console.error(c('red', `Authentication error: ${err.message}`));
+      if (err.statusCode === 401) {
+        console.error(c('dim', 'Hint: Check your username/email and password'));
+      } else if (err.statusCode === 404) {
+        console.error(c('dim', 'Hint: This authentication method may not be enabled on the server'));
+      }
+    } else if (err instanceof Error) {
+      console.error(c('red', `Error: ${err.message}`));
+    } else {
+      console.error(c('red', 'Unknown error occurred'));
+    }
+    process.exit(1);
+  }
+}
+
 // Helper function to handle API errors consistently
 function handleAPIError(err: unknown): never {
   if (err instanceof HedgeDocAPIError) {
@@ -2901,6 +3092,9 @@ async function main(): Promise<void> {
         break;
       case 'status':
         await cmdStatus(args);
+        break;
+      case 'login':
+        await cmdLogin(args);
         break;
       
       default:
