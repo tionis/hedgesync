@@ -17,7 +17,7 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, AuthError } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, AuthError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
@@ -901,38 +901,56 @@ ${c('yellow', 'USAGE:')}
   hedgesync login <server-url> --method <method> [options]
 
 ${c('yellow', 'METHODS:')}
-  ${c('cyan', 'email')}     Email/password authentication (default)
-  ${c('cyan', 'ldap')}      LDAP username/password authentication
-  ${c('cyan', 'oidc')}      OIDC/OAuth2 authentication (opens browser)
+  ${c('cyan', 'email')}           Email/password authentication (default)
+  ${c('cyan', 'ldap')}            LDAP username/password authentication
+  ${c('cyan', 'oidc')}            OIDC/OAuth2 authentication (opens browser)
+  ${c('cyan', 'oauth2-password')} OAuth2 password grant (for bot/service accounts)
 
-${c('yellow', 'OPTIONS:')}
-  ${c('cyan', '-m, --method')}     Auth method: email, ldap, or oidc (default: email)
-  ${c('cyan', '-u, --username')}   Username or email address
-  ${c('cyan', '-p, --password')}   Password
-  ${c('cyan', '--port')}           Local port for OIDC callback (default: random)
-  ${c('cyan', '--timeout')}        OIDC auth timeout in seconds (default: 300)
-  ${c('cyan', '--json')}           Output in JSON format
-  ${c('cyan', '-q, --quiet')}      Suppress progress messages
+${c('yellow', 'COMMON OPTIONS:')}
+  ${c('cyan', '-m, --method')}       Auth method (default: email)
+  ${c('cyan', '-u, --username')}     Username or email address
+  ${c('cyan', '-p, --password')}     Password
+  ${c('cyan', '--timeout')}          Request timeout in seconds (default: 30, oidc: 300)
+  ${c('cyan', '--json')}             Output in JSON format
+  ${c('cyan', '-q, --quiet')}        Suppress progress messages
+
+${c('yellow', 'OIDC OPTIONS:')}
+  ${c('cyan', '--port')}             Local port for OIDC callback (default: random)
+
+${c('yellow', 'OAUTH2-PASSWORD OPTIONS:')} ${c('dim', '(for bot/service account automation)')}
+  ${c('cyan', '--token-url')}        OAuth2 token endpoint URL (required)
+  ${c('cyan', '--client-id')}        OAuth2 client ID (required)
+  ${c('cyan', '--client-secret')}    OAuth2 client secret (optional)
+  ${c('cyan', '--scopes')}           Comma-separated scopes (default: openid,profile,email)
 
 ${c('yellow', 'EXAMPLES:')}
   ${c('dim', '# Email/password authentication:')}
   hedgesync login https://md.example.com -u user@example.com -p secret
   
-  ${c('dim', '# LDAP authentication:')}
-  hedgesync login https://md.example.com --method ldap -u myuser -p secret
+  ${c('dim', '# LDAP authentication (with timeout):')}
+  hedgesync login https://md.example.com --method ldap -u myuser -p secret --timeout 10
   
   ${c('dim', '# OIDC (opens browser):')}
   hedgesync login https://md.example.com --method oidc
+  
+  ${c('dim', '# OAuth2 password grant with Authentik service account:')}
+  hedgesync login https://md.example.com --method oauth2-password \\
+    --token-url https://authentik.example.com/application/o/token/ \\
+    --client-id hedgedoc --client-secret mysecret \\
+    -u my-service-account -p my-service-token
   
   ${c('dim', '# Get cookie in JSON format for scripting:')}
   hedgesync login https://md.example.com -u user@example.com -p secret --json
   
   ${c('dim', '# Use the returned cookie:')}
-  export HEDGEDOC_COOKIE="$(hedgesync login https://md.example.com -u user@example.com -p secret --json | jq -r .cookie)"
+  export HEDGEDOC_COOKIE="$(hedgesync login ... --json | jq -r .cookie)"
 
 ${c('yellow', 'NOTES:')}
   The session cookie can be used with -c/--cookie or HEDGEDOC_COOKIE env var.
   Cookie values can be provided with or without the 'connect.sid=' prefix.
+  
+  For oauth2-password with Authentik, create a service account and use its token.
+  The token URL is typically: https://<authentik>/application/o/token/
 `
 };
 
@@ -2844,13 +2862,14 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
   const username = (args.options.username || args.options.u || args.options.user) as string;
   const password = (args.options.password || args.options.p) as string;
   const quiet = args.options.quiet || args.options.q;
+  const requestTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 30000;
   
   if (!serverUrl) {
     if (jsonOutput) {
       console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
     } else {
       console.error(c('red', 'Error: Server URL required'));
-      console.error('Usage: hedgesync login <server-url> --method <email|ldap|oidc> [options]');
+      console.error('Usage: hedgesync login <server-url> --method <email|ldap|oidc|oauth2-password> [options]');
     }
     process.exit(1);
   }
@@ -2881,7 +2900,8 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
           serverUrl,
           email: username,
           password,
-          headers
+          headers,
+          timeout: requestTimeout
         });
         break;
       }
@@ -2905,27 +2925,71 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
           serverUrl,
           username,
           password,
-          headers
+          headers,
+          timeout: requestTimeout
         });
         break;
       }
       
       case 'oidc':
-      case 'oauth2':
-      case 'oauth': {
+      case 'oauth':
+      case 'browser': {
         if (!quiet && !jsonOutput) {
           console.error(c('dim', 'Starting OIDC authentication...'));
           console.error(c('dim', 'A browser window will open for you to complete the login.'));
         }
         
         const callbackPort = args.options.port ? parseInt(args.options.port as string, 10) : undefined;
-        const timeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : undefined;
+        // OIDC has a longer default timeout (5 min) for user interaction
+        const oidcTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 300000;
         
         result = await loginWithOIDC({
           serverUrl,
           headers,
           callbackPort,
-          timeout
+          timeout: oidcTimeout
+        });
+        break;
+      }
+      
+      case 'oauth2-password':
+      case 'oauth2-pw':
+      case 'service-account':
+      case 'bot': {
+        // OAuth2 password grant for bot/service account automation
+        const tokenUrl = args.options['token-url'] as string;
+        const clientId = args.options['client-id'] as string;
+        const clientSecret = args.options['client-secret'] as string | undefined;
+        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : undefined;
+        
+        if (!tokenUrl || !clientId || !username || !password) {
+          if (jsonOutput) {
+            console.log(JSON.stringify({ 
+              success: false, 
+              error: 'OAuth2 password grant requires: --token-url, --client-id, -u/--username, -p/--password' 
+            }, null, 2));
+          } else {
+            console.error(c('red', 'Error: OAuth2 password grant requires token URL, client ID, username, and password'));
+            console.error('Usage: hedgesync login <server-url> --method oauth2-password \\');
+            console.error('         --token-url <url> --client-id <id> -u <user> -p <pass> [--client-secret <secret>]');
+          }
+          process.exit(1);
+        }
+        
+        if (!quiet && !jsonOutput) {
+          console.error(c('dim', `Authenticating via OAuth2 password grant as ${username}...`));
+        }
+        
+        result = await loginWithOAuth2Password({
+          serverUrl,
+          tokenUrl,
+          clientId,
+          clientSecret,
+          username,
+          password,
+          scopes,
+          headers,
+          timeout: requestTimeout
         });
         break;
       }
@@ -2935,7 +2999,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
           console.log(JSON.stringify({ success: false, error: `Unknown auth method: ${method}` }, null, 2));
         } else {
           console.error(c('red', `Error: Unknown authentication method: ${method}`));
-          console.error('Supported methods: email, ldap, oidc');
+          console.error('Supported methods: email, ldap, oidc, oauth2-password');
         }
         process.exit(1);
     }

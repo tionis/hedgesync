@@ -54,6 +54,7 @@ export {
   loginWithEmail, 
   loginWithLDAP, 
   loginWithOIDC,
+  loginWithOAuth2Password,
   detectAuthMethods,
   AuthError 
 } from './auth.js';
@@ -62,6 +63,7 @@ export type {
   EmailAuthOptions,
   LDAPAuthOptions,
   OIDCAuthOptions,
+  OAuth2PasswordOptions,
   AutoAuthOptions,
   ServerAuthMethods
 } from './auth.js';

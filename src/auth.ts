@@ -34,6 +34,8 @@ export interface EmailAuthOptions {
   password: string;
   /** Custom headers for reverse proxy auth */
   headers?: Record<string, string>;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
 }
 
 export interface LDAPAuthOptions {
@@ -45,6 +47,8 @@ export interface LDAPAuthOptions {
   password: string;
   /** Custom headers for reverse proxy auth */
   headers?: Record<string, string>;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
 }
 
 export interface OIDCAuthOptions {
@@ -58,6 +62,31 @@ export interface OIDCAuthOptions {
   headers?: Record<string, string>;
   /** Callback when browser should be opened */
   onOpenBrowser?: (url: string) => void | Promise<void>;
+}
+
+/**
+ * Options for OAuth2 Resource Owner Password Credentials (ROPC) flow.
+ * This is useful for bot/service account automation with OIDC providers like Authentik.
+ */
+export interface OAuth2PasswordOptions {
+  /** HedgeDoc server URL */
+  serverUrl: string;
+  /** OAuth2 token endpoint URL (e.g., https://authentik.example.com/application/o/token/) */
+  tokenUrl: string;
+  /** OAuth2 client ID */
+  clientId: string;
+  /** OAuth2 client secret (optional for public clients) */
+  clientSecret?: string;
+  /** Username for authentication */
+  username: string;
+  /** Password or service account token */
+  password: string;
+  /** OAuth2 scopes to request (default: openid profile email) */
+  scopes?: string[];
+  /** Custom headers for reverse proxy auth */
+  headers?: Record<string, string>;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
 }
 
 export class AuthError extends Error {
@@ -153,69 +182,84 @@ function extractSessionCookie(setCookieHeaders: string | string[] | undefined): 
  * This works with HedgeDoc's built-in email authentication.
  */
 export async function loginWithEmail(options: EmailAuthOptions): Promise<AuthResult> {
-  const { serverUrl, email, password, headers = {} } = options;
+  const { serverUrl, email, password, headers = {}, timeout = 30000 } = options;
   const baseUrl = serverUrl.replace(/\/$/, '');
   
-  // First, get the login page to obtain any CSRF token
-  const configResponse = await fetch(`${baseUrl}/config`, {
-    headers: {
-      'Accept': 'application/json',
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    // First, get the login page to obtain any CSRF token
+    const configResponse = await fetch(`${baseUrl}/config`, {
+      headers: {
+        'Accept': 'application/json',
+        ...headers,
+      },
+      signal: controller.signal,
+    });
+    
+    let csrfToken: string | undefined;
+    if (configResponse.ok) {
+      try {
+        const config = await configResponse.json() as Record<string, unknown>;
+        csrfToken = config.CSRF as string | undefined;
+      } catch {
+        // No CSRF token available
+      }
+    }
+    
+    // Perform the login
+    const formData = new URLSearchParams();
+    formData.append('email', email);
+    formData.append('password', password);
+    
+    const loginHeaders: Record<string, string> = {
+      'Content-Type': 'application/x-www-form-urlencoded',
       ...headers,
-    },
-  });
-  
-  let csrfToken: string | undefined;
-  if (configResponse.ok) {
-    try {
-      const config = await configResponse.json();
-      csrfToken = config.CSRF;
-    } catch {
-      // No CSRF token available
+    };
+    
+    if (csrfToken) {
+      loginHeaders['X-XSRF-TOKEN'] = csrfToken;
     }
-  }
-  
-  // Perform the login
-  const formData = new URLSearchParams();
-  formData.append('email', email);
-  formData.append('password', password);
-  
-  const loginHeaders: Record<string, string> = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    ...headers,
-  };
-  
-  if (csrfToken) {
-    loginHeaders['X-XSRF-TOKEN'] = csrfToken;
-  }
-  
-  const loginResponse = await fetch(`${baseUrl}/auth/email/login`, {
-    method: 'POST',
-    headers: loginHeaders,
-    body: formData.toString(),
-    redirect: 'manual',
-  });
-  
-  // Check for session cookie in response
-  const setCookie = loginResponse.headers.get('set-cookie') || 
-                   loginResponse.headers.getSetCookie?.();
-  const sessionId = extractSessionCookie(setCookie);
-  
-  if (!sessionId) {
-    // Check if we got an error response
-    if (loginResponse.status === 401 || loginResponse.status === 403) {
-      throw new AuthError('Invalid email or password', loginResponse.status);
+    
+    const loginResponse = await fetch(`${baseUrl}/auth/email/login`, {
+      method: 'POST',
+      headers: loginHeaders,
+      body: formData.toString(),
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    
+    // Check for session cookie in response
+    const setCookie = loginResponse.headers.get('set-cookie') || 
+                     loginResponse.headers.getSetCookie?.();
+    const sessionId = extractSessionCookie(setCookie);
+    
+    if (!sessionId) {
+      // Check if we got an error response
+      if (loginResponse.status === 401 || loginResponse.status === 403) {
+        throw new AuthError('Invalid email or password', loginResponse.status);
+      }
+      if (loginResponse.status >= 400) {
+        throw new AuthError(`Login failed with status ${loginResponse.status}`, loginResponse.status);
+      }
+      throw new AuthError('No session cookie received. Authentication may have failed.');
     }
-    if (loginResponse.status >= 400) {
-      throw new AuthError(`Login failed with status ${loginResponse.status}`, loginResponse.status);
+    
+    return {
+      sessionId,
+      cookie: `connect.sid=${sessionId}`,
+      acquiredAt: new Date(),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AuthError(`Login request timed out after ${timeout}ms`);
     }
-    throw new AuthError('No session cookie received. Authentication may have failed.');
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  
-  return {
-    sessionId,
-    cookie: `connect.sid=${sessionId}`,
-    acquiredAt: new Date(),
-  };
 }
 
 // ===========================================
@@ -226,68 +270,83 @@ export async function loginWithEmail(options: EmailAuthOptions): Promise<AuthRes
  * Authenticate with HedgeDoc using LDAP credentials.
  */
 export async function loginWithLDAP(options: LDAPAuthOptions): Promise<AuthResult> {
-  const { serverUrl, username, password, headers = {} } = options;
+  const { serverUrl, username, password, headers = {}, timeout = 30000 } = options;
   const baseUrl = serverUrl.replace(/\/$/, '');
   
-  // First, get the config to obtain any CSRF token
-  const configResponse = await fetch(`${baseUrl}/config`, {
-    headers: {
-      'Accept': 'application/json',
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    // First, get the config to obtain any CSRF token
+    const configResponse = await fetch(`${baseUrl}/config`, {
+      headers: {
+        'Accept': 'application/json',
+        ...headers,
+      },
+      signal: controller.signal,
+    });
+    
+    let csrfToken: string | undefined;
+    if (configResponse.ok) {
+      try {
+        const config = await configResponse.json() as Record<string, unknown>;
+        csrfToken = config.CSRF as string | undefined;
+      } catch {
+        // No CSRF token available
+      }
+    }
+    
+    // Perform the LDAP login
+    const formData = new URLSearchParams();
+    formData.append('username', username);
+    formData.append('password', password);
+    
+    const loginHeaders: Record<string, string> = {
+      'Content-Type': 'application/x-www-form-urlencoded',
       ...headers,
-    },
-  });
-  
-  let csrfToken: string | undefined;
-  if (configResponse.ok) {
-    try {
-      const config = await configResponse.json();
-      csrfToken = config.CSRF;
-    } catch {
-      // No CSRF token available
+    };
+    
+    if (csrfToken) {
+      loginHeaders['X-XSRF-TOKEN'] = csrfToken;
     }
-  }
-  
-  // Perform the LDAP login
-  const formData = new URLSearchParams();
-  formData.append('username', username);
-  formData.append('password', password);
-  
-  const loginHeaders: Record<string, string> = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    ...headers,
-  };
-  
-  if (csrfToken) {
-    loginHeaders['X-XSRF-TOKEN'] = csrfToken;
-  }
-  
-  const loginResponse = await fetch(`${baseUrl}/auth/ldap`, {
-    method: 'POST',
-    headers: loginHeaders,
-    body: formData.toString(),
-    redirect: 'manual',
-  });
-  
-  // Check for session cookie in response
-  const setCookie = loginResponse.headers.get('set-cookie') || 
-                   loginResponse.headers.getSetCookie?.();
-  const sessionId = extractSessionCookie(setCookie);
-  
-  if (!sessionId) {
-    if (loginResponse.status === 401 || loginResponse.status === 403) {
-      throw new AuthError('Invalid LDAP credentials', loginResponse.status);
+    
+    const loginResponse = await fetch(`${baseUrl}/auth/ldap`, {
+      method: 'POST',
+      headers: loginHeaders,
+      body: formData.toString(),
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    
+    // Check for session cookie in response
+    const setCookie = loginResponse.headers.get('set-cookie') || 
+                     loginResponse.headers.getSetCookie?.();
+    const sessionId = extractSessionCookie(setCookie);
+    
+    if (!sessionId) {
+      if (loginResponse.status === 401 || loginResponse.status === 403) {
+        throw new AuthError('Invalid LDAP credentials', loginResponse.status);
+      }
+      if (loginResponse.status >= 400) {
+        throw new AuthError(`LDAP login failed with status ${loginResponse.status}`, loginResponse.status);
+      }
+      throw new AuthError('No session cookie received. LDAP authentication may have failed.');
     }
-    if (loginResponse.status >= 400) {
-      throw new AuthError(`LDAP login failed with status ${loginResponse.status}`, loginResponse.status);
+    
+    return {
+      sessionId,
+      cookie: `connect.sid=${sessionId}`,
+      acquiredAt: new Date(),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AuthError(`LDAP login request timed out after ${timeout}ms`);
     }
-    throw new AuthError('No session cookie received. LDAP authentication may have failed.');
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  
-  return {
-    sessionId,
-    cookie: `connect.sid=${sessionId}`,
-    acquiredAt: new Date(),
-  };
 }
 
 // ===========================================
@@ -433,6 +492,174 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
 }
 
 // ===========================================
+// OAuth2 Password Grant (for bot/service accounts)
+// ===========================================
+
+/**
+ * Authenticate using OAuth2 Resource Owner Password Credentials (ROPC) flow.
+ * 
+ * This is designed for bot/service account automation with OIDC providers like Authentik.
+ * 
+ * The flow:
+ * 1. Get an OAuth2 access token from the IdP using username/password + client credentials
+ * 2. Use that token to authenticate with HedgeDoc's OAuth2 endpoint
+ * 3. Return the HedgeDoc session cookie
+ * 
+ * Note: This requires the OIDC provider to support the password grant type.
+ * For Authentik, you can create a service account and use its token.
+ * 
+ * @example
+ * // With Authentik service account
+ * const result = await loginWithOAuth2Password({
+ *   serverUrl: 'https://hedgedoc.example.com',
+ *   tokenUrl: 'https://authentik.example.com/application/o/token/',
+ *   clientId: 'hedgedoc',
+ *   clientSecret: 'your-client-secret',
+ *   username: 'my-service-account',
+ *   password: 'my-service-account-token',
+ *   scopes: ['openid', 'profile', 'email']
+ * });
+ */
+export async function loginWithOAuth2Password(options: OAuth2PasswordOptions): Promise<AuthResult> {
+  const { 
+    serverUrl, 
+    tokenUrl, 
+    clientId, 
+    clientSecret,
+    username, 
+    password, 
+    scopes = ['openid', 'profile', 'email'],
+    headers = {},
+    timeout = 30000 
+  } = options;
+  
+  const baseUrl = serverUrl.replace(/\/$/, '');
+  
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    // Step 1: Get OAuth2 access token from the IdP
+    const tokenParams = new URLSearchParams();
+    tokenParams.append('grant_type', 'password');
+    tokenParams.append('client_id', clientId);
+    if (clientSecret) {
+      tokenParams.append('client_secret', clientSecret);
+    }
+    tokenParams.append('username', username);
+    tokenParams.append('password', password);
+    tokenParams.append('scope', scopes.join(' '));
+    
+    const tokenResponse = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        ...headers,
+      },
+      body: tokenParams.toString(),
+      signal: controller.signal,
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorBody = await tokenResponse.text();
+      let errorMessage = `OAuth2 token request failed with status ${tokenResponse.status}`;
+      try {
+        const errorJson = JSON.parse(errorBody) as Record<string, unknown>;
+        if (errorJson.error_description) {
+          errorMessage = `OAuth2 error: ${errorJson.error_description}`;
+        } else if (errorJson.error) {
+          errorMessage = `OAuth2 error: ${errorJson.error}`;
+        }
+      } catch {
+        // Use default error message
+      }
+      throw new AuthError(errorMessage, tokenResponse.status);
+    }
+    
+    const tokenData = await tokenResponse.json() as Record<string, unknown>;
+    const accessToken = tokenData.access_token as string;
+    
+    if (!accessToken) {
+      throw new AuthError('No access token received from OAuth2 provider');
+    }
+    
+    // Step 2: Use the access token to authenticate with HedgeDoc
+    // HedgeDoc's OAuth2 flow expects us to start from /auth/oauth2, but for API access
+    // we need to exchange the token. Unfortunately, HedgeDoc 1.x doesn't have a direct
+    // token exchange endpoint, so we need to use a workaround.
+    
+    // Try to call HedgeDoc's /me endpoint with the token to see if it accepts it
+    // This works if HedgeDoc is configured to accept Bearer tokens
+    const meResponse = await fetch(`${baseUrl}/me`, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json',
+        ...headers,
+      },
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    
+    // Check if we got a session cookie from this request
+    let setCookie = meResponse.headers.get('set-cookie') || 
+                   meResponse.headers.getSetCookie?.();
+    let sessionId = extractSessionCookie(setCookie);
+    
+    if (sessionId) {
+      return {
+        sessionId,
+        cookie: `connect.sid=${sessionId}`,
+        acquiredAt: new Date(),
+      };
+    }
+    
+    // If that didn't work, try the callback URL approach
+    // Some HedgeDoc setups with reverse proxy auth might accept tokens differently
+    const callbackResponse = await fetch(`${baseUrl}/auth/oauth2/callback`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'text/html,application/json',
+        ...headers,
+      },
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    
+    setCookie = callbackResponse.headers.get('set-cookie') || 
+               callbackResponse.headers.getSetCookie?.();
+    sessionId = extractSessionCookie(setCookie);
+    
+    if (sessionId) {
+      return {
+        sessionId,
+        cookie: `connect.sid=${sessionId}`,
+        acquiredAt: new Date(),
+      };
+    }
+    
+    // As a fallback, return the access token itself
+    // This can be used with custom header authentication
+    // The user can use -H "Authorization: Bearer <token>" instead
+    throw new AuthError(
+      'OAuth2 authentication successful but HedgeDoc did not return a session cookie. ' +
+      'You may need to use the access token directly with -H "Authorization: Bearer <token>" ' +
+      'if your reverse proxy supports it.\n\nAccess Token: ' + accessToken
+    );
+    
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AuthError(`OAuth2 login request timed out after ${timeout}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ===========================================
 // Auto-detect Authentication Method
 // ===========================================
 
@@ -472,7 +699,7 @@ export async function detectAuthMethods(options: AutoAuthOptions): Promise<Serve
       throw new AuthError(`Failed to get server config: ${response.status}`);
     }
     
-    const config = await response.json();
+    const config = await response.json() as Record<string, unknown>;
     
     return {
       email: config.email === true,
