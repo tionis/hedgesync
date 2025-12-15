@@ -67,6 +67,10 @@ export interface OIDCAuthOptions {
 /**
  * Options for OAuth2 Resource Owner Password Credentials (ROPC) flow.
  * This is useful for bot/service account automation with OIDC providers like Authentik.
+ * 
+ * @deprecated ROPC is removed in OAuth 2.1. Consider using:
+ * - Client Credentials flow for pure M2M (no user context)
+ * - Device Authorization Grant for CLI tools that need user authorization
  */
 export interface OAuth2PasswordOptions {
   /** HedgeDoc server URL */
@@ -87,6 +91,85 @@ export interface OAuth2PasswordOptions {
   headers?: Record<string, string>;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
+}
+
+/**
+ * Options for OAuth2 Client Credentials flow (OAuth 2.1 compliant).
+ * 
+ * This is the recommended flow for machine-to-machine (M2M) authentication
+ * where no user context is needed. The client authenticates with its own
+ * credentials (client_id + client_secret) to get an access token.
+ * 
+ * Use cases:
+ * - Backend services communicating with APIs
+ * - Automated scripts/bots
+ * - CI/CD pipelines
+ */
+export interface OAuth2ClientCredentialsOptions {
+  /** HedgeDoc server URL */
+  serverUrl: string;
+  /** OAuth2 token endpoint URL */
+  tokenUrl: string;
+  /** OAuth2 client ID */
+  clientId: string;
+  /** OAuth2 client secret */
+  clientSecret: string;
+  /** OAuth2 scopes to request */
+  scopes?: string[];
+  /** Custom headers for reverse proxy auth */
+  headers?: Record<string, string>;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
+}
+
+/**
+ * Options for OAuth2 Device Authorization Grant (RFC 8628).
+ * 
+ * This is the recommended flow for CLI tools and headless devices that
+ * need user authorization but can't easily open a browser or handle redirects.
+ * 
+ * Flow:
+ * 1. Client requests a device code from the authorization server
+ * 2. User visits a URL and enters the code on a separate device
+ * 3. Client polls for the token until user completes authorization
+ */
+export interface OAuth2DeviceCodeOptions {
+  /** HedgeDoc server URL */
+  serverUrl: string;
+  /** OAuth2 device authorization endpoint URL */
+  deviceAuthUrl: string;
+  /** OAuth2 token endpoint URL */
+  tokenUrl: string;
+  /** OAuth2 client ID */
+  clientId: string;
+  /** OAuth2 client secret (optional, some providers require it) */
+  clientSecret?: string;
+  /** OAuth2 scopes to request */
+  scopes?: string[];
+  /** Custom headers for reverse proxy auth */
+  headers?: Record<string, string>;
+  /** Timeout in milliseconds for user to complete auth (default: 300000 = 5 minutes) */
+  timeout?: number;
+  /** Callback when user code is ready to be displayed */
+  onUserCode?: (info: DeviceCodeInfo) => void | Promise<void>;
+}
+
+/**
+ * Information returned from device authorization request
+ */
+export interface DeviceCodeInfo {
+  /** The device verification code */
+  deviceCode: string;
+  /** The end-user verification code to display */
+  userCode: string;
+  /** The verification URI the user should visit */
+  verificationUri: string;
+  /** Optional URI with user code pre-filled */
+  verificationUriComplete?: string;
+  /** Lifetime in seconds of the device_code and user_code */
+  expiresIn: number;
+  /** Minimum interval in seconds between polling requests */
+  interval: number;
 }
 
 export class AuthError extends Error {
@@ -657,6 +740,362 @@ export async function loginWithOAuth2Password(options: OAuth2PasswordOptions): P
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// ===========================================
+// OAuth2 Client Credentials Flow (OAuth 2.1)
+// ===========================================
+
+/**
+ * Authenticate using OAuth2 Client Credentials flow (OAuth 2.1 compliant).
+ * 
+ * This is for pure machine-to-machine (M2M) authentication where no user
+ * context is needed. The client authenticates with its own credentials.
+ * 
+ * Note: This gets an access token from the IdP, then attempts to exchange
+ * it for a HedgeDoc session. If HedgeDoc doesn't accept the token directly,
+ * you may need to use the token with -H "Authorization: Bearer <token>".
+ * 
+ * @example
+ * const result = await loginWithClientCredentials({
+ *   serverUrl: 'https://hedgedoc.example.com',
+ *   tokenUrl: 'https://auth.example.com/oauth/token',
+ *   clientId: 'my-service',
+ *   clientSecret: 'my-secret',
+ *   scopes: ['openid', 'profile']
+ * });
+ */
+export async function loginWithClientCredentials(options: OAuth2ClientCredentialsOptions): Promise<AuthResult> {
+  const { 
+    serverUrl, 
+    tokenUrl, 
+    clientId, 
+    clientSecret,
+    scopes = [],
+    headers = {},
+    timeout = 30000 
+  } = options;
+  
+  const baseUrl = serverUrl.replace(/\/$/, '');
+  
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    // Request access token using client credentials
+    const tokenParams = new URLSearchParams();
+    tokenParams.append('grant_type', 'client_credentials');
+    tokenParams.append('client_id', clientId);
+    tokenParams.append('client_secret', clientSecret);
+    if (scopes.length > 0) {
+      tokenParams.append('scope', scopes.join(' '));
+    }
+    
+    const tokenResponse = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        ...headers,
+      },
+      body: tokenParams.toString(),
+      signal: controller.signal,
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorBody = await tokenResponse.text();
+      let errorMessage = `Client credentials request failed with status ${tokenResponse.status}`;
+      try {
+        const errorJson = JSON.parse(errorBody) as Record<string, unknown>;
+        if (errorJson.error_description) {
+          errorMessage = `OAuth2 error: ${errorJson.error_description}`;
+        } else if (errorJson.error) {
+          errorMessage = `OAuth2 error: ${errorJson.error}`;
+        }
+      } catch {
+        // Use default error message
+      }
+      throw new AuthError(errorMessage, tokenResponse.status);
+    }
+    
+    const tokenData = await tokenResponse.json() as Record<string, unknown>;
+    const accessToken = tokenData.access_token as string;
+    
+    if (!accessToken) {
+      throw new AuthError('No access token received from OAuth2 provider');
+    }
+    
+    // Try to use the access token to get a HedgeDoc session
+    const sessionResult = await exchangeTokenForSession(baseUrl, accessToken, headers, controller.signal);
+    
+    if (sessionResult) {
+      return sessionResult;
+    }
+    
+    // Return the access token info if we couldn't get a session
+    throw new AuthError(
+      'Client credentials authentication successful but HedgeDoc did not return a session cookie. ' +
+      'You may need to use the access token directly with -H "Authorization: Bearer <token>" ' +
+      'if your reverse proxy supports it.\n\nAccess Token: ' + accessToken
+    );
+    
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AuthError(`Client credentials request timed out after ${timeout}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ===========================================
+// OAuth2 Device Authorization Grant (RFC 8628)
+// ===========================================
+
+/**
+ * Authenticate using OAuth2 Device Authorization Grant (RFC 8628).
+ * 
+ * This is ideal for CLI tools where the user can authorize on a separate
+ * device (like their phone or another browser).
+ * 
+ * Flow:
+ * 1. Request device code from authorization server
+ * 2. Display user code and verification URL to user
+ * 3. Poll for token until user completes authorization
+ * 
+ * @example
+ * const result = await loginWithDeviceCode({
+ *   serverUrl: 'https://hedgedoc.example.com',
+ *   deviceAuthUrl: 'https://auth.example.com/oauth/device/code',
+ *   tokenUrl: 'https://auth.example.com/oauth/token',
+ *   clientId: 'my-cli-app',
+ *   scopes: ['openid', 'profile'],
+ *   onUserCode: (info) => {
+ *     console.log(`Visit ${info.verificationUri} and enter code: ${info.userCode}`);
+ *   }
+ * });
+ */
+export async function loginWithDeviceCode(options: OAuth2DeviceCodeOptions): Promise<AuthResult> {
+  const { 
+    serverUrl, 
+    deviceAuthUrl,
+    tokenUrl, 
+    clientId, 
+    clientSecret,
+    scopes = [],
+    headers = {},
+    timeout = 300000, // 5 minutes default
+    onUserCode
+  } = options;
+  
+  const baseUrl = serverUrl.replace(/\/$/, '');
+  
+  // Step 1: Request device code
+  const deviceParams = new URLSearchParams();
+  deviceParams.append('client_id', clientId);
+  if (clientSecret) {
+    deviceParams.append('client_secret', clientSecret);
+  }
+  if (scopes.length > 0) {
+    deviceParams.append('scope', scopes.join(' '));
+  }
+  
+  const deviceResponse = await fetch(deviceAuthUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'application/json',
+      ...headers,
+    },
+    body: deviceParams.toString(),
+  });
+  
+  if (!deviceResponse.ok) {
+    const errorBody = await deviceResponse.text();
+    let errorMessage = `Device authorization request failed with status ${deviceResponse.status}`;
+    try {
+      const errorJson = JSON.parse(errorBody) as Record<string, unknown>;
+      if (errorJson.error_description) {
+        errorMessage = `OAuth2 error: ${errorJson.error_description}`;
+      } else if (errorJson.error) {
+        errorMessage = `OAuth2 error: ${errorJson.error}`;
+      }
+    } catch {
+      // Use default error message
+    }
+    throw new AuthError(errorMessage, deviceResponse.status);
+  }
+  
+  const deviceData = await deviceResponse.json() as Record<string, unknown>;
+  
+  const deviceCodeInfo: DeviceCodeInfo = {
+    deviceCode: deviceData.device_code as string,
+    userCode: deviceData.user_code as string,
+    verificationUri: deviceData.verification_uri as string,
+    verificationUriComplete: deviceData.verification_uri_complete as string | undefined,
+    expiresIn: (deviceData.expires_in as number) || 600,
+    interval: (deviceData.interval as number) || 5,
+  };
+  
+  if (!deviceCodeInfo.deviceCode || !deviceCodeInfo.userCode || !deviceCodeInfo.verificationUri) {
+    throw new AuthError('Invalid device authorization response from server');
+  }
+  
+  // Step 2: Display user code to user
+  if (onUserCode) {
+    await onUserCode(deviceCodeInfo);
+  } else {
+    // Default display
+    console.log('\n' + '='.repeat(50));
+    console.log('Device Authorization Required');
+    console.log('='.repeat(50));
+    console.log(`\n1. Visit: ${deviceCodeInfo.verificationUriComplete || deviceCodeInfo.verificationUri}`);
+    console.log(`2. Enter code: ${deviceCodeInfo.userCode}`);
+    console.log(`\nWaiting for authorization (expires in ${deviceCodeInfo.expiresIn} seconds)...\n`);
+  }
+  
+  // Step 3: Poll for token
+  const startTime = Date.now();
+  const pollInterval = deviceCodeInfo.interval * 1000; // Convert to ms
+  
+  while (Date.now() - startTime < timeout) {
+    // Wait for the specified interval
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    
+    // Check if we've exceeded the device code expiry
+    if (Date.now() - startTime > deviceCodeInfo.expiresIn * 1000) {
+      throw new AuthError('Device code expired. Please try again.');
+    }
+    
+    // Poll for token
+    const tokenParams = new URLSearchParams();
+    tokenParams.append('grant_type', 'urn:ietf:params:oauth:grant-type:device_code');
+    tokenParams.append('device_code', deviceCodeInfo.deviceCode);
+    tokenParams.append('client_id', clientId);
+    if (clientSecret) {
+      tokenParams.append('client_secret', clientSecret);
+    }
+    
+    const tokenResponse = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        ...headers,
+      },
+      body: tokenParams.toString(),
+    });
+    
+    const tokenData = await tokenResponse.json() as Record<string, unknown>;
+    
+    // Check for pending/slow_down errors (user hasn't authorized yet)
+    if (tokenData.error === 'authorization_pending') {
+      continue; // Keep polling
+    }
+    
+    if (tokenData.error === 'slow_down') {
+      // Increase poll interval and continue
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      continue;
+    }
+    
+    if (tokenData.error === 'expired_token') {
+      throw new AuthError('Device code expired. Please try again.');
+    }
+    
+    if (tokenData.error === 'access_denied') {
+      throw new AuthError('Authorization was denied by the user.');
+    }
+    
+    if (tokenData.error) {
+      throw new AuthError(`OAuth2 error: ${tokenData.error_description || tokenData.error}`);
+    }
+    
+    // Success! We have an access token
+    const accessToken = tokenData.access_token as string;
+    
+    if (!accessToken) {
+      throw new AuthError('No access token received from OAuth2 provider');
+    }
+    
+    // Try to exchange the token for a HedgeDoc session
+    const sessionResult = await exchangeTokenForSession(baseUrl, accessToken, headers);
+    
+    if (sessionResult) {
+      return sessionResult;
+    }
+    
+    // Return the access token info if we couldn't get a session
+    throw new AuthError(
+      'Device authorization successful but HedgeDoc did not return a session cookie. ' +
+      'You may need to use the access token directly with -H "Authorization: Bearer <token>" ' +
+      'if your reverse proxy supports it.\n\nAccess Token: ' + accessToken
+    );
+  }
+  
+  throw new AuthError(`Device authorization timed out after ${timeout / 1000} seconds`);
+}
+
+/**
+ * Helper function to exchange an OAuth2 access token for a HedgeDoc session cookie.
+ */
+async function exchangeTokenForSession(
+  baseUrl: string, 
+  accessToken: string, 
+  headers: Record<string, string>,
+  signal?: AbortSignal
+): Promise<AuthResult | null> {
+  // Try to call HedgeDoc's /me endpoint with the token
+  const meResponse = await fetch(`${baseUrl}/me`, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept': 'application/json',
+      ...headers,
+    },
+    redirect: 'manual',
+    signal,
+  });
+  
+  // Check if we got a session cookie
+  let setCookie = meResponse.headers.get('set-cookie') || 
+                 meResponse.headers.getSetCookie?.();
+  let sessionId = extractSessionCookie(setCookie);
+  
+  if (sessionId) {
+    return {
+      sessionId,
+      cookie: `connect.sid=${sessionId}`,
+      acquiredAt: new Date(),
+    };
+  }
+  
+  // Try the OAuth2 callback URL approach
+  const callbackResponse = await fetch(`${baseUrl}/auth/oauth2/callback`, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept': 'text/html,application/json',
+      ...headers,
+    },
+    redirect: 'manual',
+    signal,
+  });
+  
+  setCookie = callbackResponse.headers.get('set-cookie') || 
+             callbackResponse.headers.getSetCookie?.();
+  sessionId = extractSessionCookie(setCookie);
+  
+  if (sessionId) {
+    return {
+      sessionId,
+      cookie: `connect.sid=${sessionId}`,
+      acquiredAt: new Date(),
+    };
+  }
+  
+  return null;
 }
 
 // ===========================================

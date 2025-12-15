@@ -55,6 +55,8 @@ export {
   loginWithLDAP, 
   loginWithOIDC,
   loginWithOAuth2Password,
+  loginWithClientCredentials,
+  loginWithDeviceCode,
   detectAuthMethods,
   AuthError 
 } from './auth.js';
@@ -64,6 +66,9 @@ export type {
   LDAPAuthOptions,
   OIDCAuthOptions,
   OAuth2PasswordOptions,
+  OAuth2ClientCredentialsOptions,
+  OAuth2DeviceCodeOptions,
+  DeviceCodeInfo,
   AutoAuthOptions,
   ServerAuthMethods
 } from './auth.js';
