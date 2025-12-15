@@ -122,6 +122,18 @@ hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 # Execute shell commands via macros
 hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l'
 hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' --watch
+
+# Authentication / Login
+hedgesync login email https://md.example.com -u user@example.com -p password
+hedgesync login ldap https://md.example.com -u username -p password
+hedgesync login oidc https://md.example.com                    # Opens browser
+hedgesync login client-credentials https://md.example.com \    # M2M auth
+  --client-id my-client --client-secret secret \
+  --token-url https://sso.example.com/oauth/token
+hedgesync login device-code https://md.example.com \           # Device flow
+  --client-id my-client \
+  --device-url https://sso.example.com/oauth/device \
+  --token-url https://sso.example.com/oauth/token
 ```
 
 ### Options
@@ -139,7 +151,11 @@ hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' 
 
 ### Authentication
 
-If the document requires authentication, provide a session cookie:
+If a document requires authentication, you need a session cookie. There are multiple ways to obtain one:
+
+#### Method 1: Manual Cookie (Browser)
+
+Copy your session cookie from your browser after logging in:
 
 ```bash
 # Via command-line option
@@ -148,6 +164,88 @@ hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
 # Via environment variable
 export HEDGEDOC_COOKIE='connect.sid=...'
 hedgesync get https://md.example.com/abc123
+
+# The 'connect.sid=' prefix is optional - it will be added automatically
+hedgesync get https://md.example.com/abc123 -c 's%3Axyz...'
+```
+
+#### Method 2: Email/Password Login
+
+For HedgeDoc instances with email authentication enabled:
+
+```bash
+hedgesync login email https://md.example.com -u user@example.com -p password
+# Outputs: connect.sid=s%3A...
+
+# Store and use the cookie
+export HEDGEDOC_COOKIE=$(hedgesync login email https://md.example.com -u user@example.com -p password)
+```
+
+#### Method 3: LDAP Login
+
+For HedgeDoc instances with LDAP authentication:
+
+```bash
+hedgesync login ldap https://md.example.com -u username -p password
+```
+
+#### Method 4: OIDC Login (Interactive)
+
+Opens a browser for SSO authentication:
+
+```bash
+hedgesync login oidc https://md.example.com
+# Opens browser, waits for callback, outputs cookie
+```
+
+#### Method 5: OAuth2 Client Credentials (M2M)
+
+**Recommended for automation and bots.** This is an OAuth 2.1 compliant machine-to-machine flow that doesn't require a browser or user interaction.
+
+```bash
+hedgesync login client-credentials https://md.example.com \
+  --client-id my-service-account \
+  --client-secret my-secret \
+  --token-url https://sso.example.com/application/o/token/
+
+# With custom scopes
+hedgesync login client-credentials https://md.example.com \
+  --client-id my-client \
+  --client-secret secret \
+  --token-url https://sso.example.com/oauth/token \
+  --scope "openid profile email"
+```
+
+**Requirements:**
+- Create a service account / machine application in your identity provider
+- The IdP must be configured to accept Client Credentials grants
+- HedgeDoc must accept the resulting access token
+
+#### Method 6: OAuth2 Device Code Flow (RFC 8628)
+
+For CLI tools and devices that can't open a browser directly. The user authorizes on a separate device:
+
+```bash
+hedgesync login device-code https://md.example.com \
+  --client-id my-cli-app \
+  --device-url https://sso.example.com/application/o/device/ \
+  --token-url https://sso.example.com/application/o/token/
+
+# Displays something like:
+# Please visit: https://sso.example.com/device
+# And enter code: ABCD-EFGH
+# Waiting for authorization...
+```
+
+#### Request Timeouts
+
+All authentication methods support configurable timeouts (default: 30 seconds):
+
+```bash
+# Use a longer timeout for slow networks
+hedgesync login ldap https://md.example.com -u user -p pass --timeout 60000
+
+# Device code flow has a longer default (5 minutes) for user authorization
 ```
 
 ### Scripting Examples
@@ -173,6 +271,126 @@ done
 # Pipe through pandoc
 hedgesync get https://md.example.com/abc123 | pandoc -f markdown -t html > doc.html
 ```
+
+### SSO Provider Setup: Authentik
+
+This section explains how to configure [Authentik](https://goauthentik.io/) for automated HedgeDoc access using OAuth 2.1 compliant flows.
+
+#### Option A: Client Credentials (Service Account)
+
+Best for fully automated bots and services that don't act on behalf of a user.
+
+**1. Create a Service Account in Authentik:**
+
+- Go to **Directory → Users → Create Service Account**
+- Name it something like `hedgedoc-bot`
+- Note the generated username
+
+**2. Create an OAuth2 Provider:**
+
+- Go to **Applications → Providers → Create**
+- Select **OAuth2/OpenID Provider**
+- Name: `hedgedoc-service`
+- Authorization flow: Skip (not needed for client credentials)
+- Client type: **Confidential**
+- Client ID: Auto-generated (copy this)
+- Client Secret: Generate and copy
+- Redirect URIs: Leave empty (not used)
+- Under **Advanced protocol settings**:
+  - Scopes: `openid profile email`
+  - Token validity: Set as needed (e.g., 1 hour)
+
+**3. Create an Application:**
+
+- Go to **Applications → Applications → Create**
+- Name: `HedgeDoc Bot`
+- Slug: `hedgedoc-bot`
+- Provider: Select your `hedgedoc-service` provider
+- Policy engine mode: `any`
+
+**4. Grant Permissions:**
+
+- Go to the application settings
+- Under **Policy / Group / User Bindings**, add your service account user
+
+**5. Use with hedgesync:**
+
+```bash
+hedgesync login client-credentials https://md.example.com \
+  --client-id <your-client-id> \
+  --client-secret <your-client-secret> \
+  --token-url https://authentik.example.com/application/o/token/
+```
+
+#### Option B: Device Code Flow (User Authorization)
+
+Best for CLI tools where a user needs to authorize, but the CLI can't open a browser (e.g., SSH sessions).
+
+**1. Create an OAuth2 Provider:**
+
+- Go to **Applications → Providers → Create**
+- Select **OAuth2/OpenID Provider**
+- Name: `hedgedoc-cli`
+- Authorization flow: Select an appropriate flow (e.g., `default-provider-authorization-implicit-consent`)
+- Client type: **Public** (no client secret needed)
+- Client ID: Auto-generated (copy this)
+- Redirect URIs: Not needed for device flow
+- Under **Advanced protocol settings**:
+  - Scopes: `openid profile email`
+
+**2. Enable Device Code Flow:**
+
+- In the provider settings, ensure **Device code flow** is enabled
+- Note: Requires Authentik 2023.5+ for device code support
+
+**3. Create an Application:**
+
+- Go to **Applications → Applications → Create**
+- Name: `HedgeDoc CLI`
+- Slug: `hedgedoc-cli`
+- Provider: Select your `hedgedoc-cli` provider
+
+**4. Use with hedgesync:**
+
+```bash
+hedgesync login device-code https://md.example.com \
+  --client-id <your-client-id> \
+  --device-url https://authentik.example.com/application/o/device/ \
+  --token-url https://authentik.example.com/application/o/token/
+
+# Output:
+# Please visit: https://authentik.example.com/device
+# And enter code: ABCD-1234
+# Waiting for authorization...
+```
+
+Open the URL on any device, enter the code, and authorize the application. The CLI will automatically detect the authorization and output the session cookie.
+
+#### Authentik URLs Reference
+
+| Endpoint | URL Pattern |
+|----------|-------------|
+| Token URL | `https://<authentik>/application/o/token/` |
+| Device Authorization | `https://<authentik>/application/o/device/` |
+| Authorization URL | `https://<authentik>/application/o/authorize/` |
+| OIDC Discovery | `https://<authentik>/application/o/<app-slug>/.well-known/openid-configuration` |
+
+#### HedgeDoc Configuration
+
+Ensure your HedgeDoc instance is configured to accept OAuth2/OIDC authentication. In `config.json`:
+
+```json
+{
+  "oauth2": {
+    "authorizationURL": "https://authentik.example.com/application/o/authorize/",
+    "tokenURL": "https://authentik.example.com/application/o/token/",
+    "clientID": "<your-hedgedoc-app-client-id>",
+    "clientSecret": "<your-hedgedoc-app-client-secret>"
+  }
+}
+```
+
+See [HedgeDoc OAuth2 documentation](https://docs.hedgedoc.org/configuration/#oauth2-login) for complete configuration options.
 
 ## Library Quick Start
 
