@@ -191,12 +191,21 @@ hedgesync login ldap https://md.example.com -u username -p password
 
 #### Method 4: OIDC Login (Interactive)
 
-Opens a browser for SSO authentication:
+Opens a browser for SSO authentication. This implements the full OAuth2 Authorization Code flow:
 
 ```bash
 hedgesync login oidc https://md.example.com
-# Opens browser, waits for callback, outputs cookie
+# Opens browser, user authenticates, returns cookie automatically
 ```
+
+**How it works:**
+1. Starts a local server to receive the OAuth callback
+2. Opens the HedgeDoc OAuth URL in your browser
+3. After you authenticate, the IdP redirects to the local server
+4. The CLI forwards the authorization code to HedgeDoc
+5. Returns the authenticated session cookie
+
+**Note:** Your identity provider must allow `http://127.0.0.1:*/callback` as a redirect URI. Most IdPs (including Authentik, Keycloak, etc.) support localhost redirects for CLI/development use cases.
 
 #### Method 5: OAuth2 Client Credentials (M2M)
 
@@ -223,6 +232,8 @@ hedgesync login client-credentials https://md.example.com \
 
 #### Method 6: OAuth2 Device Code Flow (RFC 8628)
 
+> **⚠️ Note:** Device Code flow has limited support with HedgeDoc. HedgeDoc doesn't natively accept OAuth2 access tokens - it requires session cookies. This flow will only work if your reverse proxy (e.g., oauth2-proxy, Traefik with forward auth) can convert Bearer tokens to HedgeDoc sessions.
+
 For CLI tools and devices that can't open a browser directly. The user authorizes on a separate device:
 
 ```bash
@@ -236,6 +247,8 @@ hedgesync login device-code https://md.example.com \
 # And enter code: ABCD-EFGH
 # Waiting for authorization...
 ```
+
+**Recommended alternative:** Use `hedgesync login oidc` instead, which implements the full OAuth2 Authorization Code flow and works with unmodified HedgeDoc instances.
 
 #### Request Timeouts
 
@@ -322,7 +335,27 @@ hedgesync login client-credentials https://md.example.com \
   --token-url https://authentik.example.com/application/o/token/
 ```
 
-#### Option B: Device Code Flow (User Authorization)
+#### Option B: Interactive OIDC Login (Recommended)
+
+Best for CLI use when you can open a browser. This uses the standard OAuth2 Authorization Code flow:
+
+**1. Add localhost to allowed redirect URIs:**
+
+In your existing HedgeDoc OAuth2 Provider in Authentik:
+- Go to **Applications → Providers → Your HedgeDoc Provider**
+- Under **Redirect URIs/Origins (RegEx)**, add: `http://127\.0\.0\.1:[0-9]+/callback`
+- Save
+
+**2. Use with hedgesync:**
+
+```bash
+hedgesync login oidc https://md.example.com
+# Browser opens, you authenticate, cookie is returned automatically
+```
+
+#### Option C: Device Code Flow (Limited Support)
+
+> **Note:** This has limited support with HedgeDoc. See the Device Code Flow section above for details.
 
 Best for CLI tools where a user needs to authorize, but the CLI can't open a browser (e.g., SSH sessions).
 
