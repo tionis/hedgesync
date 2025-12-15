@@ -454,9 +454,11 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
   } = options;
   const baseUrl = serverUrl.replace(/\/$/, '');
   
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     let server: Server | null = null;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let hedgedocSessionCookie: string | null = null;
+    let originalCallbackUrl: string = '';
     
     const cleanup = () => {
       if (timeoutId) {
@@ -475,102 +477,185 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
       reject(new AuthError(`OIDC authentication timed out after ${timeout}ms`));
     }, timeout);
     
-    // Create local server to intercept the callback
-    server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      const url = parseUrl(req.url || '', true);
+    try {
+      // Step 1: Hit HedgeDoc's /auth/oauth2 to get the OAuth redirect URL and session cookie
+      const initResponse = await fetch(`${baseUrl}/auth/oauth2`, {
+        redirect: 'manual',
+        headers: {
+          'Accept': 'text/html',
+          ...headers,
+        },
+      });
       
-      // We're looking for the session cookie that HedgeDoc sets after OAuth completes
-      if (url.pathname === '/auth/oauth2/callback' || url.pathname === '/callback') {
-        // The actual callback goes to HedgeDoc, but we intercept to get the cookie
-        // This won't work directly - we need a different approach
+      // Extract the session cookie HedgeDoc creates
+      const setCookieHeader = initResponse.headers.get('set-cookie') || '';
+      const cookieMatch = setCookieHeader.match(/connect\.sid=([^;]+)/);
+      if (cookieMatch) {
+        hedgedocSessionCookie = cookieMatch[1];
+      }
+      
+      if (!hedgedocSessionCookie) {
+        throw new AuthError('HedgeDoc did not return a session cookie');
+      }
+      
+      // Get the OAuth authorization URL from the redirect
+      const oauthRedirectUrl = initResponse.headers.get('location');
+      if (!oauthRedirectUrl) {
+        throw new AuthError('HedgeDoc did not redirect to OAuth provider. Is OAuth2 enabled?');
+      }
+      
+      // Parse the OAuth URL to extract the original redirect_uri
+      const oauthUrl = new URL(oauthRedirectUrl);
+      originalCallbackUrl = oauthUrl.searchParams.get('redirect_uri') || `${baseUrl}/auth/oauth2/callback`;
+      
+      // Create local server to intercept the callback
+      server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+        const reqUrl = parseUrl(req.url || '', true);
         
-        // Send a simple response
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`
-          <!DOCTYPE html>
-          <html>
-          <head><title>Authentication</title></head>
-          <body>
-            <h1>Authentication in progress...</h1>
-            <p>Please wait while we complete the authentication.</p>
-            <script>
-              // Close this window after a delay
-              setTimeout(() => window.close(), 2000);
-            </script>
-          </body>
-          </html>
-        `);
-      } else if (url.pathname === '/complete') {
-        // Custom endpoint for completing auth
-        const sessionId = url.query.session as string;
-        
-        if (sessionId) {
-          cleanup();
+        // Handle the OAuth callback
+        if (reqUrl.pathname === '/callback' || reqUrl.pathname === '/auth/oauth2/callback') {
+          const code = reqUrl.query.code as string;
+          const returnedState = reqUrl.query.state as string;
+          const error = reqUrl.query.error as string;
           
-          res.writeHead(200, { 'Content-Type': 'text/html' });
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Authentication Complete</title></head>
-            <body>
-              <h1>✓ Authentication Successful</h1>
-              <p>You can close this window and return to the terminal.</p>
-              <script>setTimeout(() => window.close(), 1000);</script>
-            </body>
-            </html>
-          `);
+          if (error) {
+            cleanup();
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(`
+              <!DOCTYPE html>
+              <html>
+              <head><title>Authentication Failed</title></head>
+              <body>
+                <h1>❌ Authentication Failed</h1>
+                <p>Error: ${error}</p>
+                <p>${reqUrl.query.error_description || ''}</p>
+              </body>
+              </html>
+            `);
+            reject(new AuthError(`OAuth authentication failed: ${error}`));
+            return;
+          }
           
-          resolve({
-            sessionId,
-            cookie: `connect.sid=${sessionId}`,
-            acquiredAt: new Date(),
-          });
+          if (!code) {
+            cleanup();
+            res.writeHead(400, { 'Content-Type': 'text/html' });
+            res.end('<h1>Error: No authorization code received</h1>');
+            reject(new AuthError('No authorization code received from OAuth provider'));
+            return;
+          }
+          
+          try {
+            // Forward the callback to HedgeDoc with the original session cookie
+            // Build the callback URL with the code and state
+            const hedgedocCallbackUrl = new URL(originalCallbackUrl);
+            hedgedocCallbackUrl.searchParams.set('code', code);
+            if (returnedState) {
+              hedgedocCallbackUrl.searchParams.set('state', returnedState);
+            }
+            
+            const hedgedocCallback = await fetch(hedgedocCallbackUrl.toString(), {
+              redirect: 'manual',
+              headers: {
+                'Cookie': `connect.sid=${hedgedocSessionCookie}`,
+                'Accept': 'text/html',
+                ...headers,
+              },
+            });
+            
+            // Check if we got a new session cookie (some setups refresh it)
+            const newSetCookie = hedgedocCallback.headers.get('set-cookie') || '';
+            const newCookieMatch = newSetCookie.match(/connect\.sid=([^;]+)/);
+            const finalSessionId = newCookieMatch ? newCookieMatch[1] : hedgedocSessionCookie!;
+            
+            // Verify the session is actually authenticated
+            const verifyResponse = await fetch(`${baseUrl}/me`, {
+              headers: {
+                'Cookie': `connect.sid=${finalSessionId}`,
+                'Accept': 'application/json',
+                ...headers,
+              },
+            });
+            
+            const verifyData = await verifyResponse.json() as Record<string, unknown>;
+            
+            if (verifyData.status === 'forbidden' || (!verifyData.id && !verifyData.name && verifyData.status !== 'ok')) {
+              throw new AuthError('OAuth authentication completed but session is not authenticated. The IdP may have rejected the redirect_uri.');
+            }
+            
+            cleanup();
+            
+            // Send success response to browser
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(`
+              <!DOCTYPE html>
+              <html>
+              <head><title>Authentication Successful</title></head>
+              <body>
+                <h1>✓ Authentication Successful</h1>
+                <p>You can close this window and return to the terminal.</p>
+                <script>setTimeout(() => window.close(), 1500);</script>
+              </body>
+              </html>
+            `);
+            
+            resolve({
+              sessionId: finalSessionId,
+              cookie: `connect.sid=${finalSessionId}`,
+              acquiredAt: new Date(),
+            });
+          } catch (err) {
+            cleanup();
+            res.writeHead(500, { 'Content-Type': 'text/html' });
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            res.end(`<h1>Error completing authentication</h1><p>${errorMessage}</p>`);
+            reject(err instanceof AuthError ? err : new AuthError(`Failed to complete OAuth: ${err}`));
+          }
         } else {
-          res.writeHead(400, { 'Content-Type': 'text/html' });
-          res.end('<h1>Error: No session provided</h1>');
+          res.writeHead(404, { 'Content-Type': 'text/html' });
+          res.end('<h1>Not Found</h1>');
         }
-      } else {
-        res.writeHead(404, { 'Content-Type': 'text/html' });
-        res.end('<h1>Not Found</h1>');
-      }
-    });
-    
-    // Listen on specified port or random available port
-    const port = callbackPort || 0;
-    server.listen(port, '127.0.0.1', async () => {
-      const address = server!.address();
-      const actualPort = typeof address === 'object' && address ? address.port : port;
+      });
       
-      // Generate state for CSRF protection
-      const state = randomBytes(16).toString('hex');
-      
-      // The OAuth flow URL
-      const authUrl = `${baseUrl}/auth/oauth2`;
-      
-      console.log(`\nOIDC Authentication Required`);
-      console.log(`============================`);
-      console.log(`\n1. Open this URL in your browser:`);
-      console.log(`   ${authUrl}`);
-      console.log(`\n2. Complete the authentication in your browser.`);
-      console.log(`\n3. After logging in, copy your session cookie from the browser.`);
-      console.log(`   (Usually found in DevTools > Application > Cookies > connect.sid)`);
-      console.log(`\n4. Then visit: http://127.0.0.1:${actualPort}/complete?session=YOUR_SESSION_ID`);
-      console.log(`\n   Or press Ctrl+C to cancel.\n`);
-      
-      // Try to open browser if callback provided
-      if (onOpenBrowser) {
-        try {
-          await onOpenBrowser(authUrl);
-        } catch (e) {
-          // Ignore browser open errors
+      // Listen on specified port or random available port
+      const port = callbackPort || 0;
+      server.listen(port, '127.0.0.1', async () => {
+        const address = server!.address();
+        const actualPort = typeof address === 'object' && address ? address.port : port;
+        
+        // Create local callback URL
+        const localCallbackUrl = `http://127.0.0.1:${actualPort}/callback`;
+        
+        // Modify the OAuth URL to redirect to our local server
+        // Note: This will only work if the IdP allows localhost redirects
+        oauthUrl.searchParams.set('redirect_uri', localCallbackUrl);
+        const modifiedOAuthUrl = oauthUrl.toString();
+        
+        console.log(`\nOpening browser for authentication...`);
+        console.log(`\nIf the browser doesn't open, visit:`);
+        console.log(`  ${modifiedOAuthUrl}`);
+        console.log(`\nNote: Your IdP must allow localhost redirects for this to work.`);
+        console.log(`If authentication fails, you may need to add http://127.0.0.1:${actualPort}/callback`);
+        console.log(`to your IdP's allowed redirect URIs.\n`);
+        
+        // Try to open browser
+        if (onOpenBrowser) {
+          try {
+            await onOpenBrowser(modifiedOAuthUrl);
+          } catch (e) {
+            // Ignore browser open errors
+          }
         }
-      }
-    });
-    
-    server.on('error', (err) => {
+      });
+      
+      server.on('error', (err) => {
+        cleanup();
+        reject(new AuthError(`Failed to start local auth server: ${err.message}`));
+      });
+      
+    } catch (err) {
       cleanup();
-      reject(new AuthError(`Failed to start local auth server: ${err.message}`));
-    });
+      reject(err instanceof AuthError ? err : new AuthError(`OIDC initialization failed: ${err}`));
+    }
   });
 }
 
