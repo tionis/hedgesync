@@ -2871,9 +2871,25 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 // Command: login (authenticate and get session cookie)
 async function cmdLogin(args: ParsedArgs): Promise<void> {
-  const serverUrl = args.positional[0];
+  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'client-credentials', 'device-code'];
+  
+  // Support both syntaxes:
+  // hedgesync login <method> <server-url>  (method as first positional)
+  // hedgesync login <server-url> --method <method>  (method as option)
+  let serverUrl: string;
+  let method: string;
+  
+  if (args.positional[0] && validMethods.includes(args.positional[0].toLowerCase())) {
+    // First positional is a method
+    method = args.positional[0].toLowerCase();
+    serverUrl = args.positional[1];
+  } else {
+    // First positional is the URL, method from options
+    serverUrl = args.positional[0];
+    method = ((args.options.method || args.options.m || 'email') as string).toLowerCase();
+  }
+  
   const jsonOutput = args.options.json;
-  const method = (args.options.method || args.options.m || 'email') as string;
   const username = (args.options.username || args.options.u || args.options.user) as string;
   const password = (args.options.password || args.options.p) as string;
   const quiet = args.options.quiet || args.options.q;
@@ -2884,7 +2900,9 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
       console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
     } else {
       console.error(c('red', 'Error: Server URL required'));
-      console.error('Usage: hedgesync login <server-url> --method <email|ldap|oidc|oauth2-password> [options]');
+      console.error('Usage: hedgesync login <method> <server-url> [options]');
+      console.error('       hedgesync login <server-url> --method <method> [options]');
+      console.error('Methods: email, ldap, oidc, client-credentials, device-code');
     }
     process.exit(1);
   }
@@ -2895,7 +2913,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
   try {
     let result;
     
-    switch (method.toLowerCase()) {
+    switch (method) {
       case 'email': {
         if (!username || !password) {
           if (jsonOutput) {
