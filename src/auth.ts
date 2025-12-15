@@ -1027,11 +1027,16 @@ export async function loginWithDeviceCode(options: OAuth2DeviceCodeOptions): Pro
       return sessionResult;
     }
     
-    // Return the access token info if we couldn't get a session
+    // HedgeDoc doesn't support Bearer token auth - it requires the full OAuth browser flow
+    // Return the access token so it can potentially be used with a reverse proxy that supports it
     throw new AuthError(
-      'Device authorization successful but HedgeDoc did not return a session cookie. ' +
-      'You may need to use the access token directly with -H "Authorization: Bearer <token>" ' +
-      'if your reverse proxy supports it.\n\nAccess Token: ' + accessToken
+      'Device authorization successful, but HedgeDoc does not support exchanging OAuth2 access tokens ' +
+      'for session cookies. HedgeDoc requires the full browser-based OAuth2 Authorization Code flow.\n\n' +
+      'Options:\n' +
+      '  1. Use "hedgesync login oidc" for interactive browser-based authentication\n' +
+      '  2. Configure your reverse proxy to validate Bearer tokens and set session cookies\n' +
+      '  3. Log in via browser and copy the connect.sid cookie manually\n\n' +
+      'Access Token (for reverse proxy use): ' + accessToken
     );
   }
   
@@ -1064,11 +1069,27 @@ async function exchangeTokenForSession(
   let sessionId = extractSessionCookie(setCookie);
   
   if (sessionId) {
-    return {
-      sessionId,
-      cookie: `connect.sid=${sessionId}`,
-      acquiredAt: new Date(),
-    };
+    // Verify this session is actually authenticated by checking /me
+    const verifyResponse = await fetch(`${baseUrl}/me`, {
+      headers: {
+        'Cookie': `connect.sid=${sessionId}`,
+        'Accept': 'application/json',
+        ...headers,
+      },
+      signal,
+    });
+    
+    if (verifyResponse.ok) {
+      const data = await verifyResponse.json() as Record<string, unknown>;
+      // HedgeDoc returns {status: "forbidden"} for unauthenticated or {status: "ok", ...} for authenticated
+      if (data.status === 'ok' || data.id || data.name) {
+        return {
+          sessionId,
+          cookie: `connect.sid=${sessionId}`,
+          acquiredAt: new Date(),
+        };
+      }
+    }
   }
   
   // Try the OAuth2 callback URL approach
@@ -1088,11 +1109,26 @@ async function exchangeTokenForSession(
   sessionId = extractSessionCookie(setCookie);
   
   if (sessionId) {
-    return {
-      sessionId,
-      cookie: `connect.sid=${sessionId}`,
-      acquiredAt: new Date(),
-    };
+    // Verify this session is actually authenticated
+    const verifyResponse = await fetch(`${baseUrl}/me`, {
+      headers: {
+        'Cookie': `connect.sid=${sessionId}`,
+        'Accept': 'application/json',
+        ...headers,
+      },
+      signal,
+    });
+    
+    if (verifyResponse.ok) {
+      const data = await verifyResponse.json() as Record<string, unknown>;
+      if (data.status === 'ok' || data.id || data.name) {
+        return {
+          sessionId,
+          cookie: `connect.sid=${sessionId}`,
+          acquiredAt: new Date(),
+        };
+      }
+    }
   }
   
   return null;
