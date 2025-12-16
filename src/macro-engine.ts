@@ -236,10 +236,88 @@ interface MacroInfo {
   pattern: string;
 }
 
+// ===========================================
+// Section Filter Types
+// ===========================================
+
+/**
+ * Heading-based section filter.
+ * Only process macros under sections matching the specified heading pattern.
+ * 
+ * @example
+ * // Only run macros under "## Scripts" heading
+ * { type: 'heading', pattern: /^## Scripts$/m }
+ * 
+ * // Only run macros under any level 2+ heading containing "Code"
+ * { type: 'heading', pattern: /^#{2,}\s+.*Code.*$/m }
+ */
+export interface HeadingSectionFilter {
+  type: 'heading';
+  /** Regex pattern to match the heading line */
+  pattern: RegExp;
+  /** If true, include content until the next heading of same or higher level (default: true) */
+  untilNextHeading?: boolean;
+  /** Specific heading level to stop at (1-6). If not set, stops at same or higher level. */
+  stopAtLevel?: number;
+}
+
+/**
+ * Line number-based section filter.
+ * Only process macros within the specified line range.
+ * 
+ * @example
+ * // Only run macros on lines 10-50 (1-indexed, inclusive)
+ * { type: 'lines', start: 10, end: 50 }
+ * 
+ * // Only run macros from line 100 onwards
+ * { type: 'lines', start: 100 }
+ */
+export interface LinesSectionFilter {
+  type: 'lines';
+  /** Starting line number (1-indexed, inclusive) */
+  start: number;
+  /** Ending line number (1-indexed, inclusive). If omitted, goes to end of document. */
+  end?: number;
+}
+
+/**
+ * Regex-based section filter.
+ * Only process macros between text matching start and end patterns.
+ * 
+ * @example
+ * // Only run macros between HTML comments
+ * { type: 'regex', start: /<!--\s*macros:on\s*-->/, end: /<!--\s*macros:off\s*-->/ }
+ * 
+ * // Only run macros inside fenced code blocks marked "macro"
+ * { type: 'regex', start: /^```macro$/m, end: /^```$/m }
+ */
+export interface RegexSectionFilter {
+  type: 'regex';
+  /** Pattern marking the start of the section */
+  start: RegExp;
+  /** Pattern marking the end of the section */
+  end: RegExp;
+  /** If true, include multiple matching sections (default: true) */
+  global?: boolean;
+  /** If true, include the delimiter text itself in the section (default: false) */
+  includeDelimiters?: boolean;
+}
+
+/** Union of all section filter types */
+export type SectionFilter = HeadingSectionFilter | LinesSectionFilter | RegexSectionFilter;
+
+/** A range within the document where macros should be applied */
+export interface SectionRange {
+  start: number;  // Character offset
+  end: number;    // Character offset
+}
+
 /** Options for MacroEngine */
 interface MacroEngineOptions {
   /** Regex pattern to filter users by name. Only changes from matching users trigger macros. */
   userFilter?: RegExp;
+  /** Section filter to limit where macros are applied */
+  sectionFilter?: SectionFilter;
 }
 
 // ===========================================
@@ -252,6 +330,8 @@ class MacroEngine {
   enabled: boolean;
   /** Regex pattern to filter users by name */
   userFilter: RegExp | null;
+  /** Section filter to limit where macros are applied */
+  sectionFilter: SectionFilter | null;
   private _processing: boolean;
   private _changeHandler: ((event: ChangeEvent) => Promise<void>) | null;
   private _debounceTimer: ReturnType<typeof setTimeout> | null;
@@ -265,10 +345,181 @@ class MacroEngine {
     this.macros = new Map();
     this.enabled = true;
     this.userFilter = options.userFilter || null;
+    this.sectionFilter = options.sectionFilter || null;
     this._processing = false;
     this._changeHandler = null;
     this._debounceTimer = null;
     this._activeStreams = new Set();
+  }
+
+  /**
+   * Set or update the section filter
+   */
+  setSectionFilter(filter: SectionFilter | null): MacroEngine {
+    this.sectionFilter = filter;
+    return this;
+  }
+
+  /**
+   * Get the allowed sections based on the current section filter
+   */
+  private _getAllowedSections(document: string): SectionRange[] {
+    if (!this.sectionFilter) {
+      // No filter - entire document is allowed
+      return [{ start: 0, end: document.length }];
+    }
+
+    switch (this.sectionFilter.type) {
+      case 'heading':
+        return this._getHeadingSections(document, this.sectionFilter);
+      case 'lines':
+        return this._getLineSections(document, this.sectionFilter);
+      case 'regex':
+        return this._getRegexSections(document, this.sectionFilter);
+      default:
+        return [{ start: 0, end: document.length }];
+    }
+  }
+
+  /**
+   * Get sections under matching markdown headings
+   */
+  private _getHeadingSections(document: string, filter: HeadingSectionFilter): SectionRange[] {
+    const sections: SectionRange[] = [];
+    const lines = document.split('\n');
+    const { pattern, untilNextHeading = true, stopAtLevel } = filter;
+    
+    // Find all headings and their levels
+    const headings: { line: number; level: number; offset: number }[] = [];
+    let offset = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const headingMatch = line.match(/^(#{1,6})\s/);
+      if (headingMatch) {
+        headings.push({
+          line: i,
+          level: headingMatch[1].length,
+          offset
+        });
+      }
+      offset += line.length + 1; // +1 for newline
+    }
+    
+    // Find headings that match the pattern
+    offset = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      if (pattern.test(line)) {
+        const matchedHeading = headings.find(h => h.line === i);
+        if (matchedHeading) {
+          const sectionStart = offset + line.length + 1; // Start after the heading line
+          
+          // Find the end of this section
+          let sectionEnd = document.length;
+          
+          if (untilNextHeading) {
+            // Find the next heading at the same or higher level
+            const matchedLevel = matchedHeading.level;
+            const stopLevel = stopAtLevel ?? matchedLevel;
+            
+            for (const h of headings) {
+              if (h.line > i && h.level <= stopLevel) {
+                sectionEnd = h.offset;
+                break;
+              }
+            }
+          }
+          
+          if (sectionStart < sectionEnd) {
+            sections.push({ start: sectionStart, end: sectionEnd });
+          }
+        }
+      }
+      
+      offset += line.length + 1;
+    }
+    
+    return sections;
+  }
+
+  /**
+   * Get sections based on line number ranges
+   */
+  private _getLineSections(document: string, filter: LinesSectionFilter): SectionRange[] {
+    const lines = document.split('\n');
+    const { start: startLine, end: endLine } = filter;
+    
+    // Convert 1-indexed line numbers to 0-indexed
+    const startIdx = Math.max(0, startLine - 1);
+    const endIdx = endLine !== undefined ? Math.min(lines.length - 1, endLine - 1) : lines.length - 1;
+    
+    if (startIdx > endIdx || startIdx >= lines.length) {
+      return [];
+    }
+    
+    // Calculate character offsets
+    let startOffset = 0;
+    for (let i = 0; i < startIdx; i++) {
+      startOffset += lines[i].length + 1; // +1 for newline
+    }
+    
+    let endOffset = startOffset;
+    for (let i = startIdx; i <= endIdx; i++) {
+      endOffset += lines[i].length + (i < lines.length - 1 ? 1 : 0); // Don't add newline for last line
+    }
+    
+    return [{ start: startOffset, end: endOffset }];
+  }
+
+  /**
+   * Get sections between regex delimiters
+   */
+  private _getRegexSections(document: string, filter: RegexSectionFilter): SectionRange[] {
+    const sections: SectionRange[] = [];
+    const { start: startPattern, end: endPattern, global = true, includeDelimiters = false } = filter;
+    
+    // Ensure patterns have global flag for multiple matches
+    const startRegex = new RegExp(startPattern.source, startPattern.flags.includes('g') ? startPattern.flags : startPattern.flags + 'g');
+    const endRegex = new RegExp(endPattern.source, endPattern.flags.includes('g') ? endPattern.flags : endPattern.flags + 'g');
+    
+    let startMatch: RegExpExecArray | null;
+    startRegex.lastIndex = 0;
+    
+    while ((startMatch = startRegex.exec(document)) !== null) {
+      const sectionStart = includeDelimiters ? startMatch.index : startMatch.index + startMatch[0].length;
+      
+      // Find the matching end delimiter
+      endRegex.lastIndex = startMatch.index + startMatch[0].length;
+      const endMatch = endRegex.exec(document);
+      
+      if (endMatch) {
+        const sectionEnd = includeDelimiters ? endMatch.index + endMatch[0].length : endMatch.index;
+        
+        if (sectionStart < sectionEnd) {
+          sections.push({ start: sectionStart, end: sectionEnd });
+        }
+        
+        // Move start regex past this section for next iteration
+        startRegex.lastIndex = endMatch.index + endMatch[0].length;
+      } else {
+        // No end delimiter found - extend to end of document
+        sections.push({ start: sectionStart, end: document.length });
+        break;
+      }
+      
+      if (!global) break; // Only find first section
+    }
+    
+    return sections;
+  }
+
+  /**
+   * Check if a position is within any allowed section
+   */
+  private _isPositionAllowed(position: number, sections: SectionRange[]): boolean {
+    return sections.some(s => position >= s.start && position < s.end);
   }
 
   /**
@@ -584,9 +835,16 @@ class MacroEngine {
       }
     }
 
+    // Filter matches by section if section filter is configured
+    const sectionRanges = this._getAllowedSections(document);
+    const filteredMatches = allMatches.filter(m => {
+      const matchEnd = m.index + m.match.length;
+      return sectionRanges.some((range: SectionRange) => m.index >= range.start && matchEnd <= range.end);
+    });
+
     // Process matches in reverse order to maintain indices
-    for (let i = allMatches.length - 1; i >= 0; i--) {
-      const m = allMatches[i];
+    for (let i = filteredMatches.length - 1; i >= 0; i--) {
+      const m = filteredMatches[i];
       let replacement: string | null | undefined;
       let replaceIndex: number;
       let replaceLength: number;
@@ -718,8 +976,15 @@ class MacroEngine {
       }
     }
 
+    // Filter matches by section if section filter is configured
+    const sectionRanges = this._getAllowedSections(document);
+    const filteredMatches = allMatches.filter(m => {
+      const matchEnd = m.index + m.match.length;
+      return sectionRanges.some((range: SectionRange) => m.index >= range.start && matchEnd <= range.end);
+    });
+
     // Process first match only (to keep indices valid)
-    for (const m of allMatches) {
+    for (const m of filteredMatches) {
       const fullMatch = m.match;
       const content = m.groups[0] || '';
       const originalIndex = m.index;
@@ -815,6 +1080,9 @@ class MacroEngine {
     
     const started: StreamingStarted[] = [];
     
+    // Get allowed sections for filtering
+    const sectionRanges = this._getAllowedSections(document);
+    
     // Find matches for streaming macros
     for (const { name, macro } of streamingMacros) {
       macro.pattern.lastIndex = 0;
@@ -824,6 +1092,20 @@ class MacroEngine {
         const matchText = match[0];
         const groups = match.slice(1);
         const index = match.index;
+        
+        // Check if match is within allowed sections
+        const matchEnd = index + matchText.length;
+        const isInAllowedSection = sectionRanges.some(
+          (range: SectionRange) => index >= range.start && matchEnd <= range.end
+        );
+        
+        if (!isInAllowedSection) {
+          // Skip matches outside allowed sections
+          if (match.index === macro.pattern.lastIndex) {
+            macro.pattern.lastIndex++;
+          }
+          continue;
+        }
         
         // Start streaming this match asynchronously
         // Track the promise so we can wait for completion

@@ -415,6 +415,26 @@ ${c('yellow', 'FILTER OPTIONS:')}
                     Example: --user-filter 'Alice|Bob' (only Alice or Bob)
                     Example: --user-filter '^Guest' (only guest users)
 
+${c('yellow', 'SECTION FILTER OPTIONS:')}
+  ${c('cyan', '--section-heading')} <pattern>
+                    Only apply macros within sections under matching headings.
+                    Matches heading text with regex. Includes content until 
+                    next heading at same or higher level.
+                    Example: --section-heading 'Scripts' (only in ## Scripts section)
+                    Example: --section-heading 'TODO|Tasks' (multiple sections)
+
+  ${c('cyan', '--section-lines')} <start>-<end>
+                    Only apply macros within specified line range.
+                    Line numbers are 1-indexed.
+                    Example: --section-lines 10-50 (lines 10 through 50)
+                    Example: --section-lines 100- (line 100 to end)
+
+  ${c('cyan', '--section-regex')} <start>/<end>
+                    Only apply macros between regex delimiter matches.
+                    Useful for fenced regions or custom markers.
+                    Example: --section-regex '<!-- MACROS -->/' '<!-- /MACROS -->'
+                    Example: --section-regex '\\[\\[START\\]\\]'/'\\[\\[END\\]\\]'
+
 ${c('yellow', 'MODE OPTIONS:')}
   ${c('cyan', '--watch')}        Run continuously, expanding triggers as they appear.
                     Without --watch, macros run once and exit.
@@ -609,6 +629,72 @@ ${c('yellow', 'USE CASES:')}
   - Monitor document activity
   - Build integrations (pipe --ndjson to scripts)
   - Watch for specific changes
+`,
+
+  mirror: `
+${c('bold', 'hedgesync mirror')} - Sync two HedgeDoc documents in real-time
+
+${c('yellow', 'USAGE:')}
+  hedgesync mirror <source-url> <target-url> [options]
+
+${c('yellow', 'DESCRIPTION:')}
+  Mirrors changes from a source document to a target document in real-time.
+  Every edit made to the source is automatically applied to the target.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-c, --cookie')}   Session cookie for both documents (shared server)
+  ${c('cyan', '--source-cookie')} Session cookie for source server only
+  ${c('cyan', '--target-cookie')} Session cookie for target server only
+  ${c('cyan', '--bidirectional')} Sync changes both ways (two-way mirror)
+  ${c('cyan', '--transform')}     Apply transformation before mirroring
+  ${c('cyan', '-q, --quiet')}    Suppress status messages
+  ${c('cyan', '--json')}         Output sync events as JSON
+
+${c('yellow', 'TRANSFORM OPTIONS:')}
+  ${c('cyan', '--demote')}       Demote headers by one level in target
+  ${c('cyan', '--promote')}      Promote headers by one level in target
+  ${c('cyan', '--shift <n>')}    Shift header levels by n in target
+  ${c('cyan', '--prepend <text>')} Add text at start of target document
+  ${c('cyan', '--append <text>')}  Add text at end of target document
+  ${c('cyan', '--wrap-prefix <p>')} Wrap each paragraph with prefix
+  ${c('cyan', '--wrap-suffix <s>')} Wrap each paragraph with suffix
+
+${c('yellow', 'CONFLICT RESOLUTION (bidirectional mode):')}
+  When both documents are edited simultaneously:
+  
+  1. ${c('green', 'Auto-merge:')} If edits are in different regions, both are preserved
+  2. ${c('green', 'Source wins:')} If edits overlap, source document takes priority
+  
+  This ensures source remains authoritative while allowing target edits
+  when they don't conflict. Events emitted during conflicts:
+  
+  ${c('cyan', 'merge')}     - Changes from both docs merged successfully
+  ${c('cyan', 'conflict')} - Overlap detected, source content applied
+
+${c('yellow', 'EXAMPLES:')}
+  ${c('dim', '# One-way mirror: source changes flow to target')}
+  hedgesync mirror https://md.example.com/source https://md.example.com/target
+
+  ${c('dim', '# Two-way sync: changes in either doc sync to the other')}
+  hedgesync mirror https://md.example.com/doc1 https://md.example.com/doc2 --bidirectional
+
+  ${c('dim', '# Mirror with header demotion (for embedding as subsection)')}
+  hedgesync mirror https://md.example.com/src https://md.example.com/dest --demote
+
+  ${c('dim', '# Cross-server mirroring with different cookies')}
+  hedgesync mirror https://md1.example.com/abc https://md2.example.com/xyz \\
+    --source-cookie "session=xxx" --target-cookie "session=yyy"
+
+  ${c('dim', '# Mirror with prefix/suffix for commenting')}
+  hedgesync mirror https://md.example.com/draft https://md.example.com/review \\
+    --wrap-prefix "> " --wrap-suffix "\\n<!-- end quote -->"
+
+${c('yellow', 'USE CASES:')}
+  - Keep backup document in sync automatically
+  - Mirror public doc to internal wiki
+  - Create derivative documents with transformations
+  - Collaborative review (bidirectional sync)
+  - Cross-server document replication
 `,
 
   transform: `
@@ -1007,6 +1093,7 @@ ${c('yellow', 'COMMANDS:')}
   ${c('green', 'authors')}     List document authors and contributions
   ${c('green', 'transform')}   Transform document with pandoc
   ${c('green', 'macro')}       Run macros on document (expand triggers)
+  ${c('green', 'mirror')}      Sync two documents in real-time
   ${c('green', 'help')}        Show help (use 'help <command>' for details)
 
 ${c('yellow', 'HTTP API COMMANDS:')} ${c('dim', '(no realtime connection required)')}
@@ -1733,6 +1820,581 @@ async function cmdWatch(args: ParsedArgs): Promise<void> {
   await new Promise(() => {});
 }
 
+// Command: mirror
+async function cmdMirror(args: ParsedArgs): Promise<void> {
+  // Parse URLs
+  const sourceUrl = args.positional[0];
+  const targetUrl = args.positional[1];
+  
+  if (!sourceUrl || !targetUrl) {
+    console.error(c('red', 'Error: Both source and target URLs are required'));
+    console.error(c('yellow', 'Usage: hedgesync mirror <source-url> <target-url> [options]'));
+    process.exit(1);
+  }
+  
+  const sourceParsed = parseUrl(sourceUrl);
+  const targetParsed = parseUrl(targetUrl);
+  
+  if (!sourceParsed) {
+    console.error(c('red', `Invalid source URL: ${sourceUrl}`));
+    process.exit(1);
+  }
+  if (!targetParsed) {
+    console.error(c('red', `Invalid target URL: ${targetUrl}`));
+    process.exit(1);
+  }
+  
+  const quiet = args.options.quiet || args.options.q;
+  const jsonOutput = args.options.json;
+  const bidirectional = args.options.bidirectional;
+  
+  // Cookie handling
+  const sharedCookie = (args.options.cookie || args.options.c || process.env.HEDGEDOC_COOKIE) as string | undefined;
+  const sourceCookie = args.options['source-cookie'] as string || sharedCookie;
+  const targetCookie = args.options['target-cookie'] as string || sharedCookie;
+  const headers = parseHeaders(args);
+  
+  // Transform options
+  const demote = args.options.demote;
+  const promote = args.options.promote;
+  const headerShift = args.options.shift ? parseInt(args.options.shift as string, 10) : 0;
+  const prependText = args.options.prepend as string || '';
+  const appendText = args.options.append as string || '';
+  const wrapPrefix = args.options['wrap-prefix'] as string || '';
+  const wrapSuffix = args.options['wrap-suffix'] as string || '';
+  
+  // Helper function to apply transforms
+  const applyTransform = (content: string): string => {
+    let result = content;
+    
+    // Header level shifts
+    if (demote || headerShift > 0) {
+      const shift = demote ? 1 : headerShift;
+      result = result.replace(/^(#{1,6})\s/gm, (match, hashes) => {
+        const newLevel = Math.min(6, hashes.length + shift);
+        return '#'.repeat(newLevel) + ' ';
+      });
+    } else if (promote || headerShift < 0) {
+      const shift = promote ? 1 : Math.abs(headerShift);
+      result = result.replace(/^(#{1,6})\s/gm, (match, hashes) => {
+        const newLevel = Math.max(1, hashes.length - shift);
+        return '#'.repeat(newLevel) + ' ';
+      });
+    }
+    
+    // Wrap paragraphs
+    if (wrapPrefix || wrapSuffix) {
+      const lines = result.split('\n');
+      result = lines.map(line => {
+        // Skip empty lines and special markdown elements
+        if (!line.trim() || line.match(/^[#\-*+>|`]/) || line.match(/^[0-9]+\./)) {
+          return line;
+        }
+        return wrapPrefix + line + wrapSuffix;
+      }).join('\n');
+    }
+    
+    // Prepend/append
+    if (prependText) {
+      result = prependText + result;
+    }
+    if (appendText) {
+      result = result + appendText;
+    }
+    
+    return result;
+  };
+  
+  // Determine if we need transforms
+  const hasTransform = demote || promote || headerShift !== 0 || 
+                      prependText || appendText || wrapPrefix || wrapSuffix;
+  
+  // Output helper
+  const output = (eventType: string, data: object) => {
+    const timestamp = new Date().toISOString();
+    if (jsonOutput) {
+      console.log(JSON.stringify({ event: eventType, timestamp, ...data }));
+    } else if (!quiet) {
+      console.error(c('dim', `[${timestamp}]`) + ' ' + c('cyan', eventType) + ' ' + 
+        Object.entries(data).map(([k, v]) => `${c('yellow', k)}=${v}`).join(' '));
+    }
+  };
+  
+  if (!quiet && !jsonOutput) {
+    console.error(c('green', '═'.repeat(60)));
+    console.error(c('green', '  HedgeDoc Mirror'));
+    console.error(c('green', '═'.repeat(60)));
+    console.error(`  ${c('cyan', 'Source:')} ${sourceUrl}`);
+    console.error(`  ${c('cyan', 'Target:')} ${targetUrl}`);
+    console.error(`  ${c('cyan', 'Mode:')} ${bidirectional ? 'Bidirectional' : 'One-way (source → target)'}`);
+    if (hasTransform) {
+      console.error(`  ${c('cyan', 'Transform:')} enabled`);
+    }
+    console.error(c('green', '─'.repeat(60)));
+    console.error(c('dim', 'Press Ctrl+C to stop'));
+    console.error();
+  }
+  
+  // Connect to both documents
+  const sourceClient = new HedgeDocClient({
+    serverUrl: sourceParsed.serverUrl,
+    noteId: sourceParsed.noteId,
+    cookie: sourceCookie,
+    headers
+  });
+  
+  const targetClient = new HedgeDocClient({
+    serverUrl: targetParsed.serverUrl,
+    noteId: targetParsed.noteId,
+    cookie: targetCookie,
+    headers
+  });
+  
+  // Track sync state to prevent loops
+  let syncing = false;
+  let sourceRevision = 0;
+  let targetRevision = 0;
+  
+  // Track if initial sync is complete
+  let sourceReady = false;
+  let targetReady = false;
+  let initialSyncDone = false;
+  
+  // Connect to source (wait for both ready and refresh events to get permission)
+  await new Promise<void>((resolve, reject) => {
+    let gotReady = false;
+    let gotRefresh = false;
+    
+    const checkDone = () => {
+      if (gotReady && gotRefresh) {
+        sourceReady = true;
+        sourceRevision = sourceClient.getRevision();
+        const info = sourceClient.getNoteInfo();
+        output('connected', { document: 'source', revision: sourceRevision, permission: info.permission });
+        
+        // In bidirectional mode, check if we can edit the source too
+        if (bidirectional && !sourceClient.canEdit()) {
+          const permission = info.permission;
+          let msg = `Cannot edit source note in bidirectional mode (permission: ${permission || 'unknown'}).`;
+          if (permission === 'editable' || permission === 'limited') {
+            msg += ' This note requires authentication. Use --cookie or --source-cookie.';
+          } else if (permission === 'locked' || permission === 'private' || permission === 'protected') {
+            msg += ' Only the owner can edit this note.';
+          }
+          reject(new Error(msg));
+          return;
+        }
+        resolve();
+      }
+    };
+    
+    sourceClient.on('error', reject);
+    sourceClient.once('ready', () => {
+      gotReady = true;
+      checkDone();
+    });
+    sourceClient.once('refresh', () => {
+      gotRefresh = true;
+      checkDone();
+    });
+    sourceClient.connect();
+  });
+  
+  // Connect to target (wait for both ready and refresh events to get permission)
+  await new Promise<void>((resolve, reject) => {
+    let gotReady = false;
+    let gotRefresh = false;
+    
+    const checkDone = () => {
+      if (gotReady && gotRefresh) {
+        targetReady = true;
+        targetRevision = targetClient.getRevision();
+        const info = targetClient.getNoteInfo();
+        output('connected', { document: 'target', revision: targetRevision, permission: info.permission });
+        
+        // Check if we can edit the target
+        if (!targetClient.canEdit()) {
+          const permission = info.permission;
+          let msg = `Cannot edit target note (permission: ${permission || 'unknown'}).`;
+          if (permission === 'editable' || permission === 'limited') {
+            msg += ' This note requires authentication. Use --cookie or --target-cookie.';
+          } else if (permission === 'locked' || permission === 'private' || permission === 'protected') {
+            msg += ' Only the owner can edit this note.';
+          }
+          reject(new Error(msg));
+          return;
+        }
+        resolve();
+      }
+    };
+    
+    targetClient.on('error', reject);
+    targetClient.once('ready', () => {
+      gotReady = true;
+      checkDone();
+    });
+    targetClient.once('refresh', () => {
+      gotRefresh = true;
+      checkDone();
+    });
+    targetClient.connect();
+  });
+  
+  // Initial sync: copy source content to target
+  const sourceContent = sourceClient.getDocument();
+  const targetContent = targetClient.getDocument();
+  
+  if (sourceContent !== targetContent) {
+    const transformed = hasTransform ? applyTransform(sourceContent) : sourceContent;
+    if (transformed !== targetContent) {
+      syncing = true;
+      try {
+        targetClient.setContent(transformed);
+        output('initial-sync', { 
+          direction: 'source→target', 
+          sourceLength: sourceContent.length,
+          targetLength: transformed.length
+        });
+      } catch (err) {
+        output('error', { phase: 'initial-sync', message: (err as Error).message });
+      }
+      // Wait a bit for sync to apply
+      await new Promise(resolve => setTimeout(resolve, 100));
+      syncing = false;
+    }
+  }
+  initialSyncDone = true;
+  output('ready', { mode: bidirectional ? 'bidirectional' : 'one-way' });
+  
+  // Debounce timers for sync operations to avoid rapid back-and-forth
+  let sourceDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let targetDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const SYNC_DEBOUNCE_MS = 150; // Wait for edits to settle before syncing
+  
+  // Track last sync times to implement cooldown
+  let lastSourceSync = 0;
+  let lastTargetSync = 0;
+  const SYNC_COOLDOWN_MS = 200; // Minimum time between syncs in same direction
+  
+  // Track last known synced content for conflict detection
+  let lastSyncedContent = sourceClient.getDocument();
+  
+  // Simple diff function to find common prefix/suffix
+  const findCommonPrefixLength = (a: string, b: string): number => {
+    let i = 0;
+    const minLen = Math.min(a.length, b.length);
+    while (i < minLen && a[i] === b[i]) i++;
+    return i;
+  };
+  
+  const findCommonSuffixLength = (a: string, b: string, prefixLen: number): number => {
+    let i = 0;
+    const maxSuffix = Math.min(a.length - prefixLen, b.length - prefixLen);
+    while (i < maxSuffix && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
+    return i;
+  };
+  
+  // Try to merge changes from both sides
+  // Returns merged content, or null if merge not possible
+  const tryMerge = (base: string, source: string, target: string): string | null => {
+    // If either matches base, no conflict
+    if (source === base) return target;
+    if (target === base) return source;
+    
+    // Find what changed in source relative to base
+    const srcPrefixLen = findCommonPrefixLength(base, source);
+    const srcSuffixLen = findCommonSuffixLength(base, source, srcPrefixLen);
+    const srcChangeStart = srcPrefixLen;
+    const srcChangeEndBase = base.length - srcSuffixLen;
+    const srcChangeEndNew = source.length - srcSuffixLen;
+    
+    // Find what changed in target relative to base
+    const tgtPrefixLen = findCommonPrefixLength(base, target);
+    const tgtSuffixLen = findCommonSuffixLength(base, target, tgtPrefixLen);
+    const tgtChangeStart = tgtPrefixLen;
+    const tgtChangeEndBase = base.length - tgtSuffixLen;
+    
+    // Check if changes are in non-overlapping regions
+    // Source change: [srcChangeStart, srcChangeEndBase) in base
+    // Target change: [tgtChangeStart, tgtChangeEndBase) in base
+    
+    const srcRange = { start: srcChangeStart, end: srcChangeEndBase };
+    const tgtRange = { start: tgtChangeStart, end: tgtChangeEndBase };
+    
+    // Check for overlap
+    const overlap = !(srcRange.end <= tgtRange.start || tgtRange.end <= srcRange.start);
+    
+    if (!overlap && srcRange.start !== tgtRange.start) {
+      // Non-overlapping changes - we can merge!
+      // Apply both changes, source first if it comes earlier
+      if (srcRange.start < tgtRange.start) {
+        // Source change is earlier
+        const sourceChange = source.substring(srcChangeStart, srcChangeEndNew);
+        const targetChange = target.substring(tgtChangeStart, target.length - tgtSuffixLen);
+        
+        // Adjust target positions based on source change
+        const shift = (srcChangeEndNew - srcChangeStart) - (srcChangeEndBase - srcChangeStart);
+        
+        return base.substring(0, srcChangeStart) + 
+               sourceChange + 
+               base.substring(srcChangeEndBase, tgtChangeStart) +
+               targetChange +
+               base.substring(tgtChangeEndBase);
+      } else {
+        // Target change is earlier
+        const sourceChange = source.substring(srcChangeStart, srcChangeEndNew);
+        const targetChange = target.substring(tgtChangeStart, target.length - tgtSuffixLen);
+        
+        return base.substring(0, tgtChangeStart) + 
+               targetChange + 
+               base.substring(tgtChangeEndBase, srcChangeStart) +
+               sourceChange +
+               base.substring(srcChangeEndBase);
+      }
+    }
+    
+    // Changes overlap - cannot auto-merge
+    return null;
+  };
+  
+  // Safe sync helper with retry and conflict resolution
+  // Source always has priority in conflicts
+  const syncToTarget = async (
+    sourceContent: string,
+    retries: number = 3
+  ): Promise<boolean> => {
+    const transformed = hasTransform ? applyTransform(sourceContent) : sourceContent;
+    
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const currentTarget = targetClient.getDocument();
+        if (transformed === currentTarget) {
+          return true; // Already in sync
+        }
+        
+        targetClient.setContent(transformed);
+        lastSyncedContent = sourceContent;
+        return true;
+      } catch (err) {
+        const msg = (err as Error).message || '';
+        if (msg.includes('base length') || msg.includes('target length')) {
+          // OT error - wait and retry
+          output('conflict', { 
+            direction: 'source→target', 
+            attempt: attempt + 1, 
+            message: 'OT conflict, retrying...' 
+          });
+          await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+          continue;
+        }
+        output('error', { direction: 'source→target', message: msg });
+        return false;
+      }
+    }
+    
+    output('error', { 
+      direction: 'source→target', 
+      message: 'Failed after retries, source content will be reapplied on next change' 
+    });
+    return false;
+  };
+  
+  // Sync from target to source, with merge attempt
+  const syncToSource = async (
+    targetContent: string,
+    retries: number = 3
+  ): Promise<boolean> => {
+    const currentSource = sourceClient.getDocument();
+    
+    // If source hasn't changed from last sync, just apply target changes
+    if (currentSource === lastSyncedContent) {
+      for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+          sourceClient.setContent(targetContent);
+          lastSyncedContent = targetContent;
+          return true;
+        } catch (err) {
+          const msg = (err as Error).message || '';
+          if (msg.includes('base length') || msg.includes('target length')) {
+            await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+            continue;
+          }
+          output('error', { direction: 'target→source', message: msg });
+          return false;
+        }
+      }
+      return false;
+    }
+    
+    // Source has also changed - try to merge
+    const merged = tryMerge(lastSyncedContent, currentSource, targetContent);
+    
+    if (merged !== null) {
+      // Merge successful!
+      output('merge', { 
+        direction: 'bidirectional',
+        message: 'Changes merged successfully'
+      });
+      
+      // Apply merged content to both
+      for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+          sourceClient.setContent(merged);
+          lastSyncedContent = merged;
+          
+          // Also update target with merged content
+          const transformedMerged = hasTransform ? applyTransform(merged) : merged;
+          targetClient.setContent(transformedMerged);
+          return true;
+        } catch (err) {
+          const msg = (err as Error).message || '';
+          if (msg.includes('base length') || msg.includes('target length')) {
+            await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+            continue;
+          }
+          break;
+        }
+      }
+    }
+    
+    // Merge failed or not possible - source wins
+    output('conflict', { 
+      direction: 'target→source',
+      resolution: 'source-wins',
+      message: 'Concurrent edit conflict, source content takes priority'
+    });
+    
+    // Re-sync source to target (source is authoritative)
+    return syncToTarget(currentSource);
+  };
+
+  // Handle source changes -> mirror to target
+  sourceClient.on('change', () => {
+    if (syncing || !initialSyncDone) return;
+    
+    // Clear any pending debounce timer
+    if (sourceDebounceTimer) {
+      clearTimeout(sourceDebounceTimer);
+    }
+    
+    // Debounce: wait for edits to settle before syncing
+    sourceDebounceTimer = setTimeout(async () => {
+      sourceDebounceTimer = null;
+      
+      // Check cooldown
+      const now = Date.now();
+      if (now - lastSourceSync < SYNC_COOLDOWN_MS) {
+        return; // Still in cooldown
+      }
+      
+      if (syncing) return; // Another sync started while debouncing
+      
+      const newSourceContent = sourceClient.getDocument();
+      const currentTargetContent = targetClient.getDocument();
+      const transformed = hasTransform ? applyTransform(newSourceContent) : newSourceContent;
+      
+      // Only sync if content actually differs
+      if (transformed !== currentTargetContent) {
+        syncing = true;
+        const success = await syncToTarget(newSourceContent);
+        if (success) {
+          lastSourceSync = Date.now();
+          output('sync', { 
+            direction: 'source→target', 
+            length: transformed.length 
+          });
+        }
+        // Wait a bit for operation to complete
+        await new Promise(resolve => setTimeout(resolve, 50));
+        syncing = false;
+      }
+    }, SYNC_DEBOUNCE_MS);
+  });
+  
+  // Handle target changes -> mirror to source (bidirectional only)
+  if (bidirectional) {
+    targetClient.on('change', () => {
+      if (syncing || !initialSyncDone) return;
+      
+      // Clear any pending debounce timer
+      if (targetDebounceTimer) {
+        clearTimeout(targetDebounceTimer);
+      }
+      
+      // Debounce: wait for edits to settle before syncing
+      targetDebounceTimer = setTimeout(async () => {
+        targetDebounceTimer = null;
+        
+        // Check cooldown
+        const now = Date.now();
+        if (now - lastTargetSync < SYNC_COOLDOWN_MS) {
+          return; // Still in cooldown
+        }
+        
+        if (syncing) return; // Another sync started while debouncing
+        
+        // Note: transforms don't apply in reverse (target is authoritative for its content)
+        const newTargetContent = targetClient.getDocument();
+        const currentSourceContent = sourceClient.getDocument();
+        
+        // Only sync if content actually differs (and no transform, otherwise one-way only)
+        if (!hasTransform && newTargetContent !== currentSourceContent) {
+          syncing = true;
+          const success = await syncToSource(newTargetContent);
+          if (success) {
+            lastTargetSync = Date.now();
+            output('sync', { 
+              direction: 'target→source', 
+              length: newTargetContent.length 
+            });
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
+          syncing = false;
+        }
+      }, SYNC_DEBOUNCE_MS);
+    });
+    
+    if (hasTransform) {
+      console.error(c('yellow', 'Warning: Transforms are one-way only. Target changes will not sync back to source with transforms applied.'));
+    }
+  }
+  
+  // Handle errors
+  sourceClient.on('error', (err) => {
+    output('error', { document: 'source', message: (err as Error).message });
+  });
+  targetClient.on('error', (err) => {
+    output('error', { document: 'target', message: (err as Error).message });
+  });
+  
+  // Handle disconnects
+  sourceClient.on('disconnect', () => {
+    output('disconnect', { document: 'source' });
+    if (!quiet && !jsonOutput) {
+      console.error(c('yellow', 'Source disconnected, attempting to reconnect...'));
+    }
+  });
+  targetClient.on('disconnect', () => {
+    output('disconnect', { document: 'target' });
+    if (!quiet && !jsonOutput) {
+      console.error(c('yellow', 'Target disconnected, attempting to reconnect...'));
+    }
+  });
+  
+  // Cleanup on exit
+  process.on('SIGINT', () => {
+    if (!quiet && !jsonOutput) {
+      console.error(c('cyan', '\nMirror stopped.'));
+    }
+    sourceClient.disconnect();
+    targetClient.disconnect();
+    process.exit(0);
+  });
+  
+  // Keep the process alive
+  await new Promise(() => {});
+}
+
 // Command: info
 async function cmdInfo(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
@@ -2008,6 +2670,9 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
   const streamOutput = args.options.stream || args.options.s;
   const trackState = args.options['track-state'] || args.options.T;
   const userFilterStr = args.options['user-filter'] || args.options.U;
+  const sectionHeadingStr = args.options['section-heading'];
+  const sectionLinesStr = args.options['section-lines'];
+  const sectionRegexStr = args.options['section-regex'];
   
   // Parse user filter regex
   let userFilter: RegExp | undefined;
@@ -2023,8 +2688,64 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
     }
   }
   
+  // Parse section filter options
+  type SectionFilter = 
+    | { type: 'heading'; pattern: RegExp; untilNextHeading?: boolean; stopAtLevel?: number }
+    | { type: 'lines'; start: number; end?: number }
+    | { type: 'regex'; start: RegExp; end: RegExp; global?: boolean };
+  
+  let sectionFilter: SectionFilter | undefined;
+  
+  if (sectionHeadingStr && typeof sectionHeadingStr === 'string') {
+    try {
+      sectionFilter = { type: 'heading', pattern: new RegExp(sectionHeadingStr) };
+      if (!quiet) {
+        console.error(c('cyan', `Section filter: headings matching /${sectionHeadingStr}/`));
+      }
+    } catch (e) {
+      console.error(c('red', `Invalid section-heading regex: ${sectionHeadingStr}`));
+      process.exit(1);
+    }
+  } else if (sectionLinesStr && typeof sectionLinesStr === 'string') {
+    const lineMatch = sectionLinesStr.match(/^(\d+)(?:-(\d*))?$/);
+    if (!lineMatch) {
+      console.error(c('red', `Invalid section-lines format: ${sectionLinesStr}`));
+      console.error(c('yellow', 'Expected format: START-END (e.g., 10-50) or START- (e.g., 100-)'));
+      process.exit(1);
+    }
+    const startLine = parseInt(lineMatch[1], 10);
+    const endLine = lineMatch[2] ? (lineMatch[2] === '' ? undefined : parseInt(lineMatch[2], 10)) : startLine;
+    sectionFilter = { type: 'lines', start: startLine, end: endLine };
+    if (!quiet) {
+      console.error(c('cyan', `Section filter: lines ${startLine}${endLine !== undefined ? `-${endLine}` : ' to end'}`));
+    }
+  } else if (sectionRegexStr && typeof sectionRegexStr === 'string') {
+    // Format: 'startPattern'/'endPattern' or startPattern/endPattern
+    const regexMatch = sectionRegexStr.match(/^'([^']+)'\s*\/\s*'([^']+)'$/) ||
+                       sectionRegexStr.match(/^([^\/]+)\/(.+)$/);
+    if (!regexMatch) {
+      console.error(c('red', `Invalid section-regex format: ${sectionRegexStr}`));
+      console.error(c('yellow', "Expected format: 'start'/'end' or start/end"));
+      process.exit(1);
+    }
+    try {
+      sectionFilter = {
+        type: 'regex',
+        start: new RegExp(regexMatch[1]),
+        end: new RegExp(regexMatch[2]),
+        global: true
+      };
+      if (!quiet) {
+        console.error(c('cyan', `Section filter: regex /${regexMatch[1]}/ to /${regexMatch[2]}/`));
+      }
+    } catch (e) {
+      console.error(c('red', `Invalid section-regex patterns: ${sectionRegexStr}`));
+      process.exit(1);
+    }
+  }
+  
   // Create macro engine with options
-  const engine = new MacroEngine(client, { userFilter });
+  const engine = new MacroEngine(client, { userFilter, sectionFilter });
   
   // Built-in macros
   if (args.options['built-in'] || args.options.b) {
@@ -3233,6 +3954,9 @@ async function main(): Promise<void> {
         break;
       case 'macro':
         await cmdMacro(args);
+        break;
+      case 'mirror':
+        await cmdMirror(args);
         break;
       case 'exec':
         await cmdExec(args);
