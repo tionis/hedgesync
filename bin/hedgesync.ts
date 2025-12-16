@@ -17,7 +17,7 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithClientCredentials, loginWithDeviceCode, AuthError } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithClientCredentials, loginWithDeviceCode, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import type { DeviceCodeInfo } from '../src/auth.js';
 import { readFileSync, existsSync, writeFileSync } from 'fs';
@@ -250,18 +250,33 @@ function getAPIOptions(args: ParsedArgs, explicitUrl?: string): APIOptions | nul
   }
   
   try {
-    // If this looks like a full note URL, extract just the server
-    const parsed = parseUrl(url);
-    if (parsed) {
-      return {
-        serverUrl: parsed.serverUrl,
-        cookie,
-        headers: Object.keys(headers).length > 0 ? headers : undefined,
-      };
+    // For commands that don't need a note ID (like 'me', 'status', 'config'),
+    // preserve the full URL path as the server URL.
+    // Only strip the last segment if it looks like a note ID (not a common path like 'hedgedoc')
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(Boolean);
+    
+    // If the last segment looks like a note ID (random alphanumeric),
+    // strip it and use the rest as server URL
+    if (pathParts.length > 0) {
+      const lastSegment = pathParts[pathParts.length - 1];
+      // Note IDs are typically random-looking (alphanumeric, often 20+ chars)
+      // Common server paths are words like 'hedgedoc', 'md', 'notes', etc.
+      const looksLikeNoteId = /^[a-zA-Z0-9_-]{10,}$/.test(lastSegment) && 
+                             !/^(hedgedoc|codimd|hackmd|md|notes|pad|edit|etherpad)$/i.test(lastSegment);
+      
+      if (looksLikeNoteId && pathParts.length > 1) {
+        // Strip the note ID, keep the base path
+        const basePath = '/' + pathParts.slice(0, -1).join('/');
+        return {
+          serverUrl: `${urlObj.protocol}//${urlObj.host}${basePath}`,
+          cookie,
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+        };
+      }
     }
     
-    // Otherwise, assume it's just a server URL
-    const urlObj = new URL(url);
+    // Use the full URL (including path) as the server URL
     return {
       serverUrl: `${urlObj.protocol}//${urlObj.host}${urlObj.pathname.replace(/\/$/, '')}`,
       cookie,
@@ -905,9 +920,10 @@ ${c('yellow', 'METHODS:')}
   ${c('cyan', 'email')}              Email/password authentication (default)
   ${c('cyan', 'ldap')}               LDAP username/password authentication
   ${c('cyan', 'oidc')}               OIDC/OAuth2 browser authentication
-  ${c('cyan', 'client-credentials')} OAuth2 client credentials (M2M, OAuth 2.1) ${c('green', '★')}
-  ${c('cyan', 'device-code')}        OAuth2 device code flow (RFC 8628) ${c('green', '★')}
-  ${c('cyan', 'oauth2-password')}    OAuth2 password grant ${c('yellow', '(deprecated in OAuth 2.1)')}
+  ${c('cyan', 'device-code-oidc')}   Device code + OIDC combined flow ${c('green', '★ FOR AUTOMATION')}
+  ${c('cyan', 'client-credentials')} OAuth2 client credentials (M2M, OAuth 2.1)
+  ${c('cyan', 'device-code')}        OAuth2 device code flow (RFC 8628) ${c('yellow', '(limited support)')}
+  ${c('cyan', 'oauth2-password')}    OAuth2 password grant ${c('yellow', '(deprecated)')}
 
 ${c('yellow', 'COMMON OPTIONS:')}
   ${c('cyan', '-m, --method')}       Auth method (default: email)
@@ -926,7 +942,7 @@ ${c('yellow', 'CLIENT-CREDENTIALS OPTIONS:')} ${c('dim', '(OAuth 2.1 - for M2M/s
   ${c('cyan', '--client-secret')}    OAuth2 client secret (required)
   ${c('cyan', '--scopes')}           Comma-separated scopes
 
-${c('yellow', 'DEVICE-CODE OPTIONS:')} ${c('dim', '(OAuth 2.1 - for CLI with user authorization)')}
+${c('yellow', 'DEVICE-CODE / DEVICE-CODE-OIDC OPTIONS:')} ${c('dim', '(for CLI with user authorization)')}
   ${c('cyan', '--device-url')}       OAuth2 device authorization endpoint (required)
   ${c('cyan', '--token-url')}        OAuth2 token endpoint URL (required)
   ${c('cyan', '--client-id')}        OAuth2 client ID (required)
@@ -944,28 +960,28 @@ ${c('yellow', 'EXAMPLES:')}
   ${c('dim', '# OIDC (opens browser):')}
   hedgesync login https://md.example.com --method oidc
   
-  ${c('dim', '# OAuth2 Client Credentials (for bots/service accounts):')}
-  hedgesync login https://md.example.com --method client-credentials \\
-    --token-url https://auth.example.com/oauth/token \\
-    --client-id my-bot --client-secret my-secret
-  
-  ${c('dim', '# OAuth2 Device Code (for CLI with user auth):')}
-  hedgesync login https://md.example.com --method device-code \\
-    --device-url https://auth.example.com/oauth/device/code \\
-    --token-url https://auth.example.com/oauth/token \\
+  ${c('dim', '# Device Code + OIDC (RECOMMENDED for automation - one-time browser auth):')}
+  hedgesync login https://md.example.com --method device-code-oidc \\
+    --device-url https://auth.example.com/application/o/device/ \\
+    --token-url https://auth.example.com/application/o/token/ \\
     --client-id my-cli-app
   
   ${c('dim', '# Get cookie in JSON format for scripting:')}
   hedgesync login https://md.example.com -u user@example.com -p secret --json
 
-${c('yellow', 'OAUTH 2.1 MIGRATION NOTES:')}
-  The password grant (oauth2-password) is deprecated in OAuth 2.1. Use instead:
+${c('yellow', 'AUTOMATION NOTES:')}
+  For automated scripts and bots, use one of these approaches:
   
-  ${c('cyan', 'client-credentials')} - For pure machine-to-machine (M2M) auth where
-    the client itself is the resource owner (no user context needed).
-    
-  ${c('cyan', 'device-code')} - For CLI tools that need user authorization but can't
-    easily open a browser. The user authorizes on a separate device.
+  1. ${c('bold', 'LDAP')} - If HedgeDoc has LDAP enabled:
+     hedgesync login <url> --method ldap -u <user> -p <pass>
+  
+  2. ${c('bold', 'device-code-oidc')} - One-time auth, then cache the session:
+     - User authenticates once via device code flow
+     - Session cookie can be cached and reused until expiry
+     - Works with any OIDC/OAuth2 provider
+  
+  3. ${c('bold', 'Email')} - If HedgeDoc has email auth enabled:
+     hedgesync login <url> -u <email> -p <password>
 `
 };
 
@@ -2871,7 +2887,7 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 // Command: login (authenticate and get session cookie)
 async function cmdLogin(args: ParsedArgs): Promise<void> {
-  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'client-credentials', 'device-code'];
+  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'client-credentials', 'device-code', 'device-code-oidc'];
   
   // Support both syntaxes:
   // hedgesync login <method> <server-url>  (method as first positional)
@@ -2902,7 +2918,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
       console.error(c('red', 'Error: Server URL required'));
       console.error('Usage: hedgesync login <method> <server-url> [options]');
       console.error('       hedgesync login <server-url> --method <method> [options]');
-      console.error('Methods: email, ldap, oidc, client-credentials, device-code');
+      console.error('Methods: email, ldap, oidc, client-credentials, device-code, device-code-oidc');
     }
     process.exit(1);
   }
@@ -3031,9 +3047,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
       
       case 'client-credentials':
       case 'client-creds':
-      case 'm2m':
-      case 'service-account':
-      case 'bot': {
+      case 'm2m': {
         // OAuth2 Client Credentials flow (OAuth 2.1 compliant)
         const tokenUrl = args.options['token-url'] as string;
         const clientId = args.options['client-id'] as string;
@@ -3131,12 +3145,82 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
         break;
       }
       
+      case 'device-code-oidc': {
+        // Device Code + OIDC combined flow - authenticates via device code, then completes OAuth
+        const deviceAuthUrl = args.options['device-url'] as string;
+        const tokenUrl = args.options['token-url'] as string;
+        const clientId = args.options['client-id'] as string;
+        const clientSecret = args.options['client-secret'] as string | undefined;
+        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : ['openid', 'profile', 'email'];
+        
+        if (!deviceAuthUrl || !tokenUrl || !clientId) {
+          if (jsonOutput) {
+            console.log(JSON.stringify({ 
+              success: false, 
+              error: 'Device code OIDC flow requires: --device-url, --token-url, --client-id' 
+            }, null, 2));
+          } else {
+            console.error(c('red', 'Error: Device code OIDC flow requires device auth URL, token URL, and client ID'));
+            console.error('Usage: hedgesync login <server-url> --method device-code-oidc \\');
+            console.error('         --device-url <url> --token-url <url> --client-id <id>');
+          }
+          process.exit(1);
+        }
+        
+        const deviceTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 300000;
+        
+        const onUserCode = jsonOutput ? undefined : (info: DeviceCodeInfo) => {
+          console.log();
+          console.log(c('bold', '══════════════════════════════════════════════════'));
+          console.log(c('bold', '  Device Authorization Required'));
+          console.log(c('bold', '══════════════════════════════════════════════════'));
+          console.log();
+          console.log(`  ${c('cyan', 'Step 1:')} Open this URL in your browser:`);
+          console.log(`          ${c('green', info.verificationUriComplete || info.verificationUri)}`);
+          console.log();
+          console.log(`  ${c('cyan', 'Step 2:')} Enter this code:`);
+          console.log(`          ${c('bold', c('yellow', info.userCode))}`);
+          console.log();
+          console.log(`  ${c('cyan', '⚠️  IMPORTANT:')} After authorizing, ${c('bold', 'DO NOT close your browser!')}`);
+          console.log(`          We will automatically complete the HedgeDoc OAuth flow.`);
+          console.log();
+          console.log(`  ${c('dim', `Code expires in ${info.expiresIn} seconds...`)}`);
+          console.log(c('bold', '══════════════════════════════════════════════════'));
+          console.log();
+        };
+        
+        // Function to open browser
+        const onOpenBrowser = async (url: string) => {
+          const { spawn } = await import('child_process');
+          const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+          spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
+        };
+        
+        if (!quiet && !jsonOutput) {
+          console.error(c('dim', 'Starting device authorization + OIDC flow...'));
+        }
+        
+        result = await loginWithDeviceCodeOIDC({
+          serverUrl,
+          deviceAuthUrl,
+          tokenUrl,
+          clientId,
+          clientSecret,
+          scopes,
+          headers,
+          timeout: deviceTimeout,
+          onUserCode,
+          onOpenBrowser
+        });
+        break;
+      }
+      
       default:
         if (jsonOutput) {
           console.log(JSON.stringify({ success: false, error: `Unknown auth method: ${method}` }, null, 2));
         } else {
           console.error(c('red', `Error: Unknown authentication method: ${method}`));
-          console.error('Supported methods: email, ldap, oidc, client-credentials, device-code, oauth2-password');
+          console.error('Supported methods: email, ldap, oidc, client-credentials, device-code, device-code-oidc, oauth2-password');
         }
         process.exit(1);
     }

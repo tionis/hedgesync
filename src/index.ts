@@ -57,6 +57,7 @@ export {
   loginWithOAuth2Password,
   loginWithClientCredentials,
   loginWithDeviceCode,
+  loginWithDeviceCodeOIDC,
   detectAuthMethods,
   AuthError 
 } from './auth.js';
@@ -68,6 +69,7 @@ export type {
   OAuth2PasswordOptions,
   OAuth2ClientCredentialsOptions,
   OAuth2DeviceCodeOptions,
+  DeviceCodeOIDCOptions,
   DeviceCodeInfo,
   AutoAuthOptions,
   ServerAuthMethods
