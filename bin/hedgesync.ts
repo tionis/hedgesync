@@ -17,7 +17,7 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithClientCredentials, loginWithDeviceCode, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import type { DeviceCodeInfo } from '../src/auth.js';
 import { readFileSync, existsSync, writeFileSync } from 'fs';
@@ -921,8 +921,6 @@ ${c('yellow', 'METHODS:')}
   ${c('cyan', 'ldap')}               LDAP username/password authentication
   ${c('cyan', 'oidc')}               OIDC/OAuth2 browser authentication
   ${c('cyan', 'device-code-oidc')}   Device code + OIDC combined flow ${c('green', '★ FOR AUTOMATION')}
-  ${c('cyan', 'client-credentials')} OAuth2 client credentials (M2M, OAuth 2.1)
-  ${c('cyan', 'device-code')}        OAuth2 device code flow (RFC 8628) ${c('yellow', '(limited support)')}
   ${c('cyan', 'oauth2-password')}    OAuth2 password grant ${c('yellow', '(deprecated)')}
 
 ${c('yellow', 'COMMON OPTIONS:')}
@@ -936,13 +934,7 @@ ${c('yellow', 'COMMON OPTIONS:')}
 ${c('yellow', 'OIDC OPTIONS:')}
   ${c('cyan', '--port')}             Local port for OIDC callback (default: random)
 
-${c('yellow', 'CLIENT-CREDENTIALS OPTIONS:')} ${c('dim', '(OAuth 2.1 - for M2M/service accounts)')}
-  ${c('cyan', '--token-url')}        OAuth2 token endpoint URL (required)
-  ${c('cyan', '--client-id')}        OAuth2 client ID (required)
-  ${c('cyan', '--client-secret')}    OAuth2 client secret (required)
-  ${c('cyan', '--scopes')}           Comma-separated scopes
-
-${c('yellow', 'DEVICE-CODE / DEVICE-CODE-OIDC OPTIONS:')} ${c('dim', '(for CLI with user authorization)')}
+${c('yellow', 'DEVICE-CODE-OIDC OPTIONS:')} ${c('dim', '(for CLI with user authorization)')}
   ${c('cyan', '--device-url')}       OAuth2 device authorization endpoint (required)
   ${c('cyan', '--token-url')}        OAuth2 token endpoint URL (required)
   ${c('cyan', '--client-id')}        OAuth2 client ID (required)
@@ -2887,7 +2879,7 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 // Command: login (authenticate and get session cookie)
 async function cmdLogin(args: ParsedArgs): Promise<void> {
-  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'client-credentials', 'device-code', 'device-code-oidc'];
+  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'device-code-oidc'];
   
   // Support both syntaxes:
   // hedgesync login <method> <server-url>  (method as first positional)
@@ -2918,7 +2910,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
       console.error(c('red', 'Error: Server URL required'));
       console.error('Usage: hedgesync login <method> <server-url> [options]');
       console.error('       hedgesync login <server-url> --method <method> [options]');
-      console.error('Methods: email, ldap, oidc, client-credentials, device-code, device-code-oidc');
+      console.error('Methods: email, ldap, oidc, device-code-oidc');
     }
     process.exit(1);
   }
@@ -3020,8 +3012,7 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
             console.error('Usage: hedgesync login <server-url> --method oauth2-password \\');
             console.error('         --token-url <url> --client-id <id> -u <user> -p <pass> [--client-secret <secret>]');
             console.error(c('yellow', '\nNote: Password grant is deprecated in OAuth 2.1. Consider using:'));
-            console.error(c('yellow', '  --method client-credentials  (for pure M2M, no user context)'));
-            console.error(c('yellow', '  --method device-code         (for CLI with user authorization)'));
+            console.error(c('yellow', '  --method device-code-oidc    (for CLI with user authorization)'));
           }
           process.exit(1);
         }
@@ -3041,106 +3032,6 @@ async function cmdLogin(args: ParsedArgs): Promise<void> {
           scopes,
           headers,
           timeout: requestTimeout
-        });
-        break;
-      }
-      
-      case 'client-credentials':
-      case 'client-creds':
-      case 'm2m': {
-        // OAuth2 Client Credentials flow (OAuth 2.1 compliant)
-        const tokenUrl = args.options['token-url'] as string;
-        const clientId = args.options['client-id'] as string;
-        const clientSecret = args.options['client-secret'] as string;
-        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : undefined;
-        
-        if (!tokenUrl || !clientId || !clientSecret) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ 
-              success: false, 
-              error: 'Client credentials flow requires: --token-url, --client-id, --client-secret' 
-            }, null, 2));
-          } else {
-            console.error(c('red', 'Error: Client credentials flow requires token URL, client ID, and client secret'));
-            console.error('Usage: hedgesync login <server-url> --method client-credentials \\');
-            console.error('         --token-url <url> --client-id <id> --client-secret <secret>');
-          }
-          process.exit(1);
-        }
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', `Authenticating via OAuth2 client credentials...`));
-        }
-        
-        result = await loginWithClientCredentials({
-          serverUrl,
-          tokenUrl,
-          clientId,
-          clientSecret,
-          scopes,
-          headers,
-          timeout: requestTimeout
-        });
-        break;
-      }
-      
-      case 'device-code':
-      case 'device': {
-        // OAuth2 Device Authorization Grant (RFC 8628)
-        const deviceAuthUrl = args.options['device-url'] as string;
-        const tokenUrl = args.options['token-url'] as string;
-        const clientId = args.options['client-id'] as string;
-        const clientSecret = args.options['client-secret'] as string | undefined;
-        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : undefined;
-        
-        if (!deviceAuthUrl || !tokenUrl || !clientId) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ 
-              success: false, 
-              error: 'Device code flow requires: --device-url, --token-url, --client-id' 
-            }, null, 2));
-          } else {
-            console.error(c('red', 'Error: Device code flow requires device auth URL, token URL, and client ID'));
-            console.error('Usage: hedgesync login <server-url> --method device-code \\');
-            console.error('         --device-url <url> --token-url <url> --client-id <id>');
-          }
-          process.exit(1);
-        }
-        
-        // Device code timeout defaults to 5 minutes
-        const deviceTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 300000;
-        
-        const onUserCode = jsonOutput ? undefined : (info: DeviceCodeInfo) => {
-          console.log();
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log(c('bold', '  Device Authorization Required'));
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log();
-          console.log(`  ${c('cyan', 'Step 1:')} Open this URL in your browser:`);
-          console.log(`          ${c('green', info.verificationUriComplete || info.verificationUri)}`);
-          console.log();
-          console.log(`  ${c('cyan', 'Step 2:')} Enter this code:`);
-          console.log(`          ${c('bold', c('yellow', info.userCode))}`);
-          console.log();
-          console.log(`  ${c('dim', `Code expires in ${info.expiresIn} seconds...`)}`);
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log();
-        };
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', 'Starting device authorization flow...'));
-        }
-        
-        result = await loginWithDeviceCode({
-          serverUrl,
-          deviceAuthUrl,
-          tokenUrl,
-          clientId,
-          clientSecret,
-          scopes,
-          headers,
-          timeout: deviceTimeout,
-          onUserCode
         });
         break;
       }

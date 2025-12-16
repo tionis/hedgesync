@@ -55,8 +55,6 @@ export {
   loginWithLDAP, 
   loginWithOIDC,
   loginWithOAuth2Password,
-  loginWithClientCredentials,
-  loginWithDeviceCode,
   loginWithDeviceCodeOIDC,
   detectAuthMethods,
   AuthError 
@@ -67,8 +65,6 @@ export type {
   LDAPAuthOptions,
   OIDCAuthOptions,
   OAuth2PasswordOptions,
-  OAuth2ClientCredentialsOptions,
-  OAuth2DeviceCodeOptions,
   DeviceCodeOIDCOptions,
   DeviceCodeInfo,
   AutoAuthOptions,

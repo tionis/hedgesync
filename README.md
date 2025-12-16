@@ -127,13 +127,10 @@ hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' 
 hedgesync login email https://md.example.com -u user@example.com -p password
 hedgesync login ldap https://md.example.com -u username -p password
 hedgesync login oidc https://md.example.com                    # Opens browser
-hedgesync login client-credentials https://md.example.com \    # M2M auth
-  --client-id my-client --client-secret secret \
-  --token-url https://sso.example.com/oauth/token
-hedgesync login device-code https://md.example.com \           # Device flow
+hedgesync login device-code-oidc https://md.example.com \      # CLI-friendly OIDC
   --client-id my-client \
-  --device-url https://sso.example.com/oauth/device \
-  --token-url https://sso.example.com/oauth/token
+  --device-url https://sso.example.com/application/o/device/ \
+  --token-url https://sso.example.com/application/o/token/
 ```
 
 ### Options
@@ -207,37 +204,12 @@ hedgesync login oidc https://md.example.com
 
 **Note:** Your identity provider must allow `http://127.0.0.1:*/callback` as a redirect URI. Most IdPs (including Authentik, Keycloak, etc.) support localhost redirects for CLI/development use cases.
 
-#### Method 5: OAuth2 Client Credentials (M2M)
+#### Method 5: Device Code + OIDC (CLI-friendly)
 
-**Recommended for automation and bots.** This is an OAuth 2.1 compliant machine-to-machine flow that doesn't require a browser or user interaction.
-
-```bash
-hedgesync login client-credentials https://md.example.com \
-  --client-id my-service-account \
-  --client-secret my-secret \
-  --token-url https://sso.example.com/application/o/token/
-
-# With custom scopes
-hedgesync login client-credentials https://md.example.com \
-  --client-id my-client \
-  --client-secret secret \
-  --token-url https://sso.example.com/oauth/token \
-  --scope "openid profile email"
-```
-
-**Requirements:**
-- Create a service account / machine application in your identity provider
-- The IdP must be configured to accept Client Credentials grants
-- HedgeDoc must accept the resulting access token
-
-#### Method 6: OAuth2 Device Code Flow (RFC 8628)
-
-> **⚠️ Note:** Device Code flow has limited support with HedgeDoc. HedgeDoc doesn't natively accept OAuth2 access tokens - it requires session cookies. This flow will only work if your reverse proxy (e.g., oauth2-proxy, Traefik with forward auth) can convert Bearer tokens to HedgeDoc sessions.
-
-For CLI tools and devices that can't open a browser directly. The user authorizes on a separate device:
+**Recommended for automation and scripts.** This combines device code flow (for user authentication without needing a local browser) with OIDC flow (for HedgeDoc session creation).
 
 ```bash
-hedgesync login device-code https://md.example.com \
+hedgesync login device-code-oidc https://md.example.com \
   --client-id my-cli-app \
   --device-url https://sso.example.com/application/o/device/ \
   --token-url https://sso.example.com/application/o/token/
@@ -246,9 +218,19 @@ hedgesync login device-code https://md.example.com \
 # Please visit: https://sso.example.com/device
 # And enter code: ABCD-EFGH
 # Waiting for authorization...
+# (After user authorizes, browser opens to complete OAuth flow)
 ```
 
-**Recommended alternative:** Use `hedgesync login oidc` instead, which implements the full OAuth2 Authorization Code flow and works with unmodified HedgeDoc instances.
+**How it works:**
+1. Starts device code flow - displays a URL and code for user to authorize
+2. User visits the URL on any device and enters the code
+3. Once authorized, automatically opens browser to complete HedgeDoc OAuth flow
+4. Returns the authenticated session cookie
+
+**Requirements:**
+- Your IdP must support device code flow (Authentik, Azure AD, Google, etc.)
+- The same browser session must be used for both steps (don't close browser after entering code)
+- HedgeDoc must have OAuth2/OIDC configured
 
 #### Request Timeouts
 
@@ -287,55 +269,9 @@ hedgesync get https://md.example.com/abc123 | pandoc -f markdown -t html > doc.h
 
 ### SSO Provider Setup: Authentik
 
-This section explains how to configure [Authentik](https://goauthentik.io/) for automated HedgeDoc access using OAuth 2.1 compliant flows.
+This section explains how to configure [Authentik](https://goauthentik.io/) for HedgeDoc access.
 
-#### Option A: Client Credentials (Service Account)
-
-Best for fully automated bots and services that don't act on behalf of a user.
-
-**1. Create a Service Account in Authentik:**
-
-- Go to **Directory → Users → Create Service Account**
-- Name it something like `hedgedoc-bot`
-- Note the generated username
-
-**2. Create an OAuth2 Provider:**
-
-- Go to **Applications → Providers → Create**
-- Select **OAuth2/OpenID Provider**
-- Name: `hedgedoc-service`
-- Authorization flow: Skip (not needed for client credentials)
-- Client type: **Confidential**
-- Client ID: Auto-generated (copy this)
-- Client Secret: Generate and copy
-- Redirect URIs: Leave empty (not used)
-- Under **Advanced protocol settings**:
-  - Scopes: `openid profile email`
-  - Token validity: Set as needed (e.g., 1 hour)
-
-**3. Create an Application:**
-
-- Go to **Applications → Applications → Create**
-- Name: `HedgeDoc Bot`
-- Slug: `hedgedoc-bot`
-- Provider: Select your `hedgedoc-service` provider
-- Policy engine mode: `any`
-
-**4. Grant Permissions:**
-
-- Go to the application settings
-- Under **Policy / Group / User Bindings**, add your service account user
-
-**5. Use with hedgesync:**
-
-```bash
-hedgesync login client-credentials https://md.example.com \
-  --client-id <your-client-id> \
-  --client-secret <your-client-secret> \
-  --token-url https://authentik.example.com/application/o/token/
-```
-
-#### Option B: Interactive OIDC Login (Recommended)
+#### Option A: Interactive OIDC Login (Recommended)
 
 Best for CLI use when you can open a browser. This uses the standard OAuth2 Authorization Code flow:
 
@@ -353,13 +289,11 @@ hedgesync login oidc https://md.example.com
 # Browser opens, you authenticate, cookie is returned automatically
 ```
 
-#### Option C: Device Code Flow (Limited Support)
+#### Option B: Device Code + OIDC (CLI-friendly)
 
-> **Note:** This has limited support with HedgeDoc. See the Device Code Flow section above for details.
+Best for CLI tools where you need to authenticate but can't easily open a browser locally (e.g., SSH sessions, headless servers).
 
-Best for CLI tools where a user needs to authorize, but the CLI can't open a browser (e.g., SSH sessions).
-
-**1. Create an OAuth2 Provider:**
+**1. Create an OAuth2 Provider for CLI use:**
 
 - Go to **Applications → Providers → Create**
 - Select **OAuth2/OpenID Provider**
@@ -367,26 +301,22 @@ Best for CLI tools where a user needs to authorize, but the CLI can't open a bro
 - Authorization flow: Select an appropriate flow (e.g., `default-provider-authorization-implicit-consent`)
 - Client type: **Public** (no client secret needed)
 - Client ID: Auto-generated (copy this)
-- Redirect URIs: Not needed for device flow
+- Redirect URIs: Add `http://127\.0\.0\.1:[0-9]+/callback`
 - Under **Advanced protocol settings**:
   - Scopes: `openid profile email`
+  - Enable **Device code flow**
 
-**2. Enable Device Code Flow:**
-
-- In the provider settings, ensure **Device code flow** is enabled
-- Note: Requires Authentik 2023.5+ for device code support
-
-**3. Create an Application:**
+**2. Create an Application:**
 
 - Go to **Applications → Applications → Create**
 - Name: `HedgeDoc CLI`
 - Slug: `hedgedoc-cli`
 - Provider: Select your `hedgedoc-cli` provider
 
-**4. Use with hedgesync:**
+**3. Use with hedgesync:**
 
 ```bash
-hedgesync login device-code https://md.example.com \
+hedgesync login device-code-oidc https://md.example.com \
   --client-id <your-client-id> \
   --device-url https://authentik.example.com/application/o/device/ \
   --token-url https://authentik.example.com/application/o/token/
@@ -395,9 +325,16 @@ hedgesync login device-code https://md.example.com \
 # Please visit: https://authentik.example.com/device
 # And enter code: ABCD-1234
 # Waiting for authorization...
+# (Browser opens automatically to complete OAuth flow)
 ```
 
-Open the URL on any device, enter the code, and authorize the application. The CLI will automatically detect the authorization and output the session cookie.
+**How it works:**
+1. You're shown a URL and code to enter on any device
+2. You authorize the CLI on that device (can be your phone, another computer, etc.)
+3. The CLI then opens a browser to complete the HedgeDoc OAuth flow
+4. Since you're already logged into Authentik, it auto-approves and creates the session
+
+**Note:** Don't close the browser after entering the device code - the same browser session is needed to complete the OAuth flow.
 
 #### Authentik URLs Reference
 
