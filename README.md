@@ -931,11 +931,38 @@ hedgesync macro <url> --text '::sig::=Bot' --exec '/::date::/gi:date +%F' --buil
 | `--regex '/pattern/flags=replacement'` | Regex pattern replacement macro |
 | `--exec '/pattern/flags:command'` | Execute shell command on pattern match |
 | `--block 'name:command'` | Block macro for `::BEGIN:name::` ... `::END:name::` |
-| `--built-in` | Enable built-in macros (date, uuid, counter) |
+| `--built-in` | Enable built-in macros (see below) |
 | `--config <file>` | Load macros from JSON config file |
 | `--watch` | Run continuously, applying macros as document changes |
 | `--stream` | Stream command output live into document |
 | `--track-state` | Show running/done markers (`→`/`✓`) to prevent re-triggering |
+
+#### Built-in Macros (`--built-in`)
+
+When you use `--built-in`, the following text macros are automatically registered:
+
+| Trigger | Replacement | Example Output |
+|---------|-------------|----------------|
+| `::date::` | Current date (ISO format) | `2024-12-16` |
+| `::time::` | Current time (24h format) | `14:30:45` |
+| `::datetime::` | Full ISO 8601 timestamp | `2024-12-16T14:30:45.123Z` |
+| `::ts::` | Unix timestamp (milliseconds) | `1734358245123` |
+
+**Usage examples:**
+
+```bash
+# Enable built-in macros and watch for changes
+hedgesync macro https://md.example.com/abc123 --built-in --watch
+
+# Type "::date::" in your document, it becomes "2024-12-16"
+# Type "::datetime::" becomes "2024-12-16T14:30:45.123Z"
+```
+
+**Note:** Built-in macros can be combined with custom macros:
+
+```bash
+hedgesync macro <url> --built-in --text '::sig::=— Signed by Bot' --watch
+```
 
 #### Exec Macros (Shell Command Execution)
 

@@ -279,10 +279,13 @@ class MacroEngine {
     replacement: string | ((trigger: string) => string | Promise<string>), 
     options: TextMacroOptions = {}
   ): MacroEngine {
-    const { wordBoundary = true } = options;
+    const { wordBoundary = false } = options;  // Default to false - triggers like ::date:: are already unambiguous
     const escapedTrigger = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    // For word boundary mode, use lookarounds to check for word boundaries without consuming them
+    // This allows ::date:: to work at start/end of words without requiring spaces
     const pattern = wordBoundary 
-      ? new RegExp(`(?:^|\\s|\\n)(${escapedTrigger})(?:$|\\s|\\n)`, 'g')
+      ? new RegExp(`(?<![\\w])(${escapedTrigger})(?![\\w])`, 'g')
       : new RegExp(`(${escapedTrigger})`, 'g');
     
     this.macros.set(trigger, {
@@ -591,15 +594,13 @@ class MacroEngine {
 
       try {
         if (macro.type === 'text') {
-          // For text macros with word boundary, we matched including the boundary
-          // We need to find the actual trigger position
-          const triggerIndex = m.match.indexOf(macro.trigger);
-          if (triggerIndex === -1) continue;
-          
-          replaceIndex = m.index + triggerIndex;
-          replaceLength = macro.trigger.length;
+          // For text macros, the capture group contains exactly the trigger
+          // (lookarounds don't consume characters, so m.groups[0] is the trigger)
+          const capturedTrigger = m.groups[0] || m.match;
+          replaceIndex = m.index;
+          replaceLength = capturedTrigger.length;
           replacement = await Promise.resolve(macro.replacement(macro.trigger));
-          originalMatch = macro.trigger;
+          originalMatch = capturedTrigger;
           
         } else if (macro.type === 'regex') {
           replacement = await Promise.resolve(macro.handler(m.match, ...m.groups));
