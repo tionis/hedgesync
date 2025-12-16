@@ -520,7 +520,7 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
           
           if (error) {
             cleanup();
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`
               <!DOCTYPE html>
               <html>
@@ -538,7 +538,7 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
           
           if (!code) {
             cleanup();
-            res.writeHead(400, { 'Content-Type': 'text/html' });
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end('<h1>Error: No authorization code received</h1>');
             reject(new AuthError('No authorization code received from OAuth provider'));
             return;
@@ -585,7 +585,7 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
             cleanup();
             
             // Send success response to browser
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`
               <!DOCTYPE html>
               <html>
@@ -605,13 +605,13 @@ export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResul
             });
           } catch (err) {
             cleanup();
-            res.writeHead(500, { 'Content-Type': 'text/html' });
+            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
             const errorMessage = err instanceof Error ? err.message : String(err);
             res.end(`<h1>Error completing authentication</h1><p>${errorMessage}</p>`);
             reject(err instanceof AuthError ? err : new AuthError(`Failed to complete OAuth: ${err}`));
           }
         } else {
-          res.writeHead(404, { 'Content-Type': 'text/html' });
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end('<h1>Not Found</h1>');
         }
       });
