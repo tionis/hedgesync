@@ -1,0 +1,6 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "socket.io-client": "npm:socket.io-client@^4.7.0"
+  }
+}

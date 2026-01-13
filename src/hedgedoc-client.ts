@@ -1,4 +1,4 @@
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 import { io, Socket } from 'socket.io-client';
 import { TextOperation, OperationJSON } from './text-operation.js';
 import { OTClient, Transformable } from './ot-client.js';

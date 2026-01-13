@@ -1,10 +1,12 @@
 /**
  * MacroEngine - Pattern-based auto-replacement system
- * 
+ *
  * Listens for document changes and automatically expands macros when
  * patterns are detected.
  */
 
+import { spawn, type ChildProcess } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { TextOperation } from './text-operation.js';
 
 // Forward declaration for HedgeDocClient to avoid circular imports
@@ -1275,13 +1277,22 @@ class MacroEngine {
         macro.onStart(matchText, insertPos);
       }
       
-      // Start the process
-      const proc = Bun.spawn(['sh', '-c', cmd], {
-        stdout: 'pipe',
-        stderr: 'pipe'
+      // Start the process using Node.js child_process for cross-runtime compatibility
+      const proc = spawn('sh', ['-c', cmd], {
+        stdio: ['ignore', 'pipe', 'pipe']
       });
-      
-      const reader = proc.stdout.getReader();
+
+      // Create a promise that resolves when the process exits
+      const exitedPromise = new Promise<number>((resolve) => {
+        proc.on('exit', (code) => resolve(code ?? 0));
+        proc.on('error', () => resolve(1));
+      });
+      // Attach exited promise to proc for later use
+      (proc as ChildProcess & { exited: Promise<number> }).exited = exitedPromise;
+
+      // Convert Node.js stream to Web Stream for cross-runtime compatibility
+      const webStream = Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>;
+      const reader = webStream.getReader();
       const decoder = new TextDecoder();
       let lineBuffer = '';
       
@@ -1387,7 +1398,7 @@ class MacroEngine {
           }
         }
         
-        const exitCode = await proc.exited;
+        const exitCode = await (proc as ChildProcess & { exited: Promise<number> }).exited;
         
         // State tracking: replace running marker with done marker
         if (stateTracking?.enabled && !aborted) {

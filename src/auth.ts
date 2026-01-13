@@ -7,10 +7,10 @@
  * - OIDC/OAuth2 (requires interactive browser flow)
  */
 
-import { createServer } from 'http';
-import type { Server, IncomingMessage, ServerResponse } from 'http';
-import { parse as parseUrl } from 'url';
-import { randomBytes } from 'crypto';
+import { createServer } from 'node:http';
+import type { Server, IncomingMessage, ServerResponse } from 'node:http';
+import { parse as parseUrl } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 // ===========================================
 // Types

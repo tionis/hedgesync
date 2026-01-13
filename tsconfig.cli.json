@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist",
+    "paths": {
+      "../src/index.js": ["./src/index.ts"],
+      "../src/macro-engine.js": ["./src/macro-engine.ts"],
+      "../src/auth.js": ["./src/auth.ts"]
+    },
+    "baseUrl": "."
+  },
+  "include": [
+    "bin/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "src"
+  ]
+}

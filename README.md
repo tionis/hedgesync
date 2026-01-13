@@ -29,24 +29,68 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 
 ## Installation
 
+### As a Library
+
 ```bash
+# npm
+npm install hedgesync
+
+# bun
+bun add hedgesync
+
+# pnpm
+pnpm add hedgesync
+```
+
+**Deno**: Copy the `deno.json` from this package to your project, or add to your existing import map:
+
+```json
+{
+  "imports": {
+    "socket.io-client": "npm:socket.io-client@^4.7.0"
+  }
+}
+```
+
+Then import directly:
+
+```typescript
+import { HedgeDocClient } from "npm:hedgesync";
+```
+
+### As a CLI Tool
+
+```bash
+# npm (global)
+npm install -g hedgesync
+
+# bun (global)
+bun install -g hedgesync
+
+# Then use directly:
+hedgesync get https://md.example.com/abc123
+```
+
+### Runtime Compatibility
+
+| Runtime | Library | CLI |
+|---------|---------|-----|
+| Node.js 18+ | ✅ | ✅ |
+| Bun | ✅ | ✅ |
+| Deno | ✅ (with import map) | ✅ |
+
+### Building Standalone Executables
+
+You can compile the CLI into a standalone executable that doesn't require any runtime:
+
+```bash
+# Clone the repo first
+git clone https://github.com/tionis/hedgesync.git
 cd hedgesync
 bun install
-```
 
-Or with npm:
-
-```bash
-npm install
-```
-
-## Building Standalone Executable
-
-You can compile the CLI into a standalone executable that doesn't require Bun or Node.js to be installed:
-
-```bash
 # Build for current platform
-bun run build
+bun run build:cli
 
 # Build for specific platforms
 bun run build:linux       # Linux x64
@@ -369,7 +413,9 @@ import { HedgeDocClient } from 'hedgesync';
 
 const client = new HedgeDocClient({
   serverUrl: 'https://hedgedoc.example.com',
-  noteId: 'my-note-id'
+  noteId: 'my-note-id',
+  // Optional: session cookie for authenticated access
+  // cookie: 'connect.sid=s%3A...'
 });
 
 // Connect to the document
@@ -390,6 +436,35 @@ client.on('document', (content) => {
 
 // Disconnect when done
 client.disconnect();
+```
+
+### Authentication
+
+For documents requiring login, obtain a session cookie using the auth helpers:
+
+```javascript
+import { loginWithEmail, loginWithLDAP, HedgeDocClient } from 'hedgesync';
+
+// Email/password authentication
+const { cookie } = await loginWithEmail({
+  serverUrl: 'https://hedgedoc.example.com',
+  email: 'user@example.com',
+  password: 'password'
+});
+
+// LDAP authentication
+const { cookie } = await loginWithLDAP({
+  serverUrl: 'https://hedgedoc.example.com',
+  username: 'user',
+  password: 'password'
+});
+
+// Use the cookie
+const client = new HedgeDocClient({
+  serverUrl: 'https://hedgedoc.example.com',
+  noteId: 'private-note',
+  cookie
+});
 ```
 
 ## Examples
@@ -1244,7 +1319,7 @@ You can get the session cookie from your browser's developer tools after logging
 ## Compatibility
 
 - **HedgeDoc**: Version 1.10.4 or later (uses OT-based real-time sync with Socket.IO v4)
-- **Runtime**: Bun (recommended) or Node.js 18+
+- **Runtime**: Node.js 18+, Bun, or Deno (with import map)
 - **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (uses Y.js instead of OT)
 
 ## License

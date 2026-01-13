@@ -5,7 +5,7 @@
  * manipulating the AST, and converting back to markdown.
  */
 
-import { spawn } from 'child_process';
+import { spawn } from 'node:child_process';
 
 // Forward declaration for HedgeDocClient to avoid circular imports
 interface HedgeDocClientLike {

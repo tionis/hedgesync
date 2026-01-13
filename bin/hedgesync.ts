@@ -20,8 +20,8 @@
 import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
 import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
 import type { DeviceCodeInfo } from '../src/auth.js';
-import { readFileSync, existsSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // Types
 interface ParsedArgs {
