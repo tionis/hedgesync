@@ -12,6 +12,12 @@
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
       }
+    },
+    "./obsidian": {
+      "import": {
+        "types": "./dist/obsidian.d.ts",
+        "default": "./dist/obsidian.js"
+      }
     }
   },
   "bin": {
