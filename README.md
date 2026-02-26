@@ -78,6 +78,7 @@ hedgesync get https://md.example.com/abc123
 | Node.js 18+ | ✅ | ✅ |
 | Bun | ✅ | ✅ |
 | Deno | ✅ (with import map) | ✅ |
+| Obsidian plugin | ✅ via `hedgesync/obsidian` | ❌ |
 
 ### Building Standalone Executables
 
@@ -437,6 +438,27 @@ client.on('document', (content) => {
 // Disconnect when done
 client.disconnect();
 ```
+
+### Obsidian Plugin Usage
+
+Use the Obsidian-safe entrypoint:
+
+```typescript
+import { HedgeDocClient } from 'hedgesync/obsidian';
+```
+
+`hedgesync/obsidian` includes the runtime-safe subset:
+- `HedgeDocClient`
+- `HedgeDocAPI`
+- OT types (`TextOperation`, `OTClient`)
+- Cookie helpers (`normalizeCookie`, `extractSessionId`)
+
+It intentionally excludes Node-only modules:
+- auth flows that start a local HTTP callback server
+- macro execution that spawns shell commands
+- pandoc transformers that spawn external processes
+
+Browser-style runtimes (including Obsidian WebView environments) cannot attach custom Socket.IO headers. Use standard cookie-based auth with CORS credentials enabled on your HedgeDoc server.
 
 ### Authentication
 
@@ -1319,7 +1341,8 @@ You can get the session cookie from your browser's developer tools after logging
 ## Compatibility
 
 - **HedgeDoc**: Version 1.10.4 or later (uses OT-based real-time sync with Socket.IO v4)
-- **Runtime**: Node.js 18+, Bun, or Deno (with import map)
+- **Runtime**: Node.js 18+, Bun, Deno (with import map), and Obsidian plugins via `hedgesync/obsidian`
+- **Node-only modules**: Auth helper flows, macro engine, and pandoc transformer are not part of the Obsidian entrypoint
 - **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (uses Y.js instead of OT)
 
 ## License

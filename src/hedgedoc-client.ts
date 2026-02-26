@@ -1,8 +1,8 @@
-import { EventEmitter } from 'node:events';
 import { io, Socket } from 'socket.io-client';
 import { TextOperation, OperationJSON } from './text-operation.js';
 import { OTClient, Transformable } from './ot-client.js';
-import { normalizeCookie } from './auth.js';
+import { normalizeCookie } from './cookie.js';
+import { SimpleEventEmitter } from './simple-event-emitter.js';
 
 // ===========================================
 // Types
@@ -174,7 +174,7 @@ class HedgeDocError extends Error {
  * - Event emission for document changes
  * - Rate limiting, reconnection handling, and batch operations
  */
-export class HedgeDocClient extends EventEmitter {
+export class HedgeDocClient extends SimpleEventEmitter {
   serverUrl: string;
   noteId: string;
   cookie: string | null;
@@ -267,7 +267,7 @@ export class HedgeDocClient extends EventEmitter {
     this._sessionCookie = null;
     
     // Track if user is logged in (for permission checking)
-    this._isLoggedIn = false;
+    this._isLoggedIn = !!this.cookie;
     
     // Last remote client ID (for user attribution)
     this._lastRemoteClientId = null;
@@ -359,17 +359,24 @@ export class HedgeDocClient extends EventEmitter {
     }
   }
 
+  private _isBrowserRuntime(): boolean {
+    return typeof (globalThis as { window?: unknown }).window !== 'undefined';
+  }
+
   /**
    * Fetch a session cookie from the HedgeDoc server
    */
   private async _getSessionCookie(): Promise<string> {
     if (this.cookie) {
+      this._sessionCookie = this.cookie;
+      this._isLoggedIn = true;
       return this.cookie;
     }
 
     const response = await fetch(`${this.serverUrl}/${this.noteId}`, {
       method: 'GET',
       redirect: 'manual',
+      credentials: 'include',
       headers: {
         'Accept': 'text/html'
       }
@@ -396,6 +403,13 @@ export class HedgeDocClient extends EventEmitter {
     if (sessionCookies.length > 0) {
       this._sessionCookie = sessionCookies.join('; ');
       return this._sessionCookie;
+    }
+
+    // Browsers do not expose Set-Cookie to JavaScript, but the cookie jar can
+    // still be populated and sent by Socket.IO when withCredentials is enabled.
+    if (this._isBrowserRuntime()) {
+      this._sessionCookie = '';
+      return '';
     }
 
     throw new Error('Failed to obtain session cookie from server');
@@ -426,6 +440,7 @@ export class HedgeDocClient extends EventEmitter {
   ): Promise<void> {
     try {
       const cookie = await this._getSessionCookie();
+      const isBrowser = this._isBrowserRuntime();
       
       // Detect if we're running in Bun
       const isBun = typeof Bun !== 'undefined';
@@ -447,7 +462,14 @@ export class HedgeDocClient extends EventEmitter {
         // If URL parsing fails, use defaults
       }
       
-      const socketOptions = {
+      const socketOptions: {
+        path: string;
+        query: { noteId: string };
+        transports: ('polling' | 'websocket')[] | ('websocket')[];
+        withCredentials: true;
+        extraHeaders?: Record<string, string>;
+        reconnection: false;
+      } = {
         path: socketPath,
         query: {
           noteId: this.noteId
@@ -456,12 +478,17 @@ export class HedgeDocClient extends EventEmitter {
         // Node.js works fine with polling as fallback
         transports: isBun ? ['websocket'] as ('websocket')[] : ['polling', 'websocket'] as ('polling' | 'websocket')[],
         withCredentials: true,
-        extraHeaders: {
-          ...this.customHeaders,
-          Cookie: cookie
-        },
         reconnection: false
       };
+
+      if (!isBrowser) {
+        socketOptions.extraHeaders = { ...this.customHeaders };
+        if (cookie) {
+          socketOptions.extraHeaders.Cookie = cookie;
+        }
+      } else if (Object.keys(this.customHeaders).length > 0) {
+        console.warn('HedgeDocClient: custom socket headers are not supported in browser runtimes.');
+      }
 
       this.socket = io(socketUrl, socketOptions);
 

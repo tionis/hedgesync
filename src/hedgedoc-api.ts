@@ -11,7 +11,7 @@
  * - Server status
  */
 
-import { normalizeCookie } from './auth.js';
+import { normalizeCookie } from './cookie.js';
 
 // ===========================================
 // Types
