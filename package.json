@@ -1,6 +1,6 @@
 {
   "name": "hedgesync",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "A library and CLI to programmatically connect to a running HedgeDoc server and make live edits to documents",
   "type": "module",
   "main": "./dist/index.js",
