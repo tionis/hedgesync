@@ -4,8 +4,18 @@
  * Tests all major features against a live HedgeDoc server
  */
 
-import { HedgeDocClient, TextOperation, PandocTransformer, MacroEngine } from '../src/index.js';
+import {
+  HedgeDocClient,
+  HedgeDocAPI,
+  TextOperation,
+  PandocTransformer,
+  MacroEngine,
+  defaultHedgeSyncRequest,
+  parseNoteUrl,
+  buildNoteUrl
+} from '../src/index.js';
 import { isPandocAvailable } from '../src/pandoc-transformer.js';
+import { HedgeDocClient as ObsidianClient, HedgeDocAPI as ObsidianAPI } from '../src/obsidian.js';
 
 // Test configuration
 const SERVER_URL = 'https://md.tionis.dev';
@@ -79,6 +89,36 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function makeMockResponse({
+  status = 200,
+  headers = {},
+  bodyText = '',
+  bodyJson,
+  bodyArrayBuffer
+}: {
+  status?: number;
+  headers?: Record<string, string>;
+  bodyText?: string;
+  bodyJson?: unknown;
+  bodyArrayBuffer?: ArrayBuffer;
+} = {}) {
+  const textValue = bodyJson !== undefined ? JSON.stringify(bodyJson) : bodyText;
+  const bufferValue = bodyArrayBuffer ?? new TextEncoder().encode(textValue).buffer;
+
+  return {
+    status,
+    headers,
+    text: async () => textValue,
+    json: async <T = unknown>() => {
+      if (bodyJson !== undefined) {
+        return bodyJson as T;
+      }
+      return (textValue ? JSON.parse(textValue) : null) as T;
+    },
+    arrayBuffer: async () => bufferValue,
+  };
+}
+
 // ============================================
 // Test Suites
 // ============================================
@@ -123,6 +163,282 @@ async function testTextOperation() {
   assert(Array.isArray(toJson), 'toJSON returns array');
   
   log(c.green('  TextOperation tests complete'));
+}
+
+async function testRuntimeOverrideAndRequestTransport() {
+  log(c.bold('\n🌐 Testing Runtime Override + Request Transport'));
+
+  const clientCalls: Array<{ url: string; method?: string; redirect?: string }> = [];
+  const nodeClient = new HedgeDocClient({
+    serverUrl: 'https://example.com',
+    noteId: 'abc123',
+    runtime: 'node',
+    request: async (request) => {
+      clientCalls.push({
+        url: request.url,
+        method: request.method,
+        redirect: request.redirect,
+      });
+      return makeMockResponse({
+        headers: {
+          // Intentionally a plain header string to verify non-getSetCookie parsing.
+          'set-cookie': 'connect.sid=s%3Atest-session; Path=/; HttpOnly, lang=en-US; Path=/',
+        },
+      });
+    },
+  });
+
+  assertEqual((nodeClient as any)._isBrowserRuntime(), false, 'runtime: node forces non-browser mode');
+  const cookie = await (nodeClient as any)._getSessionCookie();
+  assertEqual(cookie, 'connect.sid=s%3Atest-session; lang=en-US', 'session bootstrap uses injected request');
+  assertEqual(clientCalls.length, 1, 'client bootstrap called custom request once');
+  assertEqual(clientCalls[0].method, 'GET', 'client bootstrap uses GET');
+  assertEqual(clientCalls[0].redirect, 'manual', 'client bootstrap uses manual redirect');
+
+  const browserClient = new HedgeDocClient({
+    serverUrl: 'https://example.com',
+    noteId: 'abc123',
+    runtime: 'browser',
+    request: async () => makeMockResponse({ headers: {} }),
+  });
+
+  assertEqual((browserClient as any)._isBrowserRuntime(), true, 'runtime: browser forces browser mode');
+  const browserCookie = await (browserClient as any)._getSessionCookie();
+  assertEqual(browserCookie, '', 'browser runtime accepts missing Set-Cookie');
+
+  const nodeNoCookieClient = new HedgeDocClient({
+    serverUrl: 'https://example.com',
+    noteId: 'abc123',
+    runtime: 'node',
+    request: async () => makeMockResponse({ headers: {} }),
+  });
+
+  let threw = false;
+  try {
+    await (nodeNoCookieClient as any)._getSessionCookie();
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'node runtime throws when bootstrap Set-Cookie is unavailable');
+
+  const expiresCookieClient = new HedgeDocClient({
+    serverUrl: 'https://example.com',
+    noteId: 'abc123',
+    runtime: 'node',
+    request: async () => makeMockResponse({
+      headers: {
+        // Combined cookies where first cookie has Expires=... containing commas.
+        'set-cookie': 'connect.sid=s%3Aexpires-session; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Path=/, lang=en-US; Path=/',
+      },
+    }),
+  });
+  const expiresCookie = await (expiresCookieClient as any)._getSessionCookie();
+  assertEqual(
+    expiresCookie,
+    'connect.sid=s%3Aexpires-session; lang=en-US',
+    'session bootstrap parses combined Set-Cookie with Expires comma correctly'
+  );
+}
+
+async function testDefaultTransportSetCookieVariants() {
+  log(c.bold('\n🧪 Testing Default Transport Set-Cookie Variants'));
+
+  const originalFetch = globalThis.fetch;
+  const runCase = async (
+    setCookieReturn: string[] | string | undefined,
+    expected: string | null,
+    label: string
+  ) => {
+    (globalThis as any).fetch = async () => ({
+      status: 200,
+      headers: {
+        forEach: (cb: (value: string, key: string) => void) => {
+          cb('text/plain', 'content-type');
+        },
+        getSetCookie: () => setCookieReturn,
+      },
+      text: async () => 'ok',
+      json: async () => ({ ok: true }),
+      arrayBuffer: async () => new Uint8Array([1]).buffer,
+    });
+
+    const response = await defaultHedgeSyncRequest({ url: 'https://example.com' });
+    if (expected === null) {
+      assert(response.headers['set-cookie'] === undefined, `${label}: undefined set-cookie handled`);
+    } else {
+      assertEqual(response.headers['set-cookie'], expected, `${label}: set-cookie normalized`);
+    }
+  };
+
+  try {
+    await runCase(undefined, null, 'getSetCookie returns undefined');
+    await runCase('connect.sid=s%3Astring', 'connect.sid=s%3Astring', 'getSetCookie returns string');
+    await runCase(
+      ['connect.sid=s%3Aarray', 'lang=en-US'],
+      'connect.sid=s%3Aarray\nlang=en-US',
+      'getSetCookie returns array'
+    );
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+  }
+}
+
+async function testAPITransportAndURLHelpers() {
+  log(c.bold('\n🔌 Testing API Transport + URL Helpers'));
+
+  const apiCalls: Array<{ url: string; method?: string; redirect?: string }> = [];
+  const api = new HedgeDocAPI({
+    serverUrl: 'https://example.com/hedgedoc',
+    request: async (request) => {
+      apiCalls.push({
+        url: request.url,
+        method: request.method,
+        redirect: request.redirect,
+      });
+
+      if (request.url.endsWith('/new')) {
+        return makeMockResponse({
+          status: 302,
+          headers: { location: '/hedgedoc/new-note-id' },
+        });
+      }
+      if (request.url.endsWith('/new/custom-note')) {
+        return makeMockResponse({
+          status: 302,
+          headers: { location: '/hedgedoc/custom-note' },
+        });
+      }
+      if (request.url.endsWith('/new-note-id/download')) {
+        return makeMockResponse({
+          headers: { 'content-type': 'text/markdown' },
+          bodyText: '# Mock note',
+        });
+      }
+      if (request.url.endsWith('/status')) {
+        return makeMockResponse({
+          headers: { 'content-type': 'application/json' },
+          bodyJson: {
+            onlineNotes: 0,
+            onlineUsers: 0,
+            distinctOnlineUsers: 0,
+            notesCount: 0,
+            registeredUsers: 0,
+            onlineRegisteredUsers: 0,
+            distinctOnlineRegisteredUsers: 0,
+            isConnectionBusy: false,
+            connectionSocketQueueLength: 0,
+            isDisconnectBusy: false,
+            disconnectSocketQueueLength: 0,
+          },
+        });
+      }
+      if (request.url.endsWith('/me/export')) {
+        return makeMockResponse({
+          headers: { 'content-type': 'application/zip' },
+          bodyArrayBuffer: new Uint8Array([1, 2, 3]).buffer,
+        });
+      }
+      return makeMockResponse({ status: 404, bodyText: 'not found' });
+    },
+  });
+
+  const noteId = await api.createNote('Hello');
+  assertEqual(noteId, 'new-note-id', 'createNote parses note ID from redirect');
+
+  const noteRef = await api.createNoteRef('Hello again');
+  assertEqual(noteRef.noteId, 'new-note-id', 'createNoteRef returns noteId');
+  assertEqual(noteRef.url, 'https://example.com/hedgedoc/new-note-id', 'createNoteRef returns note URL');
+  assertEqual(noteRef.serverUrl, 'https://example.com/hedgedoc', 'createNoteRef includes server URL');
+
+  const aliasId = await api.createNoteWithAlias('custom-note', 'Alias body');
+  assertEqual(aliasId, 'custom-note', 'createNoteWithAlias parses alias ID from redirect');
+
+  const content = await api.downloadNote('new-note-id');
+  assertEqual(content, '# Mock note', 'downloadNote works with injected request transport');
+
+  const status = await api.getStatus();
+  assertEqual(status.onlineNotes, 0, 'getStatus works with injected request transport');
+
+  const exported = await api.downloadExport();
+  assertEqual(exported.byteLength, 3, 'downloadExport uses injected request transport');
+
+  assert(apiCalls.length >= 6, 'API methods made requests through injected transport');
+  assertEqual(apiCalls[0].redirect, 'manual', 'API requests default to manual redirects');
+
+  const parsed = parseNoteUrl('https://example.com/hedgedoc/new-note-id?x=1#fragment');
+  assertEqual(parsed.serverUrl, 'https://example.com/hedgedoc', 'parseNoteUrl extracts server URL');
+  assertEqual(parsed.noteId, 'new-note-id', 'parseNoteUrl extracts note ID');
+  assertEqual(
+    buildNoteUrl(parsed.serverUrl, parsed.noteId),
+    'https://example.com/hedgedoc/new-note-id',
+    'buildNoteUrl reconstructs note URL'
+  );
+
+  const encoded = parseNoteUrl('https://example.com/hedgedoc/some%20note%2Fid');
+  assertEqual(encoded.noteId, 'some note/id', 'parseNoteUrl decodes encoded note IDs');
+  assertEqual(
+    buildNoteUrl('https://example.com/hedgedoc', 'some note/id'),
+    'https://example.com/hedgedoc/some%20note%2Fid',
+    'buildNoteUrl encodes note IDs'
+  );
+
+  let invalidThrew = false;
+  try {
+    parseNoteUrl('not a url');
+  } catch {
+    invalidThrew = true;
+  }
+  assert(invalidThrew, 'parseNoteUrl throws on invalid URL');
+
+  let noNoteThrew = false;
+  try {
+    parseNoteUrl('https://example.com/');
+  } catch {
+    noNoteThrew = true;
+  }
+  assert(noNoteThrew, 'parseNoteUrl throws when note ID is missing');
+}
+
+async function testObsidianEntrypointParity() {
+  log(c.bold('\n🧩 Testing Obsidian Entrypoint Parity'));
+
+  const obsidianClient = new ObsidianClient({
+    serverUrl: 'https://example.com',
+    noteId: 'obsidian-note',
+    runtime: 'node',
+    request: async () => makeMockResponse({
+      headers: {
+        'set-cookie': 'connect.sid=s%3Aobsidian-session; Path=/; HttpOnly',
+      },
+    }),
+  });
+
+  assertEqual((obsidianClient as any)._isBrowserRuntime(), false, 'obsidian HedgeDocClient accepts runtime override');
+  const cookie = await (obsidianClient as any)._getSessionCookie();
+  assertEqual(cookie, 'connect.sid=s%3Aobsidian-session', 'obsidian HedgeDocClient accepts custom request transport');
+
+  const obsidianApi = new ObsidianAPI({
+    serverUrl: 'https://example.com',
+    request: async () => makeMockResponse({
+      headers: { 'content-type': 'application/json' },
+      bodyJson: {
+        onlineNotes: 1,
+        onlineUsers: 2,
+        distinctOnlineUsers: 2,
+        notesCount: 10,
+        registeredUsers: 5,
+        onlineRegisteredUsers: 1,
+        distinctOnlineRegisteredUsers: 1,
+        isConnectionBusy: false,
+        connectionSocketQueueLength: 0,
+        isDisconnectBusy: false,
+        disconnectSocketQueueLength: 0,
+      },
+    }),
+  });
+
+  const status = await obsidianApi.getStatus();
+  assertEqual(status.onlineUsers, 2, 'obsidian HedgeDocAPI accepts custom request transport');
 }
 
 async function testConnection(client) {
@@ -699,6 +1015,10 @@ async function runTests() {
   try {
     // Test TextOperation (no connection needed)
     await testTextOperation();
+    await testRuntimeOverrideAndRequestTransport();
+    await testDefaultTransportSetCookieVariants();
+    await testAPITransportAndURLHelpers();
+    await testObsidianEntrypointParity();
     
     // Test PandocTransformer (no connection needed, but needs pandoc)
     await testPandocTransformer();

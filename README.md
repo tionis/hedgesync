@@ -460,6 +460,12 @@ It intentionally excludes Node-only modules:
 
 Browser-style runtimes (including Obsidian WebView environments) cannot attach custom Socket.IO headers. Use standard cookie-based auth with CORS credentials enabled on your HedgeDoc server.
 
+Both entrypoints (`hedgesync` and `hedgesync/obsidian`) support:
+- `runtime: 'auto' | 'node' | 'browser'` on `HedgeDocClient`
+- `request` transport injection on `HedgeDocClient` and `HedgeDocAPI`
+
+This allows Obsidian plugins to use a custom HTTP layer (for example `requestUrl`) instead of direct `fetch`.
+
 ### Authentication
 
 For documents requiring login, obtain a session cookie using the auth helpers:
@@ -531,10 +537,16 @@ The main class for interacting with HedgeDoc.
 #### Constructor
 
 ```javascript
+import { HedgeDocClient, defaultHedgeSyncRequest } from 'hedgesync';
+
 const client = new HedgeDocClient({
   serverUrl: 'https://hedgedoc.example.com',  // Required
   noteId: 'my-note-id',                        // Required
   cookie: 'connect.sid=...',                   // Optional: session cookie for auth
+  runtime: 'auto',                             // Optional: 'auto' | 'node' | 'browser'
+  request: async (req) => {                    // Optional: custom HTTP transport
+    return defaultHedgeSyncRequest(req);
+  },
   operationTimeout: 5000,                      // Optional: timeout for operations (ms)
   
   // Rate limiting options

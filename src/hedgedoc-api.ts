@@ -12,6 +12,12 @@
  */
 
 import { normalizeCookie } from './cookie.js';
+import {
+  HedgeSyncRequestFn,
+  defaultHedgeSyncRequest,
+  getHeader,
+} from './http.js';
+import { buildNoteUrl, parseNoteUrl } from './url.js';
 
 // ===========================================
 // Types
@@ -94,14 +100,30 @@ export interface ServerConfig {
   [key: string]: unknown;
 }
 
+/** Rich note reference returned by createNoteRef() */
+export interface CreatedNoteRef {
+  noteId: string;
+  url: string;
+  serverUrl: string;
+}
+
 /** API client options */
 export interface HedgeDocAPIOptions {
   /** Base URL of the HedgeDoc server (e.g., https://md.example.com) */
   serverUrl: string;
   /** Session cookie for authentication (e.g., "connect.sid=...") */
   cookie?: string;
+  /** Custom HTTP transport for all API requests. Falls back to fetch. */
+  request?: HedgeSyncRequestFn;
   /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
   headers?: Record<string, string>;
+}
+
+interface HedgeDocAPIRequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | ArrayBuffer;
+  redirect?: 'follow' | 'manual' | 'error';
 }
 
 // ===========================================
@@ -132,11 +154,13 @@ export class HedgeDocAPI {
   private serverUrl: string;
   private cookie: string | null;
   private customHeaders: Record<string, string>;
+  private requestFn: HedgeSyncRequestFn;
   private csrfToken: string | null = null;
   
   constructor(options: HedgeDocAPIOptions) {
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
     this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
+    this.requestFn = options.request || defaultHedgeSyncRequest;
     this.customHeaders = options.headers || {};
   }
   
@@ -149,44 +173,46 @@ export class HedgeDocAPI {
    */
   private async request<T>(
     path: string,
-    options: RequestInit = {}
+    options: HedgeDocAPIRequestOptions = {}
   ): Promise<T> {
     const url = `${this.serverUrl}${path}`;
     
     const headers: Record<string, string> = {
       'Accept': 'application/json',
       ...this.customHeaders,
-      ...(options.headers as Record<string, string> || {}),
+      ...(options.headers || {}),
     };
     
     if (this.cookie) {
       headers['Cookie'] = this.cookie;
     }
     
-    const response = await fetch(url, {
-      ...options,
+    const response = await this.requestFn({
+      url,
+      method: options.method,
       headers,
-      redirect: 'manual', // Don't auto-follow redirects
+      body: options.body,
+      redirect: options.redirect ?? 'manual',
     });
     
     // Handle redirects (some HedgeDoc endpoints redirect)
     if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('Location');
+      const location = getHeader(response.headers, 'location');
       if (location) {
         // Extract note ID from redirect URL if creating a note
         return { redirect: location } as T;
       }
     }
     
-    if (!response.ok && response.status !== 302) {
+    if ((response.status < 200 || response.status >= 300) && response.status !== 302) {
       const text = await response.text().catch(() => '');
       throw new HedgeDocAPIError(
-        `HTTP ${response.status}: ${response.statusText}${text ? ` - ${text}` : ''}`,
+        `HTTP ${response.status}${text ? ` - ${text}` : ''}`,
         response.status
       );
     }
     
-    const contentType = response.headers.get('Content-Type') || '';
+    const contentType = getHeader(response.headers, 'content-type') || '';
     
     if (contentType.includes('application/json') || contentType.includes('text/json')) {
       return response.json() as Promise<T>;
@@ -196,6 +222,28 @@ export class HedgeDocAPI {
     return response.text() as unknown as T;
   }
   
+  private extractNoteIdFromRedirect(redirect: string): string | null {
+    if (!redirect) {
+      return null;
+    }
+
+    try {
+      return parseNoteUrl(redirect).noteId;
+    } catch {
+      // Continue - redirects are commonly relative paths.
+    }
+
+    try {
+      const absolute = new URL(redirect, this.serverUrl).toString();
+      return parseNoteUrl(absolute).noteId;
+    } catch {
+      // Fall back to regex parsing.
+    }
+
+    const match = redirect.match(/\/([^/?#]+)(?:[?#].*)?$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
   /**
    * Fetch CSRF token from /config endpoint (needed for some operations)
    */
@@ -253,8 +301,8 @@ export class HedgeDocAPI {
       
       // Extract note ID from redirect
       if (typeof result === 'object' && 'redirect' in result) {
-        const match = result.redirect.match(/\/([^/]+)$/);
-        return match ? match[1] : result.redirect;
+        const noteId = this.extractNoteIdFromRedirect(result.redirect);
+        return noteId ?? result.redirect;
       }
       return String(result);
     }
@@ -262,10 +310,23 @@ export class HedgeDocAPI {
     // GET to create empty note
     const result = await this.request<{ redirect: string }>('/new');
     if (typeof result === 'object' && 'redirect' in result) {
-      const match = result.redirect.match(/\/([^/]+)$/);
-      return match ? match[1] : result.redirect;
+      const noteId = this.extractNoteIdFromRedirect(result.redirect);
+      return noteId ?? result.redirect;
     }
     throw new HedgeDocAPIError('Failed to create note: no redirect received');
+  }
+
+  /**
+   * Create a new note and return a rich reference object.
+   * @param content Optional initial content (defaults to server template)
+   */
+  async createNoteRef(content?: string): Promise<CreatedNoteRef> {
+    const noteId = await this.createNote(content);
+    return {
+      noteId,
+      url: buildNoteUrl(this.serverUrl, noteId),
+      serverUrl: this.serverUrl,
+    };
   }
   
   /**
@@ -284,8 +345,8 @@ export class HedgeDocAPI {
     });
     
     if (typeof result === 'object' && 'redirect' in result) {
-      const match = result.redirect.match(/\/([^/]+)$/);
-      return match ? match[1] : alias;
+      const noteId = this.extractNoteIdFromRedirect(result.redirect);
+      return noteId ?? alias;
     }
     return alias;
   }
@@ -385,10 +446,18 @@ export class HedgeDocAPI {
       headers['Cookie'] = this.cookie;
     }
     
-    const response = await fetch(url, { headers });
+    const response = await this.requestFn({
+      url,
+      method: 'GET',
+      headers,
+    });
     
-    if (!response.ok) {
-      throw new HedgeDocAPIError(`Failed to download export: ${response.statusText}`, response.status);
+    if (response.status < 200 || response.status >= 300) {
+      const text = await response.text().catch(() => '');
+      throw new HedgeDocAPIError(
+        `Failed to download export${text ? `: ${text}` : ''}`,
+        response.status
+      );
     }
     
     return response.arrayBuffer();

@@ -3,6 +3,12 @@ import { TextOperation, OperationJSON } from './text-operation.js';
 import { OTClient, Transformable } from './ot-client.js';
 import { normalizeCookie } from './cookie.js';
 import { SimpleEventEmitter } from './simple-event-emitter.js';
+import {
+  HedgeSyncRuntime,
+  HedgeSyncRequestFn,
+  defaultHedgeSyncRequest,
+  getHeader,
+} from './http.js';
 
 // ===========================================
 // Types
@@ -30,6 +36,10 @@ export interface HedgeDocClientOptions {
   serverUrl: string;
   noteId: string;
   cookie?: string | null;
+  /** Force runtime mode instead of auto-detection (default: "auto"). */
+  runtime?: HedgeSyncRuntime;
+  /** Custom HTTP transport for bootstrap requests. Falls back to fetch. */
+  request?: HedgeSyncRequestFn;
   /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
   headers?: Record<string, string>;
   operationTimeout?: number;
@@ -160,6 +170,25 @@ class HedgeDocError extends Error {
   }
 }
 
+function splitSetCookieHeader(headerValue: string): string[] {
+  if (!headerValue) {
+    return [];
+  }
+
+  if (headerValue.includes('\n')) {
+    return headerValue
+      .split('\n')
+      .map(cookie => cookie.trim())
+      .filter(Boolean);
+  }
+
+  // Split combined Set-Cookie headers while preserving Expires dates.
+  return headerValue
+    .split(/,(?=\s*[^;,\s]+=[^;]+)/g)
+    .map(cookie => cookie.trim())
+    .filter(Boolean);
+}
+
 // ===========================================
 // HedgeDocClient Class
 // ===========================================
@@ -193,6 +222,8 @@ export class HedgeDocClient extends SimpleEventEmitter {
   private _pendingOperation: TextOperation | null;
   private _operationTimeout: ReturnType<typeof setTimeout> | null;
   private _operationTimeoutMs: number;
+  private _runtime: HedgeSyncRuntime;
+  private _request: HedgeSyncRequestFn;
   
   /** Last client ID that made a remote change (for user attribution) */
   _lastRemoteClientId: string | null;
@@ -239,7 +270,13 @@ export class HedgeDocClient extends SimpleEventEmitter {
     this.serverUrl = options.serverUrl.replace(/\/$/, ''); // Remove trailing slash
     this.noteId = options.noteId;
     this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
+    this._runtime = options.runtime ?? 'auto';
+    this._request = options.request || defaultHedgeSyncRequest;
     this.customHeaders = options.headers || {};
+
+    if (!['auto', 'node', 'browser'].includes(this._runtime)) {
+      throw new Error(`Invalid runtime mode: ${String(this._runtime)}`);
+    }
     
     this.socket = null;
     this.document = '';
@@ -360,6 +397,12 @@ export class HedgeDocClient extends SimpleEventEmitter {
   }
 
   private _isBrowserRuntime(): boolean {
+    if (this._runtime === 'browser') {
+      return true;
+    }
+    if (this._runtime === 'node') {
+      return false;
+    }
     return typeof (globalThis as { window?: unknown }).window !== 'undefined';
   }
 
@@ -373,24 +416,19 @@ export class HedgeDocClient extends SimpleEventEmitter {
       return this.cookie;
     }
 
-    const response = await fetch(`${this.serverUrl}/${this.noteId}`, {
+    const response = await this._request({
+      url: `${this.serverUrl}/${this.noteId}`,
       method: 'GET',
       redirect: 'manual',
       credentials: 'include',
       headers: {
-        'Accept': 'text/html'
-      }
+        'Accept': 'text/html',
+        ...this.customHeaders,
+      },
     });
 
-    let cookies: string[] = [];
-    if ((response.headers as any).getSetCookie) {
-      cookies = (response.headers as any).getSetCookie();
-    } else {
-      const setCookie = response.headers.get('set-cookie');
-      if (setCookie) {
-        cookies = [setCookie];
-      }
-    }
+    const setCookie = getHeader(response.headers, 'set-cookie');
+    const cookies = setCookie ? splitSetCookieHeader(setCookie) : [];
 
     const sessionCookies: string[] = [];
     for (const cookie of cookies) {

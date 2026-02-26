@@ -37,6 +37,7 @@ export type { Transformable } from './ot-client.js';
 export { HedgeDocAPI, HedgeDocAPIError } from './hedgedoc-api.js';
 export type {
   HedgeDocAPIOptions,
+  CreatedNoteRef,
   NoteMetadata,
   NotePermission,
   UserProfile,
@@ -46,6 +47,27 @@ export type {
   ServerStatus,
   ServerConfig
 } from './hedgedoc-api.js';
+
+// HTTP transport abstraction
+export {
+  defaultHedgeSyncRequest,
+  getHeader
+} from './http.js';
+export type {
+  HedgeSyncRuntime,
+  HedgeSyncHttpRequest,
+  HedgeSyncHttpResponse,
+  HedgeSyncRequestFn
+} from './http.js';
+
+// URL helpers
+export {
+  parseNoteUrl,
+  buildNoteUrl
+} from './url.js';
+export type {
+  ParsedNoteUrl
+} from './url.js';
 
 // Cookie helpers
 export { normalizeCookie, extractSessionId } from './cookie.js';
