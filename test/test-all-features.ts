@@ -206,6 +206,17 @@ async function testRuntimeOverrideAndRequestTransport() {
   const browserCookie = await (browserClient as any)._getSessionCookie();
   assertEqual(browserCookie, '', 'browser runtime accepts missing Set-Cookie');
 
+  const websocketClient = new HedgeDocClient({
+    serverUrl: 'https://example.com',
+    noteId: 'abc123',
+    socketTransports: ['websocket'],
+  });
+  assertEqual(
+    (websocketClient as any)._socketTransports.join(','),
+    'websocket',
+    'client stores custom Socket.IO transports'
+  );
+
   const nodeNoCookieClient = new HedgeDocClient({
     serverUrl: 'https://example.com',
     noteId: 'abc123',

@@ -31,6 +31,9 @@ export interface ReconnectConfig {
   backoffFactor?: number;
 }
 
+/** Socket.IO transport modes. */
+export type SocketTransport = 'polling' | 'websocket';
+
 /** Client options */
 export interface HedgeDocClientOptions {
   serverUrl: string;
@@ -42,6 +45,8 @@ export interface HedgeDocClientOptions {
   request?: HedgeSyncRequestFn;
   /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
   headers?: Record<string, string>;
+  /** Socket.IO transports to use. Defaults to polling with websocket upgrade, or websocket-only in Bun. */
+  socketTransports?: SocketTransport[];
   operationTimeout?: number;
   rateLimit?: RateLimitConfig;
   reconnect?: ReconnectConfig;
@@ -224,6 +229,7 @@ export class HedgeDocClient extends SimpleEventEmitter {
   private _operationTimeoutMs: number;
   private _runtime: HedgeSyncRuntime;
   private _request: HedgeSyncRequestFn;
+  private _socketTransports: SocketTransport[] | null;
   
   /** Last client ID that made a remote change (for user attribution) */
   _lastRemoteClientId: string | null;
@@ -272,6 +278,7 @@ export class HedgeDocClient extends SimpleEventEmitter {
     this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
     this._runtime = options.runtime ?? 'auto';
     this._request = options.request || defaultHedgeSyncRequest;
+    this._socketTransports = options.socketTransports ? [...options.socketTransports] : null;
     this.customHeaders = options.headers || {};
 
     if (!['auto', 'node', 'browser'].includes(this._runtime)) {
@@ -503,7 +510,7 @@ export class HedgeDocClient extends SimpleEventEmitter {
       const socketOptions: {
         path: string;
         query: { noteId: string };
-        transports: ('polling' | 'websocket')[] | ('websocket')[];
+        transports: SocketTransport[];
         withCredentials: true;
         extraHeaders?: Record<string, string>;
         reconnection: false;
@@ -514,7 +521,7 @@ export class HedgeDocClient extends SimpleEventEmitter {
         },
         // Bun has issues with XHR polling, so use websocket-only in Bun
         // Node.js works fine with polling as fallback
-        transports: isBun ? ['websocket'] as ('websocket')[] : ['polling', 'websocket'] as ('polling' | 'websocket')[],
+        transports: this._socketTransports ?? (isBun ? ['websocket'] : ['polling', 'websocket']),
         withCredentials: true,
         reconnection: false
       };

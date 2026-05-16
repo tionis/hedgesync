@@ -463,8 +463,10 @@ Browser-style runtimes (including Obsidian WebView environments) cannot attach c
 Both entrypoints (`hedgesync` and `hedgesync/obsidian`) support:
 - `runtime: 'auto' | 'node' | 'browser'` on `HedgeDocClient`
 - `request` transport injection on `HedgeDocClient` and `HedgeDocAPI`
+- `socketTransports` on `HedgeDocClient` for Socket.IO transport selection
 
 This allows Obsidian plugins to use a custom HTTP layer (for example `requestUrl`) instead of direct `fetch`.
+Use `socketTransports: ['websocket']` in Obsidian or proxy environments where XHR polling is unavailable or unreliable.
 
 ### Authentication
 
@@ -547,6 +549,7 @@ const client = new HedgeDocClient({
   request: async (req) => {                    // Optional: custom HTTP transport
     return defaultHedgeSyncRequest(req);
   },
+  socketTransports: ['polling', 'websocket'],  // Optional: Socket.IO transports
   operationTimeout: 5000,                      // Optional: timeout for operations (ms)
   
   // Rate limiting options

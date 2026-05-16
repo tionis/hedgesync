@@ -9,6 +9,7 @@
 export { HedgeDocClient } from './hedgedoc-client.js';
 export type {
   HedgeDocClientOptions,
+  SocketTransport,
   RateLimitConfig,
   ReconnectConfig,
   NoteInfo,
