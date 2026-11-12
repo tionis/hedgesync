@@ -9,7 +9,7 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 - 👥 **User presence** - see who's online
 - 🔒 **Permission-aware** - proper error handling for read-only documents
 - 📡 **Event-driven** - react to document changes from other users
-- 🍪 **Auto-authentication** - automatically obtains session cookies
+- 🍪 **Email/LDAP login** - obtains and verifies session cookies
 - 🔍 **Regex operations** - search and replace with patterns
 - 📝 **Line operations** - manipulate documents by line number
 - 🔄 **Pandoc integration** - AST-based transformations
@@ -168,14 +168,9 @@ hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l'
 hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' --watch
 
-# Authentication / Login
-hedgesync login email https://md.example.com -u user@example.com -p password
-hedgesync login ldap https://md.example.com -u username -p password
-hedgesync login oidc https://md.example.com                    # Opens browser
-hedgesync login device-code-oidc https://md.example.com \      # CLI-friendly OIDC
-  --client-id my-client \
-  --device-url https://sso.example.com/application/o/device/ \
-  --token-url https://sso.example.com/application/o/token/
+# Authentication / Login (prompts for the password)
+export HEDGEDOC_COOKIE="$(hedgesync login email https://md.example.com -u user@example.com)"
+hedgesync login ldap https://md.example.com -u username
 ```
 
 ### Options
@@ -193,100 +188,41 @@ hedgesync login device-code-oidc https://md.example.com \      # CLI-friendly OI
 
 ### Authentication
 
-If a document requires authentication, you need a session cookie. There are multiple ways to obtain one:
+Private, locked or protected notes need a HedgeDoc session cookie, passed with
+`-c/--cookie` or the `HEDGEDOC_COOKIE` environment variable.
 
-#### Method 1: Manual Cookie (Browser)
+#### Email or LDAP login
 
-Copy your session cookie from your browser after logging in:
-
-```bash
-# Via command-line option
-hedgesync get https://md.example.com/abc123 -c 'connect.sid=...'
-
-# Via environment variable
-export HEDGEDOC_COOKIE='connect.sid=...'
-hedgesync get https://md.example.com/abc123
-
-# The 'connect.sid=' prefix is optional - it will be added automatically
-hedgesync get https://md.example.com/abc123 -c 's%3Axyz...'
-```
-
-#### Method 2: Email/Password Login
-
-For HedgeDoc instances with email authentication enabled:
+If the server has email or LDAP accounts enabled, `hedgesync login` signs in
+and prints the cookie (and nothing else) to stdout:
 
 ```bash
-hedgesync login email https://md.example.com -u user@example.com -p password
-# Outputs: connect.sid=s%3A...
-
-# Store and use the cookie
-export HEDGEDOC_COOKIE=$(hedgesync login email https://md.example.com -u user@example.com -p password)
+export HEDGEDOC_COOKIE="$(hedgesync login email https://md.example.com -u user@example.com)"
+export HEDGEDOC_COOKIE="$(hedgesync login ldap https://md.example.com -u username)"
 ```
 
-#### Method 3: LDAP Login
+The password is prompted for on the terminal, read from `HEDGEDOC_PASSWORD`,
+or read from stdin with `--password-stdin`
+(`pass show hedgedoc | hedgesync login ... --password-stdin`). It is not
+accepted as a command-line argument, where other local users could see it.
 
-For HedgeDoc instances with LDAP authentication:
+HedgeDoc answers a failed login exactly like a successful one, so `login`
+checks the new session against `/me` and fails on a wrong password instead
+of handing back a useless cookie. Use `--json` to also get the account id and
+name, and `--timeout <seconds>` for slow servers.
+
+#### Browser cookie (OAuth2, OIDC, GitHub, SAML, ...)
+
+These providers only work as browser redirect flows, so the CLI cannot do
+them. Sign in with a browser and copy the session cookie from its developer
+tools (Application/Storage -> Cookies, usually named `connect.sid`):
 
 ```bash
-hedgesync login ldap https://md.example.com -u username -p password
+export HEDGEDOC_COOKIE='connect.sid=s%3A...'
 ```
 
-#### Method 4: OIDC Login (Interactive)
-
-Opens a browser for SSO authentication. This implements the full OAuth2 Authorization Code flow:
-
-```bash
-hedgesync login oidc https://md.example.com
-# Opens browser, user authenticates, returns cookie automatically
-```
-
-**How it works:**
-1. Starts a local server to receive the OAuth callback
-2. Opens the HedgeDoc OAuth URL in your browser
-3. After you authenticate, the IdP redirects to the local server
-4. The CLI forwards the authorization code to HedgeDoc
-5. Returns the authenticated session cookie
-
-**Note:** Your identity provider must allow `http://127.0.0.1:*/callback` as a redirect URI. Most IdPs (including Authentik, Keycloak, etc.) support localhost redirects for CLI/development use cases.
-
-#### Method 5: Device Code + OIDC (CLI-friendly)
-
-**Recommended for automation and scripts.** This combines device code flow (for user authentication without needing a local browser) with OIDC flow (for HedgeDoc session creation).
-
-```bash
-hedgesync login device-code-oidc https://md.example.com \
-  --client-id my-cli-app \
-  --device-url https://sso.example.com/application/o/device/ \
-  --token-url https://sso.example.com/application/o/token/
-
-# Displays something like:
-# Please visit: https://sso.example.com/device
-# And enter code: ABCD-EFGH
-# Waiting for authorization...
-# (After user authorizes, browser opens to complete OAuth flow)
-```
-
-**How it works:**
-1. Starts device code flow - displays a URL and code for user to authorize
-2. User visits the URL on any device and enters the code
-3. Once authorized, automatically opens browser to complete HedgeDoc OAuth flow
-4. Returns the authenticated session cookie
-
-**Requirements:**
-- Your IdP must support device code flow (Authentik, Azure AD, Google, etc.)
-- The same browser session must be used for both steps (don't close browser after entering code)
-- HedgeDoc must have OAuth2/OIDC configured
-
-#### Request Timeouts
-
-All authentication methods support configurable timeouts (default: 30 seconds):
-
-```bash
-# Use a longer timeout for slow networks
-hedgesync login ldap https://md.example.com -u user -p pass --timeout 60000
-
-# Device code flow has a longer default (5 minutes) for user authorization
-```
+A bare value without `connect.sid=` also works. The cookie lasts as long as
+the server's session lifetime (14 days by default).
 
 ### Scripting Examples
 
@@ -311,101 +247,6 @@ done
 # Pipe through pandoc
 hedgesync get https://md.example.com/abc123 | pandoc -f markdown -t html > doc.html
 ```
-
-### SSO Provider Setup: Authentik
-
-This section explains how to configure [Authentik](https://goauthentik.io/) for HedgeDoc access.
-
-#### Option A: Interactive OIDC Login (Recommended)
-
-Best for CLI use when you can open a browser. This uses the standard OAuth2 Authorization Code flow:
-
-**1. Add localhost to allowed redirect URIs:**
-
-In your existing HedgeDoc OAuth2 Provider in Authentik:
-- Go to **Applications → Providers → Your HedgeDoc Provider**
-- Under **Redirect URIs/Origins (RegEx)**, add: `http://127\.0\.0\.1:[0-9]+/callback`
-- Save
-
-**2. Use with hedgesync:**
-
-```bash
-hedgesync login oidc https://md.example.com
-# Browser opens, you authenticate, cookie is returned automatically
-```
-
-#### Option B: Device Code + OIDC (CLI-friendly)
-
-Best for CLI tools where you need to authenticate but can't easily open a browser locally (e.g., SSH sessions, headless servers).
-
-**1. Create an OAuth2 Provider for CLI use:**
-
-- Go to **Applications → Providers → Create**
-- Select **OAuth2/OpenID Provider**
-- Name: `hedgedoc-cli`
-- Authorization flow: Select an appropriate flow (e.g., `default-provider-authorization-implicit-consent`)
-- Client type: **Public** (no client secret needed)
-- Client ID: Auto-generated (copy this)
-- Redirect URIs: Add `http://127\.0\.0\.1:[0-9]+/callback`
-- Under **Advanced protocol settings**:
-  - Scopes: `openid profile email`
-  - Enable **Device code flow**
-
-**2. Create an Application:**
-
-- Go to **Applications → Applications → Create**
-- Name: `HedgeDoc CLI`
-- Slug: `hedgedoc-cli`
-- Provider: Select your `hedgedoc-cli` provider
-
-**3. Use with hedgesync:**
-
-```bash
-hedgesync login device-code-oidc https://md.example.com \
-  --client-id <your-client-id> \
-  --device-url https://authentik.example.com/application/o/device/ \
-  --token-url https://authentik.example.com/application/o/token/
-
-# Output:
-# Please visit: https://authentik.example.com/device
-# And enter code: ABCD-1234
-# Waiting for authorization...
-# (Browser opens automatically to complete OAuth flow)
-```
-
-**How it works:**
-1. You're shown a URL and code to enter on any device
-2. You authorize the CLI on that device (can be your phone, another computer, etc.)
-3. The CLI then opens a browser to complete the HedgeDoc OAuth flow
-4. Since you're already logged into Authentik, it auto-approves and creates the session
-
-**Note:** Don't close the browser after entering the device code - the same browser session is needed to complete the OAuth flow.
-
-#### Authentik URLs Reference
-
-| Endpoint | URL Pattern |
-|----------|-------------|
-| Token URL | `https://<authentik>/application/o/token/` |
-| Device Authorization | `https://<authentik>/application/o/device/` |
-| Authorization URL | `https://<authentik>/application/o/authorize/` |
-| OIDC Discovery | `https://<authentik>/application/o/<app-slug>/.well-known/openid-configuration` |
-
-#### HedgeDoc Configuration
-
-Ensure your HedgeDoc instance is configured to accept OAuth2/OIDC authentication. In `config.json`:
-
-```json
-{
-  "oauth2": {
-    "authorizationURL": "https://authentik.example.com/application/o/authorize/",
-    "tokenURL": "https://authentik.example.com/application/o/token/",
-    "clientID": "<your-hedgedoc-app-client-id>",
-    "clientSecret": "<your-hedgedoc-app-client-secret>"
-  }
-}
-```
-
-See [HedgeDoc OAuth2 documentation](https://docs.hedgedoc.org/configuration/#oauth2-login) for complete configuration options.
 
 ## Library Quick Start
 
@@ -470,24 +311,24 @@ Use `socketTransports: ['websocket']` in Obsidian or proxy environments where XH
 
 ### Authentication
 
-For documents requiring login, obtain a session cookie using the auth helpers:
+For documents requiring login, obtain a session cookie using the auth helpers.
+Both verify the login against `/me` and throw `AuthError` (status 401) on bad
+credentials; the result also carries the account (`user: {id, name, photo}`).
 
 ```javascript
-import { loginWithEmail, loginWithLDAP, HedgeDocClient } from 'hedgesync';
+import { loginWithEmail, loginWithLDAP, getSessionUser, HedgeDocClient } from 'hedgesync';
 
 // Email/password authentication
-const { cookie } = await loginWithEmail({
+const { cookie, user } = await loginWithEmail({
   serverUrl: 'https://hedgedoc.example.com',
   email: 'user@example.com',
   password: 'password'
 });
 
-// LDAP authentication
-const { cookie } = await loginWithLDAP({
-  serverUrl: 'https://hedgedoc.example.com',
-  username: 'user',
-  password: 'password'
-});
+// ...or LDAP: loginWithLDAP({ serverUrl, username, password })
+
+// Later: check whether a stored cookie is still logged in (null if not)
+const stillValid = await getSessionUser({ serverUrl: 'https://hedgedoc.example.com', cookie });
 
 // Use the cookie
 const client = new HedgeDocClient({

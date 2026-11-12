@@ -17,10 +17,9 @@
  *   macro    - Run macros on document
  */
 
-import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
+import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, AuthError, type AuthResult } from '../src/index.js';
 import { renderShellTemplate, runShell, type ShellCommand } from '../src/shell.js';
 import { expandReplacement } from '../src/replace.js';
-import type { DeviceCodeInfo } from '../src/auth.js';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -1013,69 +1012,38 @@ ${c('yellow', 'EXAMPLES:')}
 `,
 
   login: `
-${c('bold', 'hedgesync login')} - Authenticate and get session cookie
+${c('bold', 'hedgesync login')} - Log in and print a session cookie
 
 ${c('yellow', 'USAGE:')}
-  hedgesync login <server-url> --method <method> [options]
+  hedgesync login [email|ldap] <server-url> -u <user> [options]
 
 ${c('yellow', 'METHODS:')}
-  ${c('cyan', 'email')}              Email/password authentication (default)
-  ${c('cyan', 'ldap')}               LDAP username/password authentication
-  ${c('cyan', 'oidc')}               OIDC/OAuth2 browser authentication
-  ${c('cyan', 'device-code-oidc')}   Device code + OIDC combined flow ${c('green', '★ FOR AUTOMATION')}
-  ${c('cyan', 'oauth2-password')}    OAuth2 password grant ${c('yellow', '(deprecated)')}
+  ${c('cyan', 'email')}              HedgeDoc email/password account (default)
+  ${c('cyan', 'ldap')}               LDAP username/password
 
-${c('yellow', 'COMMON OPTIONS:')}
-  ${c('cyan', '-m, --method')}       Auth method (default: email)
-  ${c('cyan', '-u, --username')}     Username or email address
-  ${c('cyan', '-p, --password')}     Password
+  Other providers (OAuth2, OIDC, GitHub, SAML, ...) are browser-only: sign in
+  with a browser and copy the ${c('cyan', 'connect.sid')} cookie from its developer tools.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-m, --method')}       email or ldap (alternative to the positional form)
+  ${c('cyan', '-u, --username')}     Email address or LDAP username
+  ${c('cyan', '--password-stdin')}   Read the password from stdin (first line)
   ${c('cyan', '--timeout')}          Request timeout in seconds (default: 30)
-  ${c('cyan', '--json')}             Output in JSON format
+  ${c('cyan', '--json')}             Print the full result (cookie, user) as JSON
   ${c('cyan', '-q, --quiet')}        Suppress progress messages
+  ${c('cyan', '-H, --header')}       Extra request header (e.g. for proxy auth)
 
-${c('yellow', 'OIDC OPTIONS:')}
-  ${c('cyan', '--port')}             Local port for OIDC callback (default: random)
+  The password is taken from ${c('cyan', 'HEDGEDOC_PASSWORD')}, from stdin with
+  --password-stdin, or prompted for on the terminal. It is never accepted as
+  an argument, where other users could read it from the process list.
 
-${c('yellow', 'DEVICE-CODE-OIDC OPTIONS:')} ${c('dim', '(for CLI with user authorization)')}
-  ${c('cyan', '--device-url')}       OAuth2 device authorization endpoint (required)
-  ${c('cyan', '--token-url')}        OAuth2 token endpoint URL (required)
-  ${c('cyan', '--client-id')}        OAuth2 client ID (required)
-  ${c('cyan', '--client-secret')}    OAuth2 client secret (optional)
-  ${c('cyan', '--scopes')}           Comma-separated scopes
-  ${c('cyan', '--timeout')}          User authorization timeout (default: 300s)
+  The login is verified against ${c('cyan', '/me')}, so a wrong password is an error.
+  Only the cookie goes to stdout; messages go to stderr.
 
 ${c('yellow', 'EXAMPLES:')}
-  ${c('dim', '# Email/password authentication:')}
-  hedgesync login https://md.example.com -u user@example.com -p secret
-  
-  ${c('dim', '# LDAP authentication:')}
-  hedgesync login https://md.example.com --method ldap -u myuser -p secret
-  
-  ${c('dim', '# OIDC (opens browser):')}
-  hedgesync login https://md.example.com --method oidc
-  
-  ${c('dim', '# Device Code + OIDC (RECOMMENDED for automation - one-time browser auth):')}
-  hedgesync login https://md.example.com --method device-code-oidc \\
-    --device-url https://auth.example.com/application/o/device/ \\
-    --token-url https://auth.example.com/application/o/token/ \\
-    --client-id my-cli-app
-  
-  ${c('dim', '# Get cookie in JSON format for scripting:')}
-  hedgesync login https://md.example.com -u user@example.com -p secret --json
-
-${c('yellow', 'AUTOMATION NOTES:')}
-  For automated scripts and bots, use one of these approaches:
-  
-  1. ${c('bold', 'LDAP')} - If HedgeDoc has LDAP enabled:
-     hedgesync login <url> --method ldap -u <user> -p <pass>
-  
-  2. ${c('bold', 'device-code-oidc')} - One-time auth, then cache the session:
-     - User authenticates once via device code flow
-     - Session cookie can be cached and reused until expiry
-     - Works with any OIDC/OAuth2 provider
-  
-  3. ${c('bold', 'Email')} - If HedgeDoc has email auth enabled:
-     hedgesync login <url> -u <email> -p <password>
+  export HEDGEDOC_COOKIE="$(hedgesync login https://md.example.com -u me@example.com)"
+  hedgesync login ldap https://md.example.com -u myuser
+  pass show hedgedoc | hedgesync login https://md.example.com -u me@example.com --password-stdin
 `
 };
 
@@ -1123,7 +1091,7 @@ ${c('yellow', 'HTTP API COMMANDS:')} ${c('dim', '(no realtime connection require
   ${c('green', 'unpin')}       Unpin a note from history
   ${c('green', 'history-delete')} Remove note from history
   ${c('green', 'status')}      Show server status
-  ${c('green', 'login')}       Authenticate and get session cookie
+  ${c('green', 'login')}       Log in (email/LDAP) and print a session cookie
 
 ${c('yellow', 'GLOBAL OPTIONS:')}
   ${c('cyan', '-c, --cookie')}   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
@@ -3433,7 +3401,7 @@ async function cmdHistory(args: ParsedArgs): Promise<void> {
 
   try {
     if (deleteAll) {
-      // deleteHistory fetches CSRF token internally
+      // deleteHistory fetches the delete token internally
       await api.deleteHistory();
       if (jsonOutput) {
         console.log(JSON.stringify({ success: true, action: 'delete-history' }, null, 2));
@@ -3619,286 +3587,127 @@ async function cmdStatus(args: ParsedArgs): Promise<void> {
 
 // Command: login (authenticate and get session cookie)
 async function cmdLogin(args: ParsedArgs): Promise<void> {
-  const validMethods = ['email', 'ldap', 'oidc', 'oauth', 'oauth2-password', 'device-code-oidc'];
-  
-  // Support both syntaxes:
-  // hedgesync login <method> <server-url>  (method as first positional)
-  // hedgesync login <server-url> --method <method>  (method as option)
-  let serverUrl: string;
-  let method: string;
-  
-  if (args.positional[0] && validMethods.includes(args.positional[0].toLowerCase())) {
-    // First positional is a method
-    method = args.positional[0].toLowerCase();
+  const methods = ['email', 'ldap'];
+  const browserOnly = ['oidc', 'oauth', 'oauth2', 'oauth2-password', 'device-code-oidc', 'browser', 'github', 'gitlab', 'saml'];
+  const jsonOutput = Boolean(args.options.json);
+  const quiet = Boolean(args.options.quiet || args.options.q);
+
+  const fail = (message: string, extra: Record<string, unknown> = {}, hint?: string): never => {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ success: false, error: message, ...extra }, null, 2));
+    } else {
+      console.error(c('red', `Error: ${message}`));
+      if (hint) console.error(c('dim', hint));
+    }
+    process.exit(1);
+  };
+
+  // hedgesync login [method] <server-url>   or   hedgesync login <server-url> --method <method>
+  let method = String(args.options.method || args.options.m || 'email').toLowerCase();
+  let serverUrl = args.positional[0];
+  const first = args.positional[0]?.toLowerCase();
+  if (first && (methods.includes(first) || browserOnly.includes(first))) {
+    method = first;
     serverUrl = args.positional[1];
-  } else {
-    // First positional is the URL, method from options
-    serverUrl = args.positional[0];
-    method = ((args.options.method || args.options.m || 'email') as string).toLowerCase();
   }
-  
-  const jsonOutput = args.options.json;
-  const username = (args.options.username || args.options.u || args.options.user) as string;
-  const password = (args.options.password || args.options.p) as string;
-  const quiet = args.options.quiet || args.options.q;
-  const requestTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 30000;
-  
+
+  if (browserOnly.includes(method)) {
+    fail(`'${method}' login is a browser redirect flow and cannot be done from the CLI`, {},
+      'Sign in with a browser and copy the connect.sid cookie from its developer tools, then use --cookie or HEDGEDOC_COOKIE.');
+  }
+  if (!methods.includes(method)) {
+    fail(`Unknown login method '${method}' (supported: ${methods.join(', ')})`);
+  }
   if (!serverUrl) {
-    if (jsonOutput) {
-      console.log(JSON.stringify({ success: false, error: 'Server URL required' }, null, 2));
-    } else {
-      console.error(c('red', 'Error: Server URL required'));
-      console.error('Usage: hedgesync login <method> <server-url> [options]');
-      console.error('       hedgesync login <server-url> --method <method> [options]');
-      console.error('Methods: email, ldap, oidc, device-code-oidc');
-    }
-    process.exit(1);
+    fail('Server URL required', {}, 'Usage: hedgesync login [email|ldap] <server-url> -u <user>');
   }
-  
-  // Parse custom headers
+  if (args.options.password !== undefined || args.options.p !== undefined) {
+    fail('Passwords are not accepted as arguments', {},
+      'Use HEDGEDOC_PASSWORD, --password-stdin, or enter it at the prompt.');
+  }
+
+  const username = (args.options.username || args.options.u || args.options.user) as string | undefined;
+  if (!username || typeof username !== 'string') {
+    fail(`${method === 'email' ? 'Email address' : 'Username'} required (-u)`);
+  }
+
+  let password: string;
+  if (args.options['password-stdin']) {
+    password = (await readStdin()).split(/\r?\n/)[0];
+  } else if (process.env.HEDGEDOC_PASSWORD) {
+    password = process.env.HEDGEDOC_PASSWORD;
+  } else if (process.stdin.isTTY && process.stderr.isTTY) {
+    password = await promptHidden(`Password for ${username}: `);
+  } else {
+    fail('No password given', {}, 'Use HEDGEDOC_PASSWORD or --password-stdin when not running on a terminal.');
+  }
+  if (!password!) fail('Empty password');
+
+  const timeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 30000;
   const headers = parseHeaders(args);
-  
-  try {
-    let result;
-    
-    switch (method) {
-      case 'email': {
-        if (!username || !password) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ success: false, error: 'Email and password required for email auth' }, null, 2));
-          } else {
-            console.error(c('red', 'Error: Email and password required for email authentication'));
-            console.error('Usage: hedgesync login <server-url> --method email -u <email> -p <password>');
-          }
-          process.exit(1);
-        }
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', `Authenticating with email ${username}...`));
-        }
-        
-        result = await loginWithEmail({
-          serverUrl,
-          email: username,
-          password,
-          headers,
-          timeout: requestTimeout
-        });
-        break;
-      }
-      
-      case 'ldap': {
-        if (!username || !password) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ success: false, error: 'Username and password required for LDAP auth' }, null, 2));
-          } else {
-            console.error(c('red', 'Error: Username and password required for LDAP authentication'));
-            console.error('Usage: hedgesync login <server-url> --method ldap -u <username> -p <password>');
-          }
-          process.exit(1);
-        }
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', `Authenticating with LDAP as ${username}...`));
-        }
-        
-        result = await loginWithLDAP({
-          serverUrl,
-          username,
-          password,
-          headers,
-          timeout: requestTimeout
-        });
-        break;
-      }
-      
-      case 'oidc':
-      case 'oauth':
-      case 'browser': {
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', 'Starting OIDC authentication...'));
-          console.error(c('dim', 'A browser window will open for you to complete the login.'));
-        }
-        
-        const callbackPort = args.options.port ? parseInt(args.options.port as string, 10) : undefined;
-        // OIDC has a longer default timeout (5 min) for user interaction
-        const oidcTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 300000;
-        
-        result = await loginWithOIDC({
-          serverUrl,
-          headers,
-          callbackPort,
-          timeout: oidcTimeout
-        });
-        break;
-      }
-      
-      case 'oauth2-password':
-      case 'oauth2-pw': {
-        // OAuth2 password grant for bot/service account automation (deprecated in OAuth 2.1)
-        const tokenUrl = args.options['token-url'] as string;
-        const clientId = args.options['client-id'] as string;
-        const clientSecret = args.options['client-secret'] as string | undefined;
-        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : undefined;
-        
-        if (!tokenUrl || !clientId || !username || !password) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ 
-              success: false, 
-              error: 'OAuth2 password grant requires: --token-url, --client-id, -u/--username, -p/--password' 
-            }, null, 2));
-          } else {
-            console.error(c('red', 'Error: OAuth2 password grant requires token URL, client ID, username, and password'));
-            console.error('Usage: hedgesync login <server-url> --method oauth2-password \\');
-            console.error('         --token-url <url> --client-id <id> -u <user> -p <pass> [--client-secret <secret>]');
-            console.error(c('yellow', '\nNote: Password grant is deprecated in OAuth 2.1. Consider using:'));
-            console.error(c('yellow', '  --method device-code-oidc    (for CLI with user authorization)'));
-          }
-          process.exit(1);
-        }
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', `Authenticating via OAuth2 password grant as ${username}...`));
-          console.error(c('yellow', 'Warning: Password grant is deprecated in OAuth 2.1'));
-        }
-        
-        result = await loginWithOAuth2Password({
-          serverUrl,
-          tokenUrl,
-          clientId,
-          clientSecret,
-          username,
-          password,
-          scopes,
-          headers,
-          timeout: requestTimeout
-        });
-        break;
-      }
-      
-      case 'device-code-oidc': {
-        // Device Code + OIDC combined flow - authenticates via device code, then completes OAuth
-        const deviceAuthUrl = args.options['device-url'] as string;
-        const tokenUrl = args.options['token-url'] as string;
-        const clientId = args.options['client-id'] as string;
-        const clientSecret = args.options['client-secret'] as string | undefined;
-        const scopes = args.options.scopes ? (args.options.scopes as string).split(',').map(s => s.trim()) : ['openid', 'profile', 'email'];
-        
-        if (!deviceAuthUrl || !tokenUrl || !clientId) {
-          if (jsonOutput) {
-            console.log(JSON.stringify({ 
-              success: false, 
-              error: 'Device code OIDC flow requires: --device-url, --token-url, --client-id' 
-            }, null, 2));
-          } else {
-            console.error(c('red', 'Error: Device code OIDC flow requires device auth URL, token URL, and client ID'));
-            console.error('Usage: hedgesync login <server-url> --method device-code-oidc \\');
-            console.error('         --device-url <url> --token-url <url> --client-id <id>');
-          }
-          process.exit(1);
-        }
-        
-        const deviceTimeout = args.options.timeout ? parseInt(args.options.timeout as string, 10) * 1000 : 300000;
-        
-        const onUserCode = jsonOutput ? undefined : (info: DeviceCodeInfo) => {
-          console.log();
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log(c('bold', '  Device Authorization Required'));
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log();
-          console.log(`  ${c('cyan', 'Step 1:')} Open this URL in your browser:`);
-          console.log(`          ${c('green', info.verificationUriComplete || info.verificationUri)}`);
-          console.log();
-          console.log(`  ${c('cyan', 'Step 2:')} Enter this code:`);
-          console.log(`          ${c('bold', c('yellow', info.userCode))}`);
-          console.log();
-          console.log(`  ${c('cyan', '⚠️  IMPORTANT:')} After authorizing, ${c('bold', 'DO NOT close your browser!')}`);
-          console.log(`          We will automatically complete the HedgeDoc OAuth flow.`);
-          console.log();
-          console.log(`  ${c('dim', `Code expires in ${info.expiresIn} seconds...`)}`);
-          console.log(c('bold', '══════════════════════════════════════════════════'));
-          console.log();
-        };
-        
-        // Function to open browser
-        const onOpenBrowser = async (url: string) => {
-          const { spawn } = await import('child_process');
-          const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-          spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
-        };
-        
-        if (!quiet && !jsonOutput) {
-          console.error(c('dim', 'Starting device authorization + OIDC flow...'));
-        }
-        
-        result = await loginWithDeviceCodeOIDC({
-          serverUrl,
-          deviceAuthUrl,
-          tokenUrl,
-          clientId,
-          clientSecret,
-          scopes,
-          headers,
-          timeout: deviceTimeout,
-          onUserCode,
-          onOpenBrowser
-        });
-        break;
-      }
-      
-      default:
-        if (jsonOutput) {
-          console.log(JSON.stringify({ success: false, error: `Unknown auth method: ${method}` }, null, 2));
-        } else {
-          console.error(c('red', `Error: Unknown authentication method: ${method}`));
-          console.error('Supported methods: email, ldap, oidc, client-credentials, device-code, device-code-oidc, oauth2-password');
-        }
-        process.exit(1);
-    }
-    
-    if (jsonOutput) {
-      console.log(JSON.stringify({
-        success: true,
-        action: 'login',
-        method: method.toLowerCase(),
-        sessionId: result.sessionId,
-        cookie: result.cookie,
-        acquiredAt: result.acquiredAt.toISOString()
-      }, null, 2));
-    } else {
-      console.log(c('green', '✓ Authentication successful'));
-      console.log();
-      console.log(c('bold', 'Session Cookie:'));
-      console.log(result.cookie);
-      console.log();
-      console.log(c('dim', 'Usage:'));
-      console.log(c('dim', `  hedgesync get <url> -c "${result.cookie}"`));
-      console.log(c('dim', '  # or'));
-      console.log(c('dim', `  export HEDGEDOC_COOKIE="${result.cookie}"`));
-    }
-    
-  } catch (err) {
-    if (jsonOutput) {
-      const message = err instanceof Error ? err.message : String(err);
-      const statusCode = err instanceof AuthError ? err.statusCode : undefined;
-      console.log(JSON.stringify({ success: false, error: message, statusCode }, null, 2));
-      process.exit(1);
-    }
-    
-    if (err instanceof AuthError) {
-      console.error(c('red', `Authentication error: ${err.message}`));
-      if (err.statusCode === 401) {
-        console.error(c('dim', 'Hint: Check your username/email and password'));
-      } else if (err.statusCode === 404) {
-        console.error(c('dim', 'Hint: This authentication method may not be enabled on the server'));
-      }
-    } else if (err instanceof Error) {
-      console.error(c('red', `Error: ${err.message}`));
-    } else {
-      console.error(c('red', 'Unknown error occurred'));
-    }
-    process.exit(1);
+
+  if (!quiet && !jsonOutput) {
+    console.error(c('dim', `Logging in to ${serverUrl} as ${username} (${method})...`));
   }
+
+  let result: AuthResult;
+  try {
+    result = method === 'email'
+      ? await loginWithEmail({ serverUrl: serverUrl!, email: username!, password: password!, headers, timeout })
+      : await loginWithLDAP({ serverUrl: serverUrl!, username: username!, password: password!, headers, timeout });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const statusCode = err instanceof AuthError ? err.statusCode : undefined;
+    return fail(message, { statusCode });
+  }
+
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      success: true,
+      method,
+      cookie: result.cookie,
+      sessionId: result.sessionId,
+      user: result.user,
+      acquiredAt: result.acquiredAt.toISOString(),
+    }, null, 2));
+    return;
+  }
+  if (!quiet) {
+    console.error(c('green', `✓ Logged in as ${result.user.name || result.user.id}`));
+    if (process.stdout.isTTY) {
+      console.error(c('dim', 'Tip: export HEDGEDOC_COOKIE="$(hedgesync login ...)" keeps the cookie out of your scrollback.'));
+    }
+  }
+  console.log(result.cookie);
+}
+
+/** Prompt on stderr and read a line from the terminal without echoing it. */
+function promptHidden(prompt: string): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const stdin = process.stdin;
+    process.stderr.write(prompt);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    let value = '';
+    const finish = (err?: Error) => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeListener('data', onData);
+      process.stderr.write('\n');
+      if (err) reject(err);
+      else resolvePromise(value);
+    };
+    const onData = (data: string) => {
+      for (const ch of data) {
+        if (ch === '\r' || ch === '\n' || ch === '\u0004') return finish();
+        if (ch === '\u0003') return finish(new Error('Cancelled'));
+        if (ch === '\u007f' || ch === '\b') value = value.slice(0, -1);
+        else if (ch >= ' ') value += ch;
+      }
+    };
+    stdin.on('data', onData);
+  });
 }
 
 // Helper function to handle API errors consistently

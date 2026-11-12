@@ -22,17 +22,20 @@ HedgeDoc 1.x uses [Passport.js](http://www.passportjs.org/) for authentication w
 
 | Method | Requirements | Limitations |
 |--------|--------------|-------------|
-| Email/Password | HedgeDoc email auth enabled | Requires storing credentials |
-| LDAP | HedgeDoc LDAP configured | Requires storing credentials |
-| OIDC (browser) | Can open local browser | Not suitable for headless/remote servers |
-| Device Code + OIDC | IdP device code support | Requires one-time browser interaction |
+| Email/Password (`POST /login`) | HedgeDoc email auth enabled | Requires storing credentials |
+| LDAP (`POST /auth/ldap`) | HedgeDoc LDAP configured | Requires storing credentials |
+| Cookie copied from a browser | Any provider | Manual; expires with the session |
+
+Both credential endpoints answer success and failure with the same 302
+redirect and set a session cookie either way, so a client must confirm the
+login with `GET /me` (`{"status":"ok", ...}` vs `{"status":"forbidden"}`).
 
 ### What Doesn't Work
 
 | Method | Why It Fails |
 |--------|--------------|
-| OAuth2 Client Credentials | Gets a valid token, but HedgeDoc can't use it |
-| OAuth2 Device Code (standalone) | Same problem - token can't be exchanged for session |
+| OIDC/OAuth2 via a local callback server | HedgeDoc's callback URL is HedgeDoc itself, and the `state` lives in the browser's session, so a CLI cannot complete the flow |
+| OAuth2 Client Credentials / Device Code / Password grant | Gets a valid token, but HedgeDoc can't exchange it for a session |
 | Bearer Token Header | HedgeDoc doesn't check for/accept Bearer tokens |
 
 ## Proposed Solutions

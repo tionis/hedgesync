@@ -75,27 +75,21 @@ export type {
 } from './url.js';
 
 // Authentication
-export { 
-  normalizeCookie, 
+export {
+  normalizeCookie,
   extractSessionId,
-  loginWithEmail, 
-  loginWithLDAP, 
-  loginWithOIDC,
-  loginWithOAuth2Password,
-  loginWithDeviceCodeOIDC,
-  detectAuthMethods,
-  AuthError 
+  parseSetCookie,
+  loginWithEmail,
+  loginWithLDAP,
+  getSessionUser,
+  AuthError
 } from './auth.js';
-export type { 
+export type {
   AuthResult,
+  SessionUser,
   EmailAuthOptions,
   LDAPAuthOptions,
-  OIDCAuthOptions,
-  OAuth2PasswordOptions,
-  DeviceCodeOIDCOptions,
-  DeviceCodeInfo,
-  AutoAuthOptions,
-  ServerAuthMethods
+  SessionCheckOptions
 } from './auth.js';
 
 // Pandoc integration

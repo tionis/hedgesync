@@ -1,164 +1,74 @@
 /**
- * HedgeDoc Authentication Module
- * 
- * Provides automatic session cookie acquisition through various auth methods:
- * - Email/password (local auth)
- * - LDAP authentication
- * - OIDC/OAuth2 (requires interactive browser flow)
+ * HedgeDoc 1.x login helpers.
+ *
+ * HedgeDoc 1.x has two credential forms a client can post to: email/password
+ * (`POST /login`) and LDAP (`POST /auth/ldap`). All other providers (OAuth2,
+ * OIDC, GitHub, SAML, ...) are browser redirect flows that end in a session
+ * cookie; for those, sign in with a browser and copy the cookie.
+ *
+ * Both forms answer success *and* failure with the same 302 redirect to the
+ * front page, and the session middleware sets a cookie either way, so neither
+ * the status code nor the presence of a cookie says whether the login worked.
+ * After posting, we therefore ask `GET /me`, which reports `status: 'ok'` only
+ * for an authenticated session.
  */
 
-import { createServer } from 'node:http';
-import type { Server, IncomingMessage, ServerResponse } from 'node:http';
-import { parse as parseUrl } from 'node:url';
-import { randomBytes } from 'node:crypto';
-import { normalizeCookie, extractSessionId } from './cookie.js';
+import { defaultHedgeSyncRequest, getHeader } from './http.js';
+import type { HedgeSyncRequestFn, HedgeSyncHttpResponse } from './http.js';
+import { DEFAULT_SESSION_COOKIE, normalizeCookie, parseSetCookie } from './cookie.js';
 
-export { normalizeCookie, extractSessionId } from './cookie.js';
+export { normalizeCookie, extractSessionId, parseSetCookie } from './cookie.js';
 
-// ===========================================
-// Types
-// ===========================================
+/** The account a session belongs to, as reported by `GET /me`. */
+export interface SessionUser {
+  id: string;
+  name: string;
+  photo?: string;
+}
 
 export interface AuthResult {
-  /** The session cookie value (just the value, without 'connect.sid=' prefix) */
+  /** Value of the session cookie (connect.sid, or the only cookie set). */
   sessionId: string;
-  /** The full cookie string ready for use in requests */
+  /** Cookie header to send with later requests, e.g. "connect.sid=s%3A..." */
   cookie: string;
-  /** When the session was acquired */
+  /** The logged-in account. */
+  user: SessionUser;
+  /** When the session was acquired. */
   acquiredAt: Date;
 }
 
-export interface EmailAuthOptions {
-  /** HedgeDoc server URL */
+interface CommonAuthOptions {
+  /** HedgeDoc server URL, including any sub-path. */
   serverUrl: string;
-  /** Email address */
+  /** Password. */
+  password: string;
+  /** Extra headers, e.g. for reverse proxy auth. */
+  headers?: Record<string, string>;
+  /** Per-request timeout in milliseconds (default: 30000). */
+  timeout?: number;
+  /** HTTP transport (default: global fetch). */
+  request?: HedgeSyncRequestFn;
+}
+
+export interface EmailAuthOptions extends CommonAuthOptions {
   email: string;
-  /** Password */
-  password: string;
-  /** Custom headers for reverse proxy auth */
-  headers?: Record<string, string>;
-  /** Request timeout in milliseconds (default: 30000) */
-  timeout?: number;
 }
 
-export interface LDAPAuthOptions {
-  /** HedgeDoc server URL */
-  serverUrl: string;
-  /** LDAP username */
+export interface LDAPAuthOptions extends CommonAuthOptions {
   username: string;
-  /** LDAP password */
-  password: string;
-  /** Custom headers for reverse proxy auth */
-  headers?: Record<string, string>;
-  /** Request timeout in milliseconds (default: 30000) */
-  timeout?: number;
 }
 
-export interface OIDCAuthOptions {
-  /** HedgeDoc server URL */
+export interface SessionCheckOptions {
   serverUrl: string;
-  /** Local port for OAuth callback (default: random available port) */
-  callbackPort?: number;
-  /** Timeout in milliseconds for user to complete auth (default: 300000 = 5 minutes) */
-  timeout?: number;
-  /** Custom headers for reverse proxy auth */
+  cookie: string;
   headers?: Record<string, string>;
-  /** Callback when browser should be opened */
-  onOpenBrowser?: (url: string) => void | Promise<void>;
-}
-
-/**
- * Options for OAuth2 Resource Owner Password Credentials (ROPC) flow.
- * This is useful for bot/service account automation with OIDC providers like Authentik.
- * 
- * @deprecated ROPC is removed in OAuth 2.1. Consider using:
- * - Client Credentials flow for pure M2M (no user context)
- * - Device Authorization Grant for CLI tools that need user authorization
- */
-export interface OAuth2PasswordOptions {
-  /** HedgeDoc server URL */
-  serverUrl: string;
-  /** OAuth2 token endpoint URL (e.g., https://authentik.example.com/application/o/token/) */
-  tokenUrl: string;
-  /** OAuth2 client ID */
-  clientId: string;
-  /** OAuth2 client secret (optional for public clients) */
-  clientSecret?: string;
-  /** Username for authentication */
-  username: string;
-  /** Password or service account token */
-  password: string;
-  /** OAuth2 scopes to request (default: openid profile email) */
-  scopes?: string[];
-  /** Custom headers for reverse proxy auth */
-  headers?: Record<string, string>;
-  /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
-}
-
-/**
- * Options for device-code-assisted OIDC authentication.
- * 
- * This combines device code flow (for user authentication) with OIDC flow
- * (for HedgeDoc session creation). The user authenticates via device code,
- * and then we automatically complete the OAuth flow using their browser session.
- * 
- * This is useful for:
- * - CLI tools on headless servers
- * - Scripts that need to authenticate once and cache the session
- * - Service accounts that need user consent
- * 
- * Flow:
- * 1. Start device code flow - user visits IdP and authenticates
- * 2. Once user completes auth, we know they have an IdP browser session
- * 3. We start a local callback server and redirect to HedgeDoc's OAuth URL
- * 4. Since user is already logged into IdP, it auto-approves and redirects
- * 5. We capture the code and complete the HedgeDoc session
- */
-export interface DeviceCodeOIDCOptions {
-  /** HedgeDoc server URL */
-  serverUrl: string;
-  /** OAuth2 device authorization endpoint URL */
-  deviceAuthUrl: string;
-  /** OAuth2 token endpoint URL */
-  tokenUrl: string;
-  /** OAuth2 client ID for device code flow */
-  clientId: string;
-  /** OAuth2 client secret (optional) */
-  clientSecret?: string;
-  /** OAuth2 scopes for device code flow */
-  scopes?: string[];
-  /** Custom headers for reverse proxy auth */
-  headers?: Record<string, string>;
-  /** Timeout in milliseconds (default: 300000 = 5 minutes) */
-  timeout?: number;
-  /** Callback when user code is ready to be displayed */
-  onUserCode?: (info: DeviceCodeInfo) => void | Promise<void>;
-  /** Callback when browser should be opened for OAuth flow */
-  onOpenBrowser?: (url: string) => void | Promise<void>;
-}
-
-/**
- * Information returned from device authorization request
- */
-export interface DeviceCodeInfo {
-  /** The device verification code */
-  deviceCode: string;
-  /** The end-user verification code to display */
-  userCode: string;
-  /** The verification URI the user should visit */
-  verificationUri: string;
-  /** Optional URI with user code pre-filled */
-  verificationUriComplete?: string;
-  /** Lifetime in seconds of the device_code and user_code */
-  expiresIn: number;
-  /** Minimum interval in seconds between polling requests */
-  interval: number;
+  request?: HedgeSyncRequestFn;
 }
 
 export class AuthError extends Error {
   statusCode?: number;
-  
+
   constructor(message: string, statusCode?: number) {
     super(message);
     this.name = 'AuthError';
@@ -166,1078 +76,101 @@ export class AuthError extends Error {
   }
 }
 
-/**
- * Extract session cookie from Set-Cookie headers.
- */
-function extractSessionCookie(setCookieHeaders: string | string[] | undefined): string | null {
-  if (!setCookieHeaders) return null;
-  
-  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
-  
-  for (const header of headers) {
-    if (header.startsWith('connect.sid=')) {
-      const match = header.match(/^connect\.sid=([^;]+)/);
-      if (match) {
-        return match[1];
-      }
-    }
-  }
-  
-  return null;
+/** Log in with HedgeDoc's built-in email/password provider. */
+export function loginWithEmail(options: EmailAuthOptions): Promise<AuthResult> {
+  return formLogin('/login', { email: options.email, password: options.password }, options, 'email or password');
 }
 
-// ===========================================
-// Email/Password Authentication
-// ===========================================
+/** Log in with HedgeDoc's LDAP provider. */
+export function loginWithLDAP(options: LDAPAuthOptions): Promise<AuthResult> {
+  return formLogin('/auth/ldap', { username: options.username, password: options.password }, options, 'username or password');
+}
 
 /**
- * Authenticate with HedgeDoc using email and password.
- * 
- * This works with HedgeDoc's built-in email authentication.
+ * Return the account a session cookie belongs to, or null if the cookie is
+ * not (or no longer) logged in.
  */
-export async function loginWithEmail(options: EmailAuthOptions): Promise<AuthResult> {
-  const { serverUrl, email, password, headers = {}, timeout = 30000 } = options;
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  // Create abort controller for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
+export async function getSessionUser(options: SessionCheckOptions): Promise<SessionUser | null> {
+  const { serverUrl, cookie, headers = {}, timeout = 30000, request = defaultHedgeSyncRequest } = options;
+  const res = await withTimeout(request({
+    url: `${trimUrl(serverUrl)}/me`,
+    headers: { Accept: 'application/json', ...headers, Cookie: normalizeCookie(cookie) },
+    redirect: 'manual',
+  }), timeout);
+  if (res.status !== 200) {
+    throw new AuthError(`Session check failed: GET /me returned HTTP ${res.status}`, res.status);
+  }
+  let body: { status?: string; id?: unknown; name?: unknown; photo?: unknown };
   try {
-    // First, get the login page to obtain any CSRF token
-    const configResponse = await fetch(`${baseUrl}/config`, {
-      headers: {
-        'Accept': 'application/json',
-        ...headers,
-      },
-      signal: controller.signal,
-    });
-    
-    let csrfToken: string | undefined;
-    if (configResponse.ok) {
-      try {
-        const config = await configResponse.json() as Record<string, unknown>;
-        csrfToken = config.CSRF as string | undefined;
-      } catch {
-        // No CSRF token available
-      }
-    }
-    
-    // Perform the login
-    const formData = new URLSearchParams();
-    formData.append('email', email);
-    formData.append('password', password);
-    
-    const loginHeaders: Record<string, string> = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      ...headers,
-    };
-    
-    if (csrfToken) {
-      loginHeaders['X-XSRF-TOKEN'] = csrfToken;
-    }
-    
-    const loginResponse = await fetch(`${baseUrl}/auth/email/login`, {
-      method: 'POST',
-      headers: loginHeaders,
-      body: formData.toString(),
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    
-    // Check for session cookie in response
-    const setCookie = loginResponse.headers.get('set-cookie') || 
-                     loginResponse.headers.getSetCookie?.();
-    const sessionId = extractSessionCookie(setCookie);
-    
-    if (!sessionId) {
-      // Check if we got an error response
-      if (loginResponse.status === 401 || loginResponse.status === 403) {
-        throw new AuthError('Invalid email or password', loginResponse.status);
-      }
-      if (loginResponse.status >= 400) {
-        throw new AuthError(`Login failed with status ${loginResponse.status}`, loginResponse.status);
-      }
-      throw new AuthError('No session cookie received. Authentication may have failed.');
-    }
-    
-    return {
-      sessionId,
-      cookie: `connect.sid=${sessionId}`,
-      acquiredAt: new Date(),
-    };
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new AuthError(`Login request timed out after ${timeout}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
+    body = JSON.parse(await res.text());
+  } catch {
+    throw new AuthError('Session check failed: GET /me did not return JSON (is this a HedgeDoc 1.x server?)');
   }
-}
-
-// ===========================================
-// LDAP Authentication
-// ===========================================
-
-/**
- * Authenticate with HedgeDoc using LDAP credentials.
- */
-export async function loginWithLDAP(options: LDAPAuthOptions): Promise<AuthResult> {
-  const { serverUrl, username, password, headers = {}, timeout = 30000 } = options;
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  // Create abort controller for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
-  try {
-    // First, get the config to obtain any CSRF token
-    const configResponse = await fetch(`${baseUrl}/config`, {
-      headers: {
-        'Accept': 'application/json',
-        ...headers,
-      },
-      signal: controller.signal,
-    });
-    
-    let csrfToken: string | undefined;
-    if (configResponse.ok) {
-      try {
-        const config = await configResponse.json() as Record<string, unknown>;
-        csrfToken = config.CSRF as string | undefined;
-      } catch {
-        // No CSRF token available
-      }
-    }
-    
-    // Perform the LDAP login
-    const formData = new URLSearchParams();
-    formData.append('username', username);
-    formData.append('password', password);
-    
-    const loginHeaders: Record<string, string> = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      ...headers,
-    };
-    
-    if (csrfToken) {
-      loginHeaders['X-XSRF-TOKEN'] = csrfToken;
-    }
-    
-    const loginResponse = await fetch(`${baseUrl}/auth/ldap`, {
-      method: 'POST',
-      headers: loginHeaders,
-      body: formData.toString(),
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    
-    // Check for session cookie in response
-    const setCookie = loginResponse.headers.get('set-cookie') || 
-                     loginResponse.headers.getSetCookie?.();
-    const sessionId = extractSessionCookie(setCookie);
-    
-    if (!sessionId) {
-      if (loginResponse.status === 401 || loginResponse.status === 403) {
-        throw new AuthError('Invalid LDAP credentials', loginResponse.status);
-      }
-      if (loginResponse.status >= 400) {
-        throw new AuthError(`LDAP login failed with status ${loginResponse.status}`, loginResponse.status);
-      }
-      throw new AuthError('No session cookie received. LDAP authentication may have failed.');
-    }
-    
-    return {
-      sessionId,
-      cookie: `connect.sid=${sessionId}`,
-      acquiredAt: new Date(),
-    };
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new AuthError(`LDAP login request timed out after ${timeout}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// ===========================================
-// OIDC/OAuth2 Authentication
-// ===========================================
-
-/**
- * Authenticate with HedgeDoc using OIDC/OAuth2.
- * 
- * This starts a local HTTP server to receive the OAuth callback,
- * then opens the browser to the HedgeDoc OAuth login page.
- * 
- * The user must complete the authentication in their browser.
- */
-export async function loginWithOIDC(options: OIDCAuthOptions): Promise<AuthResult> {
-  const { 
-    serverUrl, 
-    callbackPort, 
-    timeout = 300000,
-    headers = {},
-    onOpenBrowser 
-  } = options;
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  return new Promise(async (resolve, reject) => {
-    let server: Server | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let hedgedocSessionCookie: string | null = null;
-    let originalCallbackUrl: string = '';
-    
-    const cleanup = () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      if (server) {
-        server.close();
-        server = null;
-      }
-    };
-    
-    // Set up timeout
-    timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new AuthError(`OIDC authentication timed out after ${timeout}ms`));
-    }, timeout);
-    
-    try {
-      // Step 1: Hit HedgeDoc's /auth/oauth2 to get the OAuth redirect URL and session cookie
-      const initResponse = await fetch(`${baseUrl}/auth/oauth2`, {
-        redirect: 'manual',
-        headers: {
-          'Accept': 'text/html',
-          ...headers,
-        },
-      });
-      
-      // Extract the session cookie HedgeDoc creates
-      const setCookieHeader = initResponse.headers.get('set-cookie') || '';
-      const cookieMatch = setCookieHeader.match(/connect\.sid=([^;]+)/);
-      if (cookieMatch) {
-        hedgedocSessionCookie = cookieMatch[1];
-      }
-      
-      if (!hedgedocSessionCookie) {
-        throw new AuthError('HedgeDoc did not return a session cookie');
-      }
-      
-      // Get the OAuth authorization URL from the redirect
-      const oauthRedirectUrl = initResponse.headers.get('location');
-      if (!oauthRedirectUrl) {
-        throw new AuthError('HedgeDoc did not redirect to OAuth provider. Is OAuth2 enabled?');
-      }
-      
-      // Parse the OAuth URL to extract the original redirect_uri
-      const oauthUrl = new URL(oauthRedirectUrl);
-      originalCallbackUrl = oauthUrl.searchParams.get('redirect_uri') || `${baseUrl}/auth/oauth2/callback`;
-      
-      // Create local server to intercept the callback
-      server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        const reqUrl = parseUrl(req.url || '', true);
-        
-        // Handle the OAuth callback
-        if (reqUrl.pathname === '/callback' || reqUrl.pathname === '/auth/oauth2/callback') {
-          const code = reqUrl.query.code as string;
-          const returnedState = reqUrl.query.state as string;
-          const error = reqUrl.query.error as string;
-          
-          if (error) {
-            cleanup();
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Failed</title></head>
-              <body>
-                <h1>❌ Authentication Failed</h1>
-                <p>Error: ${error}</p>
-                <p>${reqUrl.query.error_description || ''}</p>
-              </body>
-              </html>
-            `);
-            reject(new AuthError(`OAuth authentication failed: ${error}`));
-            return;
-          }
-          
-          if (!code) {
-            cleanup();
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>Error: No authorization code received</h1>');
-            reject(new AuthError('No authorization code received from OAuth provider'));
-            return;
-          }
-          
-          try {
-            // Forward the callback to HedgeDoc with the original session cookie
-            // Build the callback URL with the code and state
-            const hedgedocCallbackUrl = new URL(originalCallbackUrl);
-            hedgedocCallbackUrl.searchParams.set('code', code);
-            if (returnedState) {
-              hedgedocCallbackUrl.searchParams.set('state', returnedState);
-            }
-            
-            const hedgedocCallback = await fetch(hedgedocCallbackUrl.toString(), {
-              redirect: 'manual',
-              headers: {
-                'Cookie': `connect.sid=${hedgedocSessionCookie}`,
-                'Accept': 'text/html',
-                ...headers,
-              },
-            });
-            
-            // Check if we got a new session cookie (some setups refresh it)
-            const newSetCookie = hedgedocCallback.headers.get('set-cookie') || '';
-            const newCookieMatch = newSetCookie.match(/connect\.sid=([^;]+)/);
-            const finalSessionId = newCookieMatch ? newCookieMatch[1] : hedgedocSessionCookie!;
-            
-            // Verify the session is actually authenticated
-            const verifyResponse = await fetch(`${baseUrl}/me`, {
-              headers: {
-                'Cookie': `connect.sid=${finalSessionId}`,
-                'Accept': 'application/json',
-                ...headers,
-              },
-            });
-            
-            const verifyData = await verifyResponse.json() as Record<string, unknown>;
-            
-            if (verifyData.status === 'forbidden' || (!verifyData.id && !verifyData.name && verifyData.status !== 'ok')) {
-              throw new AuthError('OAuth authentication completed but session is not authenticated. The IdP may have rejected the redirect_uri.');
-            }
-            
-            cleanup();
-            
-            // Send success response to browser
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Successful</title></head>
-              <body>
-                <h1>✓ Authentication Successful</h1>
-                <p>You can close this window and return to the terminal.</p>
-                <script>setTimeout(() => window.close(), 1500);</script>
-              </body>
-              </html>
-            `);
-            
-            resolve({
-              sessionId: finalSessionId,
-              cookie: `connect.sid=${finalSessionId}`,
-              acquiredAt: new Date(),
-            });
-          } catch (err) {
-            cleanup();
-            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-            const errorMessage = err instanceof Error ? err.message : String(err);
-            res.end(`<h1>Error completing authentication</h1><p>${errorMessage}</p>`);
-            reject(err instanceof AuthError ? err : new AuthError(`Failed to complete OAuth: ${err}`));
-          }
-        } else {
-          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end('<h1>Not Found</h1>');
-        }
-      });
-      
-      // Listen on specified port or random available port
-      const port = callbackPort || 0;
-      server.listen(port, '127.0.0.1', async () => {
-        const address = server!.address();
-        const actualPort = typeof address === 'object' && address ? address.port : port;
-        
-        // Create local callback URL
-        const localCallbackUrl = `http://127.0.0.1:${actualPort}/callback`;
-        
-        // Modify the OAuth URL to redirect to our local server
-        // Note: This will only work if the IdP allows localhost redirects
-        oauthUrl.searchParams.set('redirect_uri', localCallbackUrl);
-        const modifiedOAuthUrl = oauthUrl.toString();
-        
-        console.log(`\nOpening browser for authentication...`);
-        console.log(`\nIf the browser doesn't open, visit:`);
-        console.log(`  ${modifiedOAuthUrl}`);
-        console.log(`\nNote: Your IdP must allow localhost redirects for this to work.`);
-        console.log(`If authentication fails, you may need to add http://127.0.0.1:${actualPort}/callback`);
-        console.log(`to your IdP's allowed redirect URIs.\n`);
-        
-        // Try to open browser
-        if (onOpenBrowser) {
-          try {
-            await onOpenBrowser(modifiedOAuthUrl);
-          } catch (e) {
-            // Ignore browser open errors
-          }
-        }
-      });
-      
-      server.on('error', (err) => {
-        cleanup();
-        reject(new AuthError(`Failed to start local auth server: ${err.message}`));
-      });
-      
-    } catch (err) {
-      cleanup();
-      reject(err instanceof AuthError ? err : new AuthError(`OIDC initialization failed: ${err}`));
-    }
-  });
-}
-
-// ===========================================
-// OAuth2 Password Grant (for bot/service accounts)
-// ===========================================
-
-/**
- * Authenticate using OAuth2 Resource Owner Password Credentials (ROPC) flow.
- * 
- * This is designed for bot/service account automation with OIDC providers like Authentik.
- * 
- * The flow:
- * 1. Get an OAuth2 access token from the IdP using username/password + client credentials
- * 2. Use that token to authenticate with HedgeDoc's OAuth2 endpoint
- * 3. Return the HedgeDoc session cookie
- * 
- * Note: This requires the OIDC provider to support the password grant type.
- * For Authentik, you can create a service account and use its token.
- * 
- * @example
- * // With Authentik service account
- * const result = await loginWithOAuth2Password({
- *   serverUrl: 'https://hedgedoc.example.com',
- *   tokenUrl: 'https://authentik.example.com/application/o/token/',
- *   clientId: 'hedgedoc',
- *   clientSecret: 'your-client-secret',
- *   username: 'my-service-account',
- *   password: 'my-service-account-token',
- *   scopes: ['openid', 'profile', 'email']
- * });
- */
-export async function loginWithOAuth2Password(options: OAuth2PasswordOptions): Promise<AuthResult> {
-  const { 
-    serverUrl, 
-    tokenUrl, 
-    clientId, 
-    clientSecret,
-    username, 
-    password, 
-    scopes = ['openid', 'profile', 'email'],
-    headers = {},
-    timeout = 30000 
-  } = options;
-  
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  // Create abort controller for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
-  try {
-    // Step 1: Get OAuth2 access token from the IdP
-    const tokenParams = new URLSearchParams();
-    tokenParams.append('grant_type', 'password');
-    tokenParams.append('client_id', clientId);
-    if (clientSecret) {
-      tokenParams.append('client_secret', clientSecret);
-    }
-    tokenParams.append('username', username);
-    tokenParams.append('password', password);
-    tokenParams.append('scope', scopes.join(' '));
-    
-    const tokenResponse = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json',
-        ...headers,
-      },
-      body: tokenParams.toString(),
-      signal: controller.signal,
-    });
-    
-    if (!tokenResponse.ok) {
-      const errorBody = await tokenResponse.text();
-      let errorMessage = `OAuth2 token request failed with status ${tokenResponse.status}`;
-      try {
-        const errorJson = JSON.parse(errorBody) as Record<string, unknown>;
-        if (errorJson.error_description) {
-          errorMessage = `OAuth2 error: ${errorJson.error_description}`;
-        } else if (errorJson.error) {
-          errorMessage = `OAuth2 error: ${errorJson.error}`;
-        }
-      } catch {
-        // Use default error message
-      }
-      throw new AuthError(errorMessage, tokenResponse.status);
-    }
-    
-    const tokenData = await tokenResponse.json() as Record<string, unknown>;
-    const accessToken = tokenData.access_token as string;
-    
-    if (!accessToken) {
-      throw new AuthError('No access token received from OAuth2 provider');
-    }
-    
-    // Step 2: Use the access token to authenticate with HedgeDoc
-    // HedgeDoc's OAuth2 flow expects us to start from /auth/oauth2, but for API access
-    // we need to exchange the token. Unfortunately, HedgeDoc 1.x doesn't have a direct
-    // token exchange endpoint, so we need to use a workaround.
-    
-    // Try to call HedgeDoc's /me endpoint with the token to see if it accepts it
-    // This works if HedgeDoc is configured to accept Bearer tokens (e.g., via reverse proxy)
-    const meResponse = await fetch(`${baseUrl}/me`, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Accept': 'application/json',
-        ...headers,
-      },
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    
-    // Check if we got a session cookie from this request
-    let setCookie = meResponse.headers.get('set-cookie') || 
-                   meResponse.headers.getSetCookie?.();
-    let sessionId = extractSessionCookie(setCookie);
-    
-    if (sessionId) {
-      // Verify this session is actually authenticated
-      const verifyResponse = await fetch(`${baseUrl}/me`, {
-        headers: {
-          'Cookie': `connect.sid=${sessionId}`,
-          'Accept': 'application/json',
-          ...headers,
-        },
-        signal: controller.signal,
-      });
-      
-      if (verifyResponse.ok) {
-        const data = await verifyResponse.json() as Record<string, unknown>;
-        if (data.status === 'ok' || data.id || data.name) {
-          return {
-            sessionId,
-            cookie: `connect.sid=${sessionId}`,
-            acquiredAt: new Date(),
-          };
-        }
-      }
-    }
-    
-    // If that didn't work, try the callback URL approach
-    // Some HedgeDoc setups with reverse proxy auth might accept tokens differently
-    const callbackResponse = await fetch(`${baseUrl}/auth/oauth2/callback`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Accept': 'text/html,application/json',
-        ...headers,
-      },
-      redirect: 'manual',
-      signal: controller.signal,
-    });
-    
-    setCookie = callbackResponse.headers.get('set-cookie') || 
-               callbackResponse.headers.getSetCookie?.();
-    sessionId = extractSessionCookie(setCookie);
-    
-    if (sessionId) {
-      // Verify this session is actually authenticated
-      const verifyResponse = await fetch(`${baseUrl}/me`, {
-        headers: {
-          'Cookie': `connect.sid=${sessionId}`,
-          'Accept': 'application/json',
-          ...headers,
-        },
-        signal: controller.signal,
-      });
-      
-      if (verifyResponse.ok) {
-        const data = await verifyResponse.json() as Record<string, unknown>;
-        if (data.status === 'ok' || data.id || data.name) {
-          return {
-            sessionId,
-            cookie: `connect.sid=${sessionId}`,
-            acquiredAt: new Date(),
-          };
-        }
-      }
-    }
-    
-    // HedgeDoc doesn't support Bearer token authentication directly
-    // The OAuth2 password grant got a token, but HedgeDoc requires the full browser OAuth flow
-    throw new AuthError(
-      'OAuth2 password grant obtained an access token, but HedgeDoc does not support ' +
-      'exchanging OAuth2 tokens for session cookies. HedgeDoc requires the full browser-based ' +
-      'OAuth2 Authorization Code flow.\n\n' +
-      'Options:\n' +
-      '  1. Use "hedgesync login oidc" for interactive browser-based authentication\n' +
-      '  2. Use "hedgesync login device-code-oidc" for CLI-friendly authentication\n' +
-      '  3. Configure a reverse proxy (oauth2-proxy, Traefik) to validate Bearer tokens\n' +
-      '  4. Use HedgeDoc\'s native authentication (email/LDAP) instead of OAuth2\n\n' +
-      'Access Token (for reverse proxy use): ' + accessToken
-    );
-    
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new AuthError(`OAuth2 login request timed out after ${timeout}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// ===========================================
-// Auto-detect Authentication Method
-// ===========================================
-
-export interface AutoAuthOptions {
-  serverUrl: string;
-  headers?: Record<string, string>;
-}
-
-export interface ServerAuthMethods {
-  email: boolean;
-  ldap: boolean;
-  oauth2: boolean;
-  saml: boolean;
-  github: boolean;
-  gitlab: boolean;
-  dropbox: boolean;
-  google: boolean;
-  twitter: boolean;
-}
-
-/**
- * Detect which authentication methods are available on the server.
- */
-export async function detectAuthMethods(options: AutoAuthOptions): Promise<ServerAuthMethods> {
-  const { serverUrl, headers = {} } = options;
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  try {
-    const response = await fetch(`${baseUrl}/config`, {
-      headers: {
-        'Accept': 'application/json',
-        ...headers,
-      },
-    });
-    
-    if (!response.ok) {
-      throw new AuthError(`Failed to get server config: ${response.status}`);
-    }
-    
-    const config = await response.json() as Record<string, unknown>;
-    
-    return {
-      email: config.email === true,
-      ldap: config.ldap === true,
-      oauth2: config.oauth2 === true,
-      saml: config.saml === true,
-      github: config.github === true,
-      gitlab: config.gitlab === true,
-      dropbox: config.dropbox === true,
-      google: config.google === true,
-      twitter: config.twitter === true,
-    };
-  } catch (err) {
-    if (err instanceof AuthError) throw err;
-    throw new AuthError(`Failed to detect auth methods: ${(err as Error).message}`);
-  }
-}
-
-// ===========================================
-// Device Code + OIDC Combined Flow
-// ===========================================
-
-/**
- * Authenticate using device code flow, then complete OIDC session creation.
- * 
- * This flow is ideal for:
- * - CLI tools on headless servers or where opening a browser is inconvenient
- * - Service accounts that need user consent
- * - Automation scripts that can cache the resulting session cookie
- * 
- * How it works:
- * 1. User completes device code authentication on any device/browser
- * 2. This establishes a session with the IdP
- * 3. We then open the HedgeDoc OAuth URL in the user's browser
- * 4. Since they're already authenticated with the IdP, it auto-approves
- * 5. We capture the callback and create the HedgeDoc session
- * 
- * Note: The user must complete both steps in the SAME browser for this to work.
- * After entering the device code, they should NOT close the browser window.
- * 
- * @example
- * const result = await loginWithDeviceCodeOIDC({
- *   serverUrl: 'https://hedgedoc.example.com',
- *   deviceAuthUrl: 'https://auth.example.com/application/o/device/',
- *   tokenUrl: 'https://auth.example.com/application/o/token/',
- *   clientId: 'my-cli-app',
- *   scopes: ['openid', 'profile', 'email'],
- *   onUserCode: (info) => {
- *     console.log(`Visit ${info.verificationUri} and enter: ${info.userCode}`);
- *   }
- * });
- */
-export async function loginWithDeviceCodeOIDC(options: DeviceCodeOIDCOptions): Promise<AuthResult> {
-  const {
-    serverUrl,
-    deviceAuthUrl,
-    tokenUrl,
-    clientId,
-    clientSecret,
-    scopes = [],
-    headers = {},
-    timeout = 300000,
-    onUserCode,
-    onOpenBrowser
-  } = options;
-  
-  const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  // Step 1: Start device code flow
-  const deviceParams = new URLSearchParams();
-  deviceParams.append('client_id', clientId);
-  if (clientSecret) {
-    deviceParams.append('client_secret', clientSecret);
-  }
-  if (scopes.length > 0) {
-    deviceParams.append('scope', scopes.join(' '));
-  }
-  
-  const deviceResponse = await fetch(deviceAuthUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': 'application/json',
-      ...headers,
-    },
-    body: deviceParams.toString(),
-  });
-  
-  if (!deviceResponse.ok) {
-    const errorBody = await deviceResponse.text();
-    let errorMessage = `Device authorization request failed with status ${deviceResponse.status}`;
-    try {
-      const errorJson = JSON.parse(errorBody) as Record<string, unknown>;
-      if (errorJson.error_description) {
-        errorMessage = `OAuth2 error: ${errorJson.error_description}`;
-      } else if (errorJson.error) {
-        errorMessage = `OAuth2 error: ${errorJson.error}`;
-      }
-    } catch {
-      // Use default error message
-    }
-    throw new AuthError(errorMessage, deviceResponse.status);
-  }
-  
-  const deviceData = await deviceResponse.json() as Record<string, unknown>;
-  
-  const deviceCodeInfo: DeviceCodeInfo = {
-    deviceCode: deviceData.device_code as string,
-    userCode: deviceData.user_code as string,
-    verificationUri: deviceData.verification_uri as string,
-    verificationUriComplete: deviceData.verification_uri_complete as string | undefined,
-    expiresIn: (deviceData.expires_in as number) || 600,
-    interval: (deviceData.interval as number) || 5,
+  if (body.status !== 'ok') return null;
+  return {
+    id: String(body.id),
+    name: typeof body.name === 'string' ? body.name : '',
+    photo: typeof body.photo === 'string' ? body.photo : undefined,
   };
-  
-  if (!deviceCodeInfo.deviceCode || !deviceCodeInfo.userCode || !deviceCodeInfo.verificationUri) {
-    throw new AuthError('Invalid device authorization response from server');
-  }
-  
-  // Step 2: Display user code to user
-  if (onUserCode) {
-    await onUserCode(deviceCodeInfo);
-  } else {
-    console.log('\n' + '='.repeat(50));
-    console.log('Device Authorization Required');
-    console.log('='.repeat(50));
-    console.log(`\n1. Visit: ${deviceCodeInfo.verificationUriComplete || deviceCodeInfo.verificationUri}`);
-    console.log(`2. Enter code: ${deviceCodeInfo.userCode}`);
-    console.log(`\n⚠️  IMPORTANT: After authorizing, DO NOT close your browser!`);
-    console.log(`   We will automatically complete the OAuth flow.\n`);
-    console.log(`Waiting for authorization (expires in ${deviceCodeInfo.expiresIn} seconds)...\n`);
-  }
-  
-  // Step 3: Poll for token
-  const startTime = Date.now();
-  const pollInterval = deviceCodeInfo.interval * 1000;
-  
-  while (Date.now() - startTime < timeout) {
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-    
-    if (Date.now() - startTime > deviceCodeInfo.expiresIn * 1000) {
-      throw new AuthError('Device code expired. Please try again.');
-    }
-    
-    const tokenParams = new URLSearchParams();
-    tokenParams.append('grant_type', 'urn:ietf:params:oauth:grant-type:device_code');
-    tokenParams.append('device_code', deviceCodeInfo.deviceCode);
-    tokenParams.append('client_id', clientId);
-    if (clientSecret) {
-      tokenParams.append('client_secret', clientSecret);
-    }
-    
-    const tokenResponse = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json',
-        ...headers,
-      },
-      body: tokenParams.toString(),
-    });
-    
-    const tokenData = await tokenResponse.json() as Record<string, unknown>;
-    
-    if (tokenData.error === 'authorization_pending') {
-      continue;
-    }
-    
-    if (tokenData.error === 'slow_down') {
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-      continue;
-    }
-    
-    if (tokenData.error === 'expired_token') {
-      throw new AuthError('Device code expired. Please try again.');
-    }
-    
-    if (tokenData.error === 'access_denied') {
-      throw new AuthError('Authorization was denied by the user.');
-    }
-    
-    if (tokenData.error) {
-      throw new AuthError(`OAuth2 error: ${tokenData.error_description || tokenData.error}`);
-    }
-    
-    // Success! User has authenticated with the IdP.
-    // Now we need to complete the HedgeDoc OAuth flow.
-    // The user's browser should still have the IdP session active.
-    
-    const accessToken = tokenData.access_token as string;
-    if (!accessToken) {
-      throw new AuthError('No access token received from OAuth2 provider');
-    }
-    
-    console.log('\n✓ Device authorization successful!');
-    console.log('Now completing HedgeDoc OAuth flow...\n');
-    
-    // Step 4: Complete the OIDC flow using the user's browser session
-    return await completeOIDCWithExistingSession({
-      serverUrl: baseUrl,
-      headers,
-      timeout: 60000, // 1 minute timeout for the OAuth completion
-      onOpenBrowser,
-    });
-  }
-  
-  throw new AuthError(`Device authorization timed out after ${timeout / 1000} seconds`);
 }
 
-/**
- * Complete OIDC flow assuming user has an existing IdP session.
- * This is used after device code authentication.
- */
-async function completeOIDCWithExistingSession(options: {
-  serverUrl: string;
-  headers: Record<string, string>;
-  timeout: number;
-  onOpenBrowser?: (url: string) => void | Promise<void>;
-}): Promise<AuthResult> {
-  const { serverUrl, headers, timeout, onOpenBrowser } = options;
-  
-  return new Promise(async (resolve, reject) => {
-    let server: Server | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let hedgedocSessionCookie: string | null = null;
-    let originalCallbackUrl: string = '';
-    
-    const cleanup = () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      if (server) {
-        server.close();
-        server = null;
-      }
-    };
-    
-    timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new AuthError(`OAuth completion timed out after ${timeout}ms. Did you close the browser?`));
-    }, timeout);
-    
-    try {
-      // Get HedgeDoc's OAuth redirect URL and session cookie
-      const initResponse = await fetch(`${serverUrl}/auth/oauth2`, {
-        redirect: 'manual',
-        headers: {
-          'Accept': 'text/html',
-          ...headers,
-        },
-      });
-      
-      const setCookieHeader = initResponse.headers.get('set-cookie') || '';
-      const cookieMatch = setCookieHeader.match(/connect\.sid=([^;]+)/);
-      if (cookieMatch) {
-        hedgedocSessionCookie = cookieMatch[1];
-      }
-      
-      if (!hedgedocSessionCookie) {
-        throw new AuthError('HedgeDoc did not return a session cookie');
-      }
-      
-      const oauthRedirectUrl = initResponse.headers.get('location');
-      if (!oauthRedirectUrl) {
-        throw new AuthError('HedgeDoc did not redirect to OAuth provider. Is OAuth2 enabled?');
-      }
-      
-      const oauthUrl = new URL(oauthRedirectUrl);
-      originalCallbackUrl = oauthUrl.searchParams.get('redirect_uri') || `${serverUrl}/auth/oauth2/callback`;
-      
-      // Create local server to intercept callback
-      server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        const reqUrl = parseUrl(req.url || '', true);
-        
-        if (reqUrl.pathname === '/callback' || reqUrl.pathname === '/auth/oauth2/callback') {
-          const code = reqUrl.query.code as string;
-          const returnedState = reqUrl.query.state as string;
-          const error = reqUrl.query.error as string;
-          
-          if (error) {
-            cleanup();
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Failed</title></head>
-              <body>
-                <h1>❌ Authentication Failed</h1>
-                <p>Error: ${error}</p>
-                <p>${reqUrl.query.error_description || ''}</p>
-              </body>
-              </html>
-            `);
-            reject(new AuthError(`OAuth authentication failed: ${error}`));
-            return;
-          }
-          
-          if (!code) {
-            cleanup();
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>Error: No authorization code received</h1>');
-            reject(new AuthError('No authorization code received from OAuth provider'));
-            return;
-          }
-          
-          try {
-            // Forward the callback to HedgeDoc
-            const hedgedocCallbackUrl = new URL(originalCallbackUrl);
-            hedgedocCallbackUrl.searchParams.set('code', code);
-            if (returnedState) {
-              hedgedocCallbackUrl.searchParams.set('state', returnedState);
-            }
-            
-            const hedgedocCallback = await fetch(hedgedocCallbackUrl.toString(), {
-              redirect: 'manual',
-              headers: {
-                'Cookie': `connect.sid=${hedgedocSessionCookie}`,
-                'Accept': 'text/html',
-                ...headers,
-              },
-            });
-            
-            const newSetCookie = hedgedocCallback.headers.get('set-cookie') || '';
-            const newCookieMatch = newSetCookie.match(/connect\.sid=([^;]+)/);
-            const finalSessionId = newCookieMatch ? newCookieMatch[1] : hedgedocSessionCookie!;
-            
-            // Verify the session
-            const verifyResponse = await fetch(`${serverUrl}/me`, {
-              headers: {
-                'Cookie': `connect.sid=${finalSessionId}`,
-                'Accept': 'application/json',
-                ...headers,
-              },
-            });
-            
-            const verifyData = await verifyResponse.json() as Record<string, unknown>;
-            
-            if (verifyData.status === 'forbidden' || (!verifyData.id && !verifyData.name && verifyData.status !== 'ok')) {
-              throw new AuthError('OAuth completed but session is not authenticated');
-            }
-            
-            cleanup();
-            
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-              <!DOCTYPE html>
-              <html>
-              <head><title>Authentication Successful</title></head>
-              <body>
-                <h1>✓ Authentication Successful</h1>
-                <p>You can close this window and return to the terminal.</p>
-                <script>setTimeout(() => window.close(), 1500);</script>
-              </body>
-              </html>
-            `);
-            
-            resolve({
-              sessionId: finalSessionId,
-              cookie: `connect.sid=${finalSessionId}`,
-              acquiredAt: new Date(),
-            });
-          } catch (err) {
-            cleanup();
-            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-            const errorMessage = err instanceof Error ? err.message : String(err);
-            res.end(`<h1>Error completing authentication</h1><p>${errorMessage}</p>`);
-            reject(err instanceof AuthError ? err : new AuthError(`Failed to complete OAuth: ${err}`));
-          }
-        } else {
-          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end('<h1>Not Found</h1>');
-        }
-      });
-      
-      const port = 0; // Random port
-      server.listen(port, '127.0.0.1', async () => {
-        const address = server!.address();
-        const actualPort = typeof address === 'object' && address ? address.port : 0;
-        
-        const localCallbackUrl = `http://127.0.0.1:${actualPort}/callback`;
-        oauthUrl.searchParams.set('redirect_uri', localCallbackUrl);
-        const modifiedOAuthUrl = oauthUrl.toString();
-        
-        console.log('Opening browser to complete OAuth...');
-        console.log(`\nIf the browser doesn't open, visit:`);
-        console.log(`  ${modifiedOAuthUrl}\n`);
-        
-        if (onOpenBrowser) {
-          try {
-            await onOpenBrowser(modifiedOAuthUrl);
-          } catch (e) {
-            // Ignore browser open errors
-          }
-        }
-      });
-      
-      server.on('error', (err) => {
-        cleanup();
-        reject(new AuthError(`Failed to start callback server: ${err.message}`));
-      });
-    } catch (err) {
-      cleanup();
-      reject(err instanceof AuthError ? err : new AuthError(`OIDC completion failed: ${err}`));
-    }
+async function formLogin(
+  path: string,
+  fields: Record<string, string>,
+  options: CommonAuthOptions,
+  credentialNoun: string,
+): Promise<AuthResult> {
+  const { serverUrl, headers = {}, timeout = 30000, request = defaultHedgeSyncRequest } = options;
+  const baseUrl = trimUrl(serverUrl);
+
+  const res = await withTimeout(request({
+    url: `${baseUrl}${path}`,
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+    redirect: 'manual',
+  }), timeout);
+
+  if (res.status === 404) {
+    throw new AuthError(`POST ${path} returned 404; this login method is probably not enabled on the server`, 404);
+  }
+  if (res.status === 429) {
+    throw new AuthError('Too many login attempts; try again later', 429);
+  }
+  if (res.status === 400) {
+    throw new AuthError(`The server rejected the login request as malformed (check the ${credentialNoun.split(' ')[0]} format)`, 400);
+  }
+  if (res.status < 300 || res.status >= 400) {
+    throw new AuthError(`Login failed: POST ${path} returned HTTP ${res.status}`, res.status);
+  }
+
+  const cookies = parseSetCookie(getHeader(res.headers, 'set-cookie'));
+  if (cookies.size === 0) {
+    throw new AuthError('The server set no session cookie (a proxy may be stripping Set-Cookie)');
+  }
+  const cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+
+  const user = await getSessionUser({ serverUrl: baseUrl, cookie, headers, timeout, request });
+  if (!user) {
+    throw new AuthError(`Invalid ${credentialNoun}`, 401);
+  }
+
+  return {
+    sessionId: cookies.get(DEFAULT_SESSION_COOKIE) ?? [...cookies.values()][0],
+    cookie,
+    user,
+    acquiredAt: new Date(),
+  };
+}
+
+function trimUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+function withTimeout(p: Promise<HedgeSyncHttpResponse>, ms: number): Promise<HedgeSyncHttpResponse> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AuthError(`Request timed out after ${ms}ms`)), ms);
   });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }

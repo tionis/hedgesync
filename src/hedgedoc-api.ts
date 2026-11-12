@@ -90,13 +90,20 @@ export interface ServerStatus {
   disconnectSocketQueueLength: number;
 }
 
-/** Config from /config (includes CSRF token) */
+/**
+ * Client config from /config. HedgeDoc serves this as a script of
+ * `window.<key> = <value>` lines; the values are parsed out of it.
+ */
 export interface ServerConfig {
   domain: string;
-  urlPath: string;
+  urlpath: string;
   debug: boolean;
   version: string;
-  CSRF?: string;  // CSRF token for authenticated operations
+  /**
+   * The logged-in user's delete token, needed to delete history entries.
+   * Empty when not logged in.
+   */
+  userToken: string;
   [key: string]: unknown;
 }
 
@@ -155,7 +162,7 @@ export class HedgeDocAPI {
   private cookie: string | null;
   private customHeaders: Record<string, string>;
   private requestFn: HedgeSyncRequestFn;
-  private csrfToken: string | null = null;
+  private deleteToken: string | null = null;
   
   constructor(options: HedgeDocAPIOptions) {
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
@@ -244,32 +251,29 @@ export class HedgeDocAPI {
     return match ? decodeURIComponent(match[1]) : null;
   }
 
-  /**
-   * Fetch CSRF token from /config endpoint (needed for some operations)
-   */
-  async getCSRFToken(): Promise<string | null> {
-    if (this.csrfToken) {
-      return this.csrfToken;
+  /** The session's delete token (from /config), required by history deletes. */
+  private async getDeleteToken(): Promise<string> {
+    if (this.deleteToken) return this.deleteToken;
+    const token = (await this.getConfig()).userToken;
+    if (!token) {
+      throw new HedgeDocAPIError('Not logged in: deleting history requires a valid session cookie', 403);
     }
-    
-    try {
-      const config = await this.getConfig();
-      this.csrfToken = config.CSRF || null;
-      return this.csrfToken;
-    } catch {
-      return null;
-    }
+    this.deleteToken = token;
+    return token;
   }
-  
+
   // ===========================================
   // Server Info
   // ===========================================
   
   /**
-   * Get server configuration (includes CSRF token when logged in)
+   * Get the client configuration from /config (includes the delete token
+   * when logged in).
    */
   async getConfig(): Promise<ServerConfig> {
-    return this.request<ServerConfig>('/config');
+    const script = await this.request<string | Record<string, unknown>>('/config');
+    if (typeof script !== 'string') return script as ServerConfig;
+    return parseConfigScript(script);
   }
   
   /**
@@ -496,13 +500,11 @@ export class HedgeDocAPI {
   
   /**
    * Delete entire history
-   * Requires authentication via cookie and CSRF token (since HedgeDoc 1.10.4)
+   * Requires authentication via cookie (uses the session's delete token)
    */
   async deleteHistory(): Promise<void> {
-    const token = await this.getCSRFToken();
-    const url = token ? `/history?token=${encodeURIComponent(token)}` : '/history';
-    
-    await this.request(url, {
+    const token = await this.getDeleteToken();
+    await this.request(`/history?token=${encodeURIComponent(token)}`, {
       method: 'DELETE',
     });
   }
@@ -529,7 +531,8 @@ export class HedgeDocAPI {
    * @param noteId Note ID or alias
    */
   async deleteFromHistory(noteId: string): Promise<void> {
-    await this.request(`/history/${encodeURIComponent(noteId)}`, {
+    const token = await this.getDeleteToken();
+    await this.request(`/history/${encodeURIComponent(noteId)}?token=${encodeURIComponent(token)}`, {
       method: 'DELETE',
     });
   }
@@ -560,3 +563,30 @@ export class HedgeDocAPI {
 }
 
 export default HedgeDocAPI;
+
+/** Parse the `window.<key> = <value>` script HedgeDoc serves at /config. */
+export function parseConfigScript(script: string): ServerConfig {
+  const config: Record<string, unknown> = {};
+  for (const line of script.split('\n')) {
+    const m = /^\s*window\.(\w+)\s*=\s*(.*?)\s*;?\s*$/.exec(line);
+    if (!m) continue;
+    const raw = m[2];
+    if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+      config[m[1]] = raw.slice(1, -1);
+      continue;
+    }
+    try {
+      config[m[1]] = JSON.parse(raw);
+    } catch {
+      config[m[1]] = raw;
+    }
+  }
+  return {
+    domain: '',
+    urlpath: '',
+    debug: false,
+    version: '',
+    userToken: '',
+    ...config,
+  } as ServerConfig;
+}
