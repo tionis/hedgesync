@@ -175,6 +175,27 @@ export class TextOperation {
   }
 
   /**
+   * Compute the inverse of this operation relative to the document it was
+   * applied to, so that `op.invert(doc).apply(op.apply(doc)) === doc`.
+   */
+  invert(str: string): TextOperation {
+    let strIndex = 0;
+    const inverse = new TextOperation();
+    for (const op of this.ops) {
+      if (TextOperation.isRetain(op)) {
+        inverse.retain(op);
+        strIndex += op;
+      } else if (TextOperation.isInsert(op)) {
+        inverse.delete(op.length);
+      } else {
+        inverse.insert(str.slice(strIndex, strIndex - op));
+        strIndex -= op;
+      }
+    }
+    return inverse;
+  }
+
+  /**
    * Compose two operations into one
    */
   compose(operation2: TextOperation): TextOperation {

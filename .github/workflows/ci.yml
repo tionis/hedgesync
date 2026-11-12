@@ -43,16 +43,16 @@ jobs:
         run: bun install
 
       - name: Build for Linux x64
-        run: bun build bin/hedgesync.js --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
+        run: bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
 
       - name: Build for macOS x64
-        run: bun build bin/hedgesync.js --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
+        run: bun build bin/hedgesync.ts --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
 
       - name: Build for macOS ARM64
-        run: bun build bin/hedgesync.js --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
+        run: bun build bin/hedgesync.ts --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
 
       - name: Build for Windows x64
-        run: bun build bin/hedgesync.js --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
+        run: bun build bin/hedgesync.ts --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -81,10 +81,10 @@ jobs:
       - name: Build all platforms
         run: |
           mkdir -p dist
-          bun build bin/hedgesync.js --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
-          bun build bin/hedgesync.js --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
-          bun build bin/hedgesync.js --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
-          bun build bin/hedgesync.js --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
+          bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
+          bun build bin/hedgesync.ts --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
+          bun build bin/hedgesync.ts --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
+          bun build bin/hedgesync.ts --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
 
       - name: Create checksums
         run: |

@@ -1165,20 +1165,8 @@ async function connect(args: ParsedArgs, options: Record<string, unknown> = {}):
   });
   
   try {
+    // Resolves once the document and note metadata (permissions) have loaded.
     await client.connect();
-    
-    // Wait for refresh event to get permissions
-    await new Promise<void>((resolve) => {
-      if (client.noteInfo.permission) {
-        resolve();
-      } else {
-        const timeout = setTimeout(resolve, 1000);
-        client.once('refresh', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      }
-    });
     
     if (!quiet) {
       console.error(c('green', '✓ Connected'));
@@ -1210,12 +1198,6 @@ async function cmdGet(args: ParsedArgs): Promise<void> {
     const output = args.options.output || args.options.o;
     
     if (showAuthors) {
-      // Wait for refresh data which contains authorship
-      await new Promise<void>(resolve => {
-        client.once('refresh', () => resolve());
-        setTimeout(resolve, 1000);
-      });
-      
       const result = client.getDocumentWithAuthorship();
       
       if (json) {
@@ -1318,8 +1300,8 @@ async function cmdSet(args: ParsedArgs): Promise<void> {
     const oldLength = client.getDocument().length;
     client.updateContent(content);
     
-    // Wait a bit for the operation to be sent
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait until the server has acknowledged the edit
+    await client.flush();
     
     if (jsonOutput) {
       console.log(JSON.stringify({ 
@@ -1369,7 +1351,7 @@ async function cmdAppend(args: ParsedArgs): Promise<void> {
     const insertedText = separator + text;
     client.insert(position, insertedText);
     
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await client.flush();
     
     if (jsonOutput) {
       console.log(JSON.stringify({ 
@@ -1417,7 +1399,7 @@ async function cmdPrepend(args: ParsedArgs): Promise<void> {
     const insertedText = text + separator;
     client.insert(0, insertedText);
     
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await client.flush();
     
     if (jsonOutput) {
       console.log(JSON.stringify({ 
@@ -1474,7 +1456,7 @@ async function cmdInsert(args: ParsedArgs): Promise<void> {
     
     client.insert(position, text);
     
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await client.flush();
     
     if (jsonOutput) {
       console.log(JSON.stringify({ 
@@ -1535,7 +1517,7 @@ async function cmdReplace(args: ParsedArgs): Promise<void> {
     
     const count = client.replaceRegex(pattern, replacement);
     
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await client.flush();
     
     if (jsonOutput) {
       console.log(JSON.stringify({ 
@@ -1594,7 +1576,7 @@ async function cmdLine(args: ParsedArgs): Promise<void> {
       
       client.setLine(lineNum, content);
       
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await client.flush();
       
       if (jsonOutput) {
         console.log(JSON.stringify({ success: true, action: 'set-line', line: lineNum, length: content.length }, null, 2));
@@ -2049,7 +2031,7 @@ async function cmdMirror(args: ParsedArgs): Promise<void> {
     if (transformed !== targetContent) {
       syncing = true;
       try {
-        targetClient.setContent(transformed);
+        targetClient.updateContent(transformed);
         output('initial-sync', { 
           direction: 'source→target', 
           sourceLength: sourceContent.length,
@@ -2172,7 +2154,7 @@ async function cmdMirror(args: ParsedArgs): Promise<void> {
           return true; // Already in sync
         }
         
-        targetClient.setContent(transformed);
+        targetClient.updateContent(transformed);
         lastSyncedContent = sourceContent;
         return true;
       } catch (err) {
@@ -2210,7 +2192,7 @@ async function cmdMirror(args: ParsedArgs): Promise<void> {
     if (currentSource === lastSyncedContent) {
       for (let attempt = 0; attempt < retries; attempt++) {
         try {
-          sourceClient.setContent(targetContent);
+          sourceClient.updateContent(targetContent);
           lastSyncedContent = targetContent;
           return true;
         } catch (err) {
@@ -2239,12 +2221,12 @@ async function cmdMirror(args: ParsedArgs): Promise<void> {
       // Apply merged content to both
       for (let attempt = 0; attempt < retries; attempt++) {
         try {
-          sourceClient.setContent(merged);
+          sourceClient.updateContent(merged);
           lastSyncedContent = merged;
           
           // Also update target with merged content
           const transformedMerged = hasTransform ? applyTransform(merged) : merged;
-          targetClient.setContent(transformedMerged);
+          targetClient.updateContent(transformedMerged);
           return true;
         } catch (err) {
           const msg = (err as Error).message || '';
@@ -2401,12 +2383,6 @@ async function cmdInfo(args: ParsedArgs): Promise<void> {
   const jsonOutput = args.options.json;
   
   try {
-    // Wait for refresh to complete
-    await new Promise<void>(resolve => {
-      client.once('refresh', () => resolve());
-      setTimeout(resolve, 1000); // Timeout fallback
-    });
-    
     // Also request online users
     client.requestOnlineUsers();
     await new Promise(resolve => setTimeout(resolve, 300));
@@ -2484,12 +2460,6 @@ async function cmdAuthors(args: ParsedArgs): Promise<void> {
   const client = await connect(args);
   
   try {
-    // Wait for refresh data which contains authorship
-    await new Promise<void>(resolve => {
-      client.once('refresh', () => resolve());
-      setTimeout(resolve, 1000);
-    });
-    
     const result = client.getDocumentWithAuthorship();
     const json = args.options.json;
     const verbose = args.options.verbose || args.options.v;
@@ -2610,6 +2580,7 @@ async function cmdTransform(args: ParsedArgs): Promise<void> {
         });
         return ast;
       });
+      await client.flush();
       if (jsonOutput) {
         console.log(JSON.stringify({ success: true, action: 'transform', operation: 'demote' }, null, 2));
       } else if (!quiet) {
@@ -2626,6 +2597,7 @@ async function cmdTransform(args: ParsedArgs): Promise<void> {
         });
         return ast;
       });
+      await client.flush();
       if (jsonOutput) {
         console.log(JSON.stringify({ success: true, action: 'transform', operation: 'promote' }, null, 2));
       } else if (!quiet) {
@@ -2643,7 +2615,7 @@ async function cmdTransform(args: ParsedArgs): Promise<void> {
       // Just parse and re-render (normalizes the document)
       const normalized = await pandoc.transform(doc, ast => ast);
       client.updateContent(normalized);
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await client.flush();
       if (jsonOutput) {
         console.log(JSON.stringify({ success: true, action: 'transform', operation: 'normalize' }, null, 2));
       } else if (!quiet) {
@@ -3057,7 +3029,7 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
         await engine.waitForStreams();
       }
       
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await client.flush();
     } finally {
       client.disconnect();
     }

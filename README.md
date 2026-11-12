@@ -550,15 +550,8 @@ const client = new HedgeDocClient({
     return defaultHedgeSyncRequest(req);
   },
   socketTransports: ['polling', 'websocket'],  // Optional: Socket.IO transports
-  operationTimeout: 5000,                      // Optional: timeout for operations (ms)
-  
-  // Rate limiting options
-  rateLimit: {
-    enabled: true,       // Enable rate limiting (default: true)
-    minInterval: 50,     // Min ms between operations (default: 50)
-    maxBurst: 10,        // Max operations per burst window (default: 10)
-    burstWindow: 1000    // Burst window in ms (default: 1000)
-  },
+  connectTimeout: 15000,                       // Optional: how long connect() waits for the document (ms)
+  operationTimeout: 10000,                     // Optional: default flush() timeout (ms)
   
   // Reconnection options
   reconnect: {
@@ -580,9 +573,11 @@ const client = new HedgeDocClient({
 
 | Method | Description |
 |--------|-------------|
-| `connect()` | Connect to the server. Returns a Promise. |
-| `disconnect()` | Disconnect from the server. |
-| `reconnect()` | Manually trigger a reconnection. |
+| `connect()` | Connect to the server. Resolves once the document and note metadata (permissions) have loaded. |
+| `flush(timeoutMs?)` | Resolves when the server has acknowledged every local edit; rejects on timeout (HedgeDoc silently drops edits without write access). |
+| `isSynchronized()` | `true` when no local edits are waiting for acknowledgement. |
+| `disconnect()` | Disconnect from the server. Call `flush()` first, or unacknowledged edits are lost. |
+| `reconnect()` | Reconnect; pending local edits are kept and re-sent. |
 | `getDocument()` | Get the current document content as a string. |
 | `getDocumentWithAuthorship()` | Get document with authorship information (see below). |
 | `getAuthors()` | Get array of authors who have contributed to the document. |
@@ -598,23 +593,19 @@ const client = new HedgeDocClient({
 | `applyOperation(op)` | Apply a raw `TextOperation`. |
 | `refresh()` | Request updated note metadata. |
 | `requestOnlineUsers()` | Request the online users list. |
-| `replaceRegex(pattern, replacement)` | Replace first regex match. |
-| `replaceAllRegex(pattern, replacement)` | Replace all regex matches. |
+| `replaceRegex(pattern, replacement)` | Replace all matches (`String.prototype.replace` semantics), sent as one operation. Returns the count. |
+| `replaceFirst(pattern, replacement)` | Replace the first match. |
+| `replaceLines(pattern, replacement)` | Replace matching lines, sent as one operation. |
 | `getLine(lineNumber)` | Get content of a specific line (0-indexed). |
 | `getLines()` | Get all lines as an array. |
 | `setLine(lineNumber, content)` | Replace a specific line. |
 | `insertLine(lineNumber, content)` | Insert a new line at position. |
 | `deleteLine(lineNumber)` | Delete a specific line. |
-| `startBatch()` | Begin a batch of operations. |
-| `endBatch()` | End batch and apply combined operation. |
-| `cancelBatch()` | Discard batch without applying. |
-| `batch(fn)` | Execute function within a batch. |
-| `undo()` | Undo the last operation. |
-| `redo()` | Redo the last undone operation. |
+| `batch(fn)` | Run synchronous edits and send them as one operation (rolled back if `fn` throws). |
+| `undo()` | Undo the last local edit, keeping remote edits made since. |
+| `redo()` | Redo the last undone edit. |
 | `canUndo()` / `canRedo()` | Check if undo/redo is available. |
 | `clearHistory()` | Clear undo/redo history. |
-| `setRateLimitEnabled(bool)` | Enable/disable rate limiting. |
-| `configureRateLimit(opts)` | Configure rate limit settings. |
 | `setReconnectEnabled(bool)` | Enable/disable auto-reconnection. |
 | `configureReconnect(opts)` | Configure reconnection settings. |
 
@@ -672,7 +663,15 @@ client.on('ready', ({ document, revision }) => { /* Document loaded */ });
 client.on('error', (error) => { /* Error occurred */ });
 
 client.on('document', (content) => { /* Document content changed */ });
-client.on('change', ({ type, operation }) => { /* Local/remote change */ });
+client.on('change', ({ type, operation, clientId, user }) => { /* Local/remote change */ });
+client.on('synchronized', () => { /* All local edits acknowledged */ });
+client.on('resync', (outcome) => {
+  // A fresh document arrived after a reconnect. outcome.kind is one of:
+  // 'reset' (nothing pending), 'resent', 'acked', 'catchup' (missed ops verified
+  // and pending edits transformed), 'rebased' (server history was reset; pending
+  // edits rebased via diff), 'discarded' (server forced a reset; outcome.pending lost)
+});
+client.on('ot-error', ({ type, error }) => { /* A server message could not be applied; a resync follows */ });
 client.on('refresh', (noteInfo) => { /* Note metadata updated */ });
 client.on('permission', (permission) => { /* Permission changed */ });
 client.on('delete', () => { /* Note was deleted */ });
@@ -693,36 +692,24 @@ client.on('reconnect:error', ({ error, attempt }) => { /* Reconnection attempt f
 client.on('reconnect:failed', ({ attempts, maxAttempts }) => { /* All reconnection attempts failed */ });
 
 // Undo/Redo events
-client.on('undo', (entry) => { /* Operation was undone */ });
-client.on('redo', (entry) => { /* Operation was redone */ });
+client.on('undo', ({ operation }) => { /* Operation was undone */ });
+client.on('redo', ({ operation }) => { /* Operation was redone */ });
 ```
 
-### Rate Limiting
+### Waiting for Acknowledgement
 
-Rate limiting prevents overwhelming the server with rapid operations.
+Edits are applied locally at once and sent through the OT client, which keeps
+one operation in flight and composes later edits into a buffer. To know an
+edit actually landed, wait for the server's acknowledgement:
 
 ```javascript
-// Configure at construction
-const client = new HedgeDocClient({
-  serverUrl: 'https://example.com',
-  noteId: 'abc123',
-  rateLimit: {
-    minInterval: 100,  // Wait at least 100ms between ops
-    maxBurst: 5,       // Max 5 ops per second
-    burstWindow: 1000
-  }
-});
-
-// Or configure at runtime
-client.configureRateLimit({ minInterval: 50, maxBurst: 10 });
-
-// Enable/disable
-client.setRateLimitEnabled(false); // Disable for bulk operations
-client.setRateLimitEnabled(true);  // Re-enable
-
-// Check queue status
-const queued = client.getQueuedOperationCount();
+client.insert(0, 'Hello ');
+await client.flush();          // rejects after operationTimeout if not acknowledged
+client.disconnect();
 ```
+
+HedgeDoc ignores edits from sessions without write access without replying,
+so a `flush()` timeout usually means the edit was rejected.
 
 ### Auto-Reconnection
 
@@ -764,32 +751,24 @@ await client.reconnect();
 
 ### Batch Operations
 
-Combine multiple edits into a single atomic operation.
+Combine multiple edits into a single operation. Inside the callback the
+document reflects each edit as it is made, so later edits can build on
+earlier ones. The callback must be synchronous; if it throws, all of its
+edits are rolled back.
 
 ```javascript
-// Method 1: Manual start/end
-client.startBatch();
-client.insert(0, 'Hello ');
-client.insert(6, 'World');
-client.delete(11, 1);
-const combinedOp = client.endBatch(); // All edits sent as one operation
-
-// Method 2: Using batch() wrapper
 client.batch(() => {
   client.setLine(0, '# Title');
-  client.setLine(1, '');
-  client.setLine(2, 'Content here');
+  client.insert(client.getDocument().length, '\nFooter');
 });
-
-// Cancel a batch
-client.startBatch();
-client.insert(0, 'test');
-client.cancelBatch(); // Discards without applying
+await client.flush();
 ```
 
 ### Undo/Redo
 
-Track edit history with automatic grouping of rapid edits.
+Track local edit history with automatic grouping of rapid edits. Undo
+inverts your own edits only: history entries are transformed against remote
+edits, so undoing never removes what collaborators wrote in the meantime.
 
 ```javascript
 // Check availability
@@ -802,11 +781,11 @@ if (client.canRedo()) {
 }
 
 // Listen to undo/redo events
-client.on('undo', (entry) => {
+client.on('undo', ({ operation }) => {
   console.log('Undid operation');
 });
 
-client.on('redo', (entry) => {
+client.on('redo', ({ operation }) => {
   console.log('Redid operation');
 });
 

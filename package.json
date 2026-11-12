@@ -31,7 +31,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun run test/test-all-features.js",
+    "test": "bun test test/unit && bun run test/test-all-features.ts",
+    "test:unit": "bun test test/unit",
     "example": "bun run examples/basic-usage.js",
     "cli": "bun run bin/hedgesync.ts",
     "build:lib": "tsc -p tsconfig.build.json",

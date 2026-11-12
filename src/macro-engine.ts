@@ -17,8 +17,6 @@ interface HedgeDocClientLike {
   insert(index: number, text: string): void;
   on(event: string, handler: (...args: unknown[]) => void): void;
   off(event: string, handler: (...args: unknown[]) => void): void;
-  isRateLimitEnabled(): boolean;
-  setRateLimitEnabled(enabled: boolean): void;
 }
 
 /** User info (mirrors HedgeDoc's UserInfo) */
@@ -1154,9 +1152,6 @@ class MacroEngine {
     groups: string[], 
     originalIndex: number
   ): Promise<void> {
-    // Track rate limiting state to restore later
-    const wasRateLimitEnabled = this.client.isRateLimitEnabled();
-    
     try {
       // Get current document for context
       let currentDoc = this.client.getDocument();
@@ -1197,10 +1192,6 @@ class MacroEngine {
         }
         insertPos = newIndex;
       }
-      
-      // Disable rate limiting during streaming to avoid queue issues
-      // We control the pace ourselves with delays between inserts
-      this.client.setRateLimitEnabled(false);
       
       // State tracking: instead of deleting, replace with running marker
       const stateTracking = macro.stateTracking;
@@ -1431,9 +1422,6 @@ class MacroEngine {
       if (macro.onError) {
         macro.onError(err as Error);
       }
-    } finally {
-      // Always restore rate limiting
-      this.client.setRateLimitEnabled(wasRateLimitEnabled);
     }
   }
 

@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 // Forward declaration for HedgeDocClient to avoid circular imports
 interface HedgeDocClientLike {
   getDocument(): string;
-  setContent(content: string): void | Promise<void>;
+  updateContent(content: string): unknown;
 }
 
 // ===========================================
@@ -278,12 +278,18 @@ export class PandocTransformer {
    * Apply a transformation to a HedgeDoc client's document
    */
   async applyToClient(client: HedgeDocClientLike, transformFn: ASTTransformFn): Promise<void> {
-    const original = client.getDocument();
-    const transformed = await this.transform(original, transformFn);
-    
-    if (transformed !== original) {
-      await client.setContent(transformed);
+    // Pandoc runs asynchronously; if someone edits meanwhile, redo the
+    // transform on the new text rather than overwriting their edit.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const original = client.getDocument();
+      const transformed = await this.transform(original, transformFn);
+      if (client.getDocument() !== original) continue;
+      if (transformed !== original) {
+        client.updateContent(transformed);
+      }
+      return;
     }
+    throw new Error('Document kept changing while the transform was running; giving up');
   }
 
   /**

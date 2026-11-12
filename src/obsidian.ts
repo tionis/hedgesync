@@ -6,12 +6,15 @@
  */
 
 // Main client
-export { HedgeDocClient } from './hedgedoc-client.js';
+export { HedgeDocClient, HedgeDocError } from './hedgedoc-client.js';
 export type {
   HedgeDocClientOptions,
   SocketTransport,
-  RateLimitConfig,
   ReconnectConfig,
+  SocketLike,
+  SocketFactory,
+  SocketFactoryOptions,
+  ResyncEvent,
   NoteInfo,
   UserInfo,
   AuthorProfile,
@@ -31,8 +34,9 @@ export type {
   OperationJSON
 } from './text-operation.js';
 
-export { OTClient } from './ot-client.js';
-export type { Transformable } from './ot-client.js';
+export { OTClient, OTDesyncError } from './ot-client.js';
+export type { Transformable, ReconnectOutcome } from './ot-client.js';
+export { diffToOperation } from './diff.js';
 
 // HTTP API client
 export { HedgeDocAPI, HedgeDocAPIError } from './hedgedoc-api.js';

@@ -700,83 +700,41 @@ async function testUpdateContent(client) {
   }
 }
 
-async function testRateLimiting(client) {
-  log(c.bold('\n⏱️ Testing Rate Limiting'));
-  
-  // Check rate limit config
-  const config = client.getRateLimitConfig();
-  assert(typeof config.minInterval === 'number', 'Rate limit has minInterval');
-  assert(typeof config.maxBurst === 'number', 'Rate limit has maxBurst');
-  
-  // Test enable/disable
-  const wasEnabled = client.isRateLimitEnabled();
-  client.setRateLimitEnabled(false);
-  assertEqual(client.isRateLimitEnabled(), false, 'Rate limiting can be disabled');
-  
-  client.setRateLimitEnabled(true);
-  assertEqual(client.isRateLimitEnabled(), true, 'Rate limiting can be enabled');
-  
-  // Restore original state
-  client.setRateLimitEnabled(wasEnabled);
-  
-  // Test configureRateLimit
-  client.configureRateLimit({ minInterval: 100 });
-  const newConfig = client.getRateLimitConfig();
-  assertEqual(newConfig.minInterval, 100, 'configureRateLimit works');
-  
-  // Restore default
-  client.configureRateLimit({ minInterval: 50 });
-}
-
 async function testBatchOperations(client) {
   log(c.bold('\n📦 Testing Batch Operations'));
   
   const originalDoc = client.getDocument();
   
-  // Test batch mode
   assertEqual(client.isBatchMode(), false, 'Not in batch mode initially');
   
-  client.startBatch();
-  assertEqual(client.isBatchMode(), true, 'In batch mode after startBatch');
+  // Dependent edits inside one batch are sent as a single operation
+  const revisionBefore = client.getRevision();
+  client.batch(() => {
+    assertEqual(client.isBatchMode(), true, 'In batch mode inside batch()');
+    client.insert(client.getDocument().length, '\n<!-- BATCH1 -->');
+    client.insert(client.getDocument().length, '\n<!-- BATCH2 -->');
+  });
+  await client.flush();
   
-  // Add test content in batch - single operation
-  const pos = client.getDocument().length;
-  client.insert(pos, '\n<!-- BATCH1 -->\n<!-- BATCH2 -->');
-  
-  // End batch
-  client.endBatch();
-  await sleep(800);
-  
-  assertEqual(client.isBatchMode(), false, 'Not in batch mode after endBatch');
-  
+  assertEqual(client.isBatchMode(), false, 'Not in batch mode after batch()');
   let doc = client.getDocument();
   assertIncludes(doc, 'BATCH1', 'Batch operation 1 applied');
   assertIncludes(doc, 'BATCH2', 'Batch operation 2 applied');
+  assertEqual(client.getRevision(), revisionBefore + 1, 'Batch sent as one operation');
   
-  // Test batch() helper
-  await sleep(300);
-  client.batch(() => {
-    const d = client.getDocument();
-    client.insert(d.length, '\n<!-- BATCH3 -->');
-  });
-  await sleep(500);
-  
+  // A throwing batch rolls back
+  try {
+    client.batch(() => {
+      client.insert(client.getDocument().length, '\n<!-- CANCELLED -->');
+      throw new Error('cancel');
+    });
+  } catch {}
   doc = client.getDocument();
-  assertIncludes(doc, 'BATCH3', 'batch() helper works');
-  
-  // Test cancelBatch
-  await sleep(300);
-  client.startBatch();
-  client.insert(client.getDocument().length, '\n<!-- CANCELLED -->');
-  client.cancelBatch();
-  await sleep(300);
-  
-  doc = client.getDocument();
-  assert(!doc.includes('CANCELLED'), 'cancelBatch prevents operations');
+  assert(!doc.includes('CANCELLED'), 'Throwing batch is rolled back');
   
   // Clean up
-  client.setContent(originalDoc);
-  await sleep(500);
+  client.updateContent(originalDoc);
+  await client.flush();
 }
 
 async function testUndoRedo(client) {
@@ -1044,9 +1002,6 @@ async function runTests() {
         serverUrl: SERVER_URL,
         noteId: NOTE_ID,
         operationTimeout: 10000,
-        rateLimit: {
-          enabled: false // Disable rate limiting for tests to avoid timing issues
-        },
         reconnect: {
           enabled: true,
           maxAttempts: 3
@@ -1067,7 +1022,6 @@ async function runTests() {
       await testLineOperations(client);
       await testSetContent(client);
       await testUpdateContent(client);
-      await testRateLimiting(client);
       await testBatchOperations(client);
       await testUndoRedo(client);
       await testReconnection(client);
