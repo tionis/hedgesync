@@ -28,6 +28,15 @@ jobs:
           # Skip tests that require actual server connection in CI
           CI: true
 
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build npm package and smoke-test the Node CLI
+        run: |
+          bun run build
+          node dist/cli/bin.js help > /dev/null
+          node dist/cli/bin.js help get > /dev/null
+
   build:
     runs-on: ubuntu-latest
     needs: test

@@ -21,7 +21,7 @@
     }
   },
   "bin": {
-    "hedgesync": "./dist/bin/hedgesync.js"
+    "hedgesync": "./dist/cli/bin.js"
   },
   "files": [
     "dist",
@@ -31,21 +31,20 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun test test/unit && bun run test/test-all-features.ts",
+    "test": "bun test test/unit test/e2e && bun run test/test-all-features.ts",
     "test:unit": "bun test test/unit",
     "example": "bun run examples/basic-usage.js",
     "cli": "bun run bin/hedgesync.ts",
-    "build:lib": "tsc -p tsconfig.build.json",
-    "build:cli-js": "tsc -p tsconfig.cli.json && sed -i \"s|from '../src/index.js'|from '../index.js'|g; s|from '../src/macro-engine.js'|from '../macro-engine.js'|g; s|from '../src/auth.js'|from '../auth.js'|g; 1s|#!/usr/bin/env bun|#!/usr/bin/env node|\" dist/bin/hedgesync.js",
     "build:cli": "bun build bin/hedgesync.ts --compile --outfile dist/hedgesync",
     "build:linux": "bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64",
     "build:macos": "bun build bin/hedgesync.ts --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64",
     "build:macos-arm": "bun build bin/hedgesync.ts --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64",
     "build:windows": "bun build bin/hedgesync.ts --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe",
     "build:all": "bun run build:linux && bun run build:macos && bun run build:macos-arm && bun run build:windows",
-    "build": "npm run build:lib && npm run build:cli-js",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli/bin.js",
     "prepublishOnly": "npm run build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.build.json",
+    "test:e2e": "bun test test/e2e"
   },
   "keywords": [
     "hedgedoc",
@@ -76,6 +75,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^20.0.0",
+    "socket.io": "4.8.1",
     "typescript": "^5.0.0"
   }
 }

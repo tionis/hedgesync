@@ -111,94 +111,99 @@ The `hedgesync` CLI provides quick access to HedgeDoc documents from the command
 
 ### Commands
 
+Note commands take a note URL; the forms HedgeDoc shows in the browser all
+work, including sub-path deployments (`https://example.com/hedgedoc/abc123`),
+published and slide links (`/s/<id>`, `/abc123/publish`, `/abc123/slide`).
+
 ```bash
-# Get document content
-hedgesync get https://md.example.com/abc123
-
-# Set document content from stdin
-echo "# Hello World" | hedgesync set https://md.example.com/abc123
-
-# Set document content from file
-hedgesync set https://md.example.com/abc123 -f document.md
-
-# Append text to document
-hedgesync append https://md.example.com/abc123 "New content at the end"
-
-# Prepend text to document
-hedgesync prepend https://md.example.com/abc123 "New content at the start"
-
-# Insert at position
-hedgesync insert https://md.example.com/abc123 10 "inserted text"
-
-# Search and replace (literal)
-hedgesync replace https://md.example.com/abc123 "old text" "new text"
-
-# Search and replace (regex)
-hedgesync replace https://md.example.com/abc123 "\\d+" "NUMBER" --regex --all
-
-# Get/set specific line (0-indexed)
-hedgesync line https://md.example.com/abc123 0           # Get line 0
-hedgesync line https://md.example.com/abc123 0 "# Title" # Set line 0
-
-# Watch for changes
-hedgesync watch https://md.example.com/abc123
-
-# Get note info
-hedgesync info https://md.example.com/abc123
-
-# List online users
+# Read
+hedgesync get https://md.example.com/abc123 > note.md     # exact content, no added newline
+hedgesync get https://md.example.com/abc123 --authors      # coloured by author
+hedgesync line https://md.example.com/abc123 0             # one line (0-based)
+hedgesync info https://md.example.com/abc123               # metadata, permission, online users
 hedgesync users https://md.example.com/abc123
+hedgesync authors https://md.example.com/abc123 -v
+hedgesync watch https://md.example.com/abc123 --ndjson
 
-# Transform with pandoc
-hedgesync transform https://md.example.com/abc123 --demote  # Demote headers
-hedgesync transform https://md.example.com/abc123 --to html # Convert to HTML
+# Edit (text from an argument, -f/--file, or piped stdin)
+hedgesync set https://md.example.com/abc123 -f note.md
+echo "- $(date): done" | hedgesync append https://md.example.com/abc123
+hedgesync prepend https://md.example.com/abc123 "New first line"
+hedgesync insert https://md.example.com/abc123 10 "inserted text"
+hedgesync line https://md.example.com/abc123 0 "# Title"
+hedgesync replace https://md.example.com/abc123 "old text" "new text" --all   # literal
+hedgesync replace https://md.example.com/abc123 '(\d+) items' '$1 things' --regex --all
 
-# Get document authors/contributors
-hedgesync authors https://md.example.com/abc123          # List authors
-hedgesync authors https://md.example.com/abc123 -v       # Verbose with timestamps
-hedgesync authors https://md.example.com/abc123 --json   # JSON output
+# Pandoc
+hedgesync transform https://md.example.com/abc123 --demote   # or --promote, --shift <n>
+hedgesync transform https://md.example.com/abc123 --to html  # convert (read-only)
 
-# Run macros (text replacement)
-hedgesync macro https://md.example.com/abc123 --text '::date' "$(date)"
-hedgesync macro https://md.example.com/abc123 --regex '/TODO/gi' 'DONE'
-hedgesync macro https://md.example.com/abc123 --built-in date
+# Macros
+hedgesync macro https://md.example.com/abc123 --text '::sig::=— Signed by Bot'
+hedgesync macro https://md.example.com/abc123 --regex '/TODO/gi=DONE'
+hedgesync macro https://md.example.com/abc123 --built-in --watch
+hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l' --watch
 hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 
-# Execute shell commands via macros
-hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l'
-hedgesync macro https://md.example.com/abc123 --exec '/::uptime::/gi:uptime -p' --watch
+# Mirror one note into another (Ctrl+C to stop)
+hedgesync mirror https://md.example.com/source https://md.example.com/target
+hedgesync mirror https://md.example.com/a https://md.example.com/b --bidirectional
+hedgesync mirror https://md.example.com/src https://md.example.com/dst --demote
 
-# Authentication / Login (prompts for the password)
-export HEDGEDOC_COOKIE="$(hedgesync login email https://md.example.com -u user@example.com)"
-hedgesync login ldap https://md.example.com -u username
+# Run your own script with a connected client (see `hedgesync help exec`)
+hedgesync exec stamp.ts https://md.example.com/abc123 -- extra args
+
+# HTTP API (no realtime session)
+hedgesync download https://md.example.com/abc123
+hedgesync create https://md.example.com -f note.md -n my-alias
+hedgesync revisions https://md.example.com/abc123
+hedgesync me https://md.example.com
+hedgesync history https://md.example.com --pinned
+hedgesync pin https://md.example.com/abc123
+hedgesync export https://md.example.com -o notes.zip
+hedgesync status https://md.example.com
+
+# Sessions
+hedgesync login https://md.example.com -u user@example.com --save   # prompts for the password
+hedgesync logout https://md.example.com
 ```
 
-### Options
+Run `hedgesync help <command>` for every option of a command.
+
+### Global Options
 
 ```
-<url>          Full HedgeDoc URL (required, e.g., https://md.example.com/abc123)
--c, --cookie   Session cookie for authentication (or HEDGEDOC_COOKIE env var)
--f, --file     Read content from file
--o, --output   Write output to file
--q, --quiet    Suppress non-essential output
---json         Output in JSON format
---regex, -r    Treat search pattern as regex
---all, -a, -g  Replace all occurrences
+-c, --cookie <cookie>  Session cookie (default: HEDGEDOC_COOKIE, then a saved login)
+-H, --header <header>  Extra HTTP header, "Name: value" (repeatable; also HEDGEDOC_HEADERS)
+--json                 Machine-readable output; errors become {"success": false, "error": ...}
+-q, --quiet            Suppress progress messages
+--no-color             Disable colours (also honoured: NO_COLOR, FORCE_COLOR)
+--no-reconnect         Do not reconnect dropped realtime sessions
+--debug                Show stack traces for unexpected errors
 ```
+
+Options may come before or after the URL, `--opt=value` works, short flags
+combine (`-qA`), and `--` ends option parsing. Unknown options are errors.
+Status messages go to stderr, so stdout can be piped.
 
 ### Authentication
 
-Private, locked or protected notes need a HedgeDoc session cookie, passed with
-`-c/--cookie` or the `HEDGEDOC_COOKIE` environment variable.
+Private, locked or protected notes need a HedgeDoc session cookie. hedgesync
+uses, in order: `-c/--cookie`, the `HEDGEDOC_COOKIE` environment variable, and
+a cookie saved for that server by `hedgesync login --save`.
 
 #### Email or LDAP login
 
-If the server has email or LDAP accounts enabled, `hedgesync login` signs in
-and prints the cookie (and nothing else) to stdout:
+If the server has email or LDAP accounts enabled, `hedgesync login` signs in.
+With `--save` it stores the cookie for that server in
+`~/.config/hedgesync/cookies.json` (mode 0600; `$XDG_CONFIG_HOME` and
+`HEDGESYNC_COOKIE_FILE` are honoured) and later commands pick it up; without
+it, the cookie alone is printed to stdout:
 
 ```bash
-export HEDGEDOC_COOKIE="$(hedgesync login email https://md.example.com -u user@example.com)"
+hedgesync login https://md.example.com -u user@example.com --save
 export HEDGEDOC_COOKIE="$(hedgesync login ldap https://md.example.com -u username)"
+hedgesync logout https://md.example.com   # ends the session and forgets it
 ```
 
 The password is prompted for on the terminal, read from `HEDGEDOC_PASSWORD`,
@@ -337,6 +342,32 @@ const client = new HedgeDocClient({
   cookie
 });
 ```
+
+### Mirroring Notes
+
+`NoteMirror` keeps two connected clients in sync (this is what `hedgesync mirror` uses):
+
+```javascript
+import { HedgeDocClient, NoteMirror, createMirrorTransform } from 'hedgesync';
+
+const source = new HedgeDocClient({ serverUrl, noteId: 'draft' });
+const target = new HedgeDocClient({ serverUrl, noteId: 'published' });
+await Promise.all([source.connect(), target.connect()]);
+
+const mirror = new NoteMirror(source, target, {
+  // One-way with a transform...
+  transform: createMirrorTransform({ headingShift: 1, prepend: '> Mirrored from draft\n\n' }),
+  // ...or { bidirectional: true }: concurrent edits on both sides are merged with OT
+});
+mirror.on('sync', (e) => console.log(e.direction, e.merged ? '(merged)' : ''));
+mirror.start();
+
+// later
+await mirror.flush();
+mirror.stop();
+```
+
+`mergeText(base, ours, theirs)` exposes the three-way merge on its own.
 
 ## Examples
 

@@ -37,6 +37,7 @@ export type {
 export { OTClient, OTDesyncError } from './ot-client.js';
 export type { Transformable, ReconnectOutcome } from './ot-client.js';
 export { diffToOperation } from './diff.js';
+export { VERSION } from './version.js';
 
 // HTTP API client
 export { HedgeDocAPI, HedgeDocAPIError } from './hedgedoc-api.js';
@@ -68,6 +69,7 @@ export type {
 // URL helpers
 export {
   parseNoteUrl,
+  parseServerUrl,
   buildNoteUrl
 } from './url.js';
 export type {
@@ -91,6 +93,10 @@ export type {
   LDAPAuthOptions,
   SessionCheckOptions
 } from './auth.js';
+
+// Note mirroring
+export { NoteMirror, mergeText, createMirrorTransform } from './mirror.js';
+export type { MirrorClient, MirrorOptions, MirrorSyncEvent, MirrorDirection, MirrorTransformOptions } from './mirror.js';
 
 // Pandoc integration
 export { 
