@@ -135,6 +135,13 @@ describe('editing', () => {
     expect(server.note(id).document).toBe('$&! $&! <x>');
   });
 
+  test('replace without --all changes only the first match', async () => {
+    const { id, url } = newNote('x x x');
+    const r = await cli(['replace', url, 'x', 'y', '--json', '-q']);
+    expect(JSON.parse(r.stdout).count).toBe(1);
+    expect(server.note(id).document).toBe('y x x');
+  });
+
   test('line sets a line', async () => {
     const { id, url } = newNote('a\nb\nc');
     await cli(['line', url, '1', 'B', '-q']);

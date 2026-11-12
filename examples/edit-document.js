@@ -1,89 +1,55 @@
 /**
- * Programmatic Editing Example
- * 
- * Demonstrates various editing operations: insert, delete, replace.
- * 
+ * Editing: insert, delete, replace, batch, undo and raw operations.
+ *
  * Usage:
- *   node examples/edit-document.js <server-url> <note-id>
- * 
- * Note: The document must have 'freely' permission for anonymous edits.
+ *   bun examples/edit-document.js <note-url>
+ *
+ * The note must be editable for you (anonymous edits need 'freely').
  */
 
-import { HedgeDocClient, TextOperation } from '../src/index.js';
+import { HedgeDocClient, TextOperation, parseNoteUrl } from '../src/index.js';
 
-const serverUrl = process.argv[2];
-const noteId = process.argv[3];
-
-if (!serverUrl || !noteId) {
-  console.error('Usage: node examples/edit-document.js <server-url> <note-id>');
+const url = process.argv[2];
+if (!url) {
+  console.error('Usage: bun examples/edit-document.js <note-url>');
   process.exit(1);
 }
+const client = new HedgeDocClient({ ...parseNoteUrl(url), cookie: process.env.HEDGEDOC_COOKIE });
 
-async function main() {
-  console.log(`Connecting to ${serverUrl}/${noteId}...\n`);
-  
-  const client = new HedgeDocClient({ serverUrl, noteId });
+try {
+  await client.connect();
+  if (!client.canEdit()) throw new Error('No edit permission for this note');
 
-  client.on('refresh', (info) => {
-    console.log(`Note: "${info.title}" (permission: ${info.permission})`);
+  // Insert at the end and at the start.
+  client.insert(client.getDocument().length, `\n\nAdded at ${new Date().toISOString()}`);
+  client.insert(0, '<!-- edited by hedgesync -->\n');
+
+  // Replace a range (position, length, text).
+  client.replace(0, 4, '<!--');
+
+  // Several edits applied as a single operation (rolled back if fn throws).
+  client.batch(() => {
+    client.insert(client.getDocument().length, '\n- one');
+    client.insert(client.getDocument().length, '\n- two');
   });
 
-  try {
-    await client.connect();
-    
-    // Wait for permission info
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    console.log('\nInitial document:');
-    console.log('─'.repeat(40));
-    console.log(client.getDocument());
-    console.log('─'.repeat(40));
-    console.log(`Revision: ${client.getRevision()}`);
-    console.log(`Can edit: ${client.canEdit()}`);
-    
-    if (!client.canEdit()) {
-      console.log('\n⚠ Cannot edit this document (requires login or different permission)');
-      client.disconnect();
-      process.exit(0);
-    }
-    
-    console.log('\n--- Performing edits ---\n');
-    
-    // Example 1: Insert at end
-    console.log('1. Inserting text at the end...');
-    const timestamp = new Date().toISOString();
-    client.insert(client.getDocument().length, `\n\nAdded at ${timestamp}`);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Example 2: Insert at beginning  
-    console.log('2. Inserting comment at beginning...');
-    client.insert(0, '<!-- Modified by hedgesync -->\n');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Example 3: Using a raw TextOperation for more control
-    console.log('3. Using TextOperation directly...');
-    const doc = client.getDocument();
-    const op = new TextOperation();
-    op.retain(doc.length);
-    op.insert('\n<!-- End of document -->');
-    client.applyOperation(op);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    console.log('\n--- Final document ---');
-    console.log('─'.repeat(40));
-    console.log(client.getDocument());
-    console.log('─'.repeat(40));
-    console.log(`Final revision: ${client.getRevision()}`);
-    
-    client.disconnect();
-    console.log('\n✓ Done!');
-    process.exit(0);
+  // Undo the batch, then redo it.
+  client.undo();
+  client.redo();
 
-  } catch (error) {
-    console.error('Error:', error.message);
-    client.disconnect();
-    process.exit(1);
-  }
+  // Make the document equal to some text with a minimal diff.
+  client.updateContent(client.getDocument().replace('- two', '- 2'));
+
+  // A raw TextOperation for full control.
+  const op = new TextOperation().retain(client.getDocument().length).insert('\n<!-- end -->');
+  client.applyOperation(op);
+
+  await client.flush();
+  console.log(client.getDocument());
+  console.log(`\nRevision ${client.getRevision()}`);
+} catch (error) {
+  console.error('Error:', error.message);
+  process.exitCode = 1;
+} finally {
+  client.disconnect();
 }
-
-main();

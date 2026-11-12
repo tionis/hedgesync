@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Comprehensive test script for hedgesync library
- * Tests all major features against a live HedgeDoc server
+ * Feature test script for the hedgesync library.
+ *
+ * The offline part always runs. The live part edits a real note and only runs
+ * when HEDGESYNC_LIVE_NOTE_URL points at a scratch note you are happy to have
+ * modified, e.g.:
+ *
+ *   HEDGESYNC_LIVE_NOTE_URL=https://md.example.com/scratch bun run test/test-all-features.ts
  */
 
 import {
@@ -17,9 +22,11 @@ import {
 import { isPandocAvailable } from '../src/pandoc-transformer.js';
 import { HedgeDocClient as ObsidianClient, HedgeDocAPI as ObsidianAPI } from '../src/obsidian.js';
 
-// Test configuration
-const SERVER_URL = 'https://md.tionis.dev';
-const NOTE_ID = '49vCOEWsR0KR6UowrEV8Kg';
+// Live tests run only against an explicitly given scratch note.
+const LIVE_NOTE_URL = process.env.HEDGESYNC_LIVE_NOTE_URL;
+const { serverUrl: SERVER_URL, noteId: NOTE_ID } = LIVE_NOTE_URL
+  ? parseNoteUrl(LIVE_NOTE_URL)
+  : { serverUrl: '', noteId: '' };
 
 // Colors for output
 const c = {
@@ -966,14 +973,14 @@ async function testEvents(client) {
 // Main Test Runner
 // ============================================
 
-// Check if running in CI mode (skip server-dependent tests)
-const isCI = process.env.CI === 'true';
+// Without a scratch note, skip the tests that edit a live server.
+const isCI = !LIVE_NOTE_URL;
 
 async function runTests() {
   log(c.bold(c.cyan('\n🧪 hedgesync Feature Test Suite\n')));
   
   if (isCI) {
-    log(c.yellow('Running in CI mode - skipping server-dependent tests\n'));
+    log(c.yellow('HEDGESYNC_LIVE_NOTE_URL not set - skipping live server tests\n'));
   } else {
     log(c.dim(`Server: ${SERVER_URL}`));
     log(c.dim(`Note:   ${NOTE_ID}`));
@@ -994,7 +1001,7 @@ async function runTests() {
     
     if (isCI) {
       // In CI mode, skip server-dependent tests
-      log(c.yellow('\n⏭️  Skipping server-dependent tests in CI mode'));
+      log(c.yellow('\n⏭️  Skipping live server tests (set HEDGESYNC_LIVE_NOTE_URL to run them)'));
     } else {
       // Connect to server
       log(c.bold('\n🔌 Connecting to HedgeDoc...'));

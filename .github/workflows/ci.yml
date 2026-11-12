@@ -24,9 +24,6 @@ jobs:
 
       - name: Run tests
         run: bun run test
-        env:
-          # Skip tests that require actual server connection in CI
-          CI: true
 
       - name: Typecheck
         run: bun run typecheck

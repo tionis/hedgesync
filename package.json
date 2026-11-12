@@ -1,6 +1,6 @@
 {
   "name": "hedgesync",
-  "version": "1.4.1",
+  "version": "2.0.0",
   "description": "A library and CLI to programmatically connect to a running HedgeDoc server and make live edits to documents",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,12 +28,12 @@
     "src",
     "deno.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "bun test test/unit test/e2e && bun run test/test-all-features.ts",
     "test:unit": "bun test test/unit",
-    "example": "bun run examples/basic-usage.js",
     "cli": "bun run bin/hedgesync.ts",
     "build:cli": "bun build bin/hedgesync.ts --compile --outfile dist/hedgesync",
     "build:linux": "bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64",

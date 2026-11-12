@@ -159,7 +159,10 @@ export const replace: Command = {
     }
     // A literal search must not interpret "$&" etc. in the replacement.
     const replacementText = ctx.flag('regex') ? replacement : replacement.replace(/\$/g, '$$$$');
-    const count = await ctx.withClient({ edit: true }, client => client.replaceRegex(pattern, replacementText));
+    // replaceRegex always replaces every match; without the g flag only the first is wanted.
+    const count = await ctx.withClient({ edit: true }, client => (pattern.global
+      ? client.replaceRegex(pattern, replacementText)
+      : Number(client.replaceFirst(pattern, replacementText))));
     ctx.result({ action: 'replace', pattern: search, replacement, count },
       () => ctx.info(c('green', `✓ Replaced ${count} occurrence(s)`)));
   },

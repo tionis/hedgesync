@@ -371,36 +371,36 @@ mirror.stop();
 
 ## Examples
 
-Run the examples with Bun:
+Each example takes a note URL (use a scratch note: most of them edit it) and
+honours `HEDGEDOC_COOKIE`. They import the TypeScript sources, so run them with Bun:
 
 ```bash
-# Basic usage - connect, read, and optionally edit
-bun run examples/basic-usage.js https://your-hedgedoc.com note-id
-
-# Watch a document for changes
-bun run examples/watch-document.js https://your-hedgedoc.com note-id
-
-# Programmatic editing demo
-bun run examples/edit-document.js https://your-hedgedoc.com note-id
-
-# Regex search and replace
-bun run examples/regex-replace.js
-
-# Line-based operations
-bun run examples/line-operations.js
-
-# Pandoc AST transformations (requires pandoc)
-bun run examples/pandoc-transform.js
-
-# Macro auto-expansion system
-bun run examples/macro-system.js
+bun examples/basic-usage.js https://md.example.com/scratch      # read, one edit
+bun examples/edit-document.js https://md.example.com/scratch    # insert/replace/batch/undo/raw ops
+bun examples/line-operations.js https://md.example.com/scratch  # 0-based line helpers
+bun examples/regex-replace.js https://md.example.com/scratch    # replaceFirst / replaceRegex
+bun examples/watch-document.js https://md.example.com/scratch   # change and presence events
+bun examples/macro-system.js https://md.example.com/scratch     # macro engine, runs until Ctrl+C
+bun examples/pandoc-transform.js https://md.example.com/scratch [--write]   # needs pandoc
 ```
 
-Or with Node.js (still compatible):
+`examples/macros.json` is a config for `hedgesync macro --config`.
+
+## Development
 
 ```bash
-node examples/basic-usage.js https://your-hedgedoc.com note-id
+bun install
+bun run test        # unit + end-to-end tests (no network), then the offline feature script
+bun run typecheck
+bun run build       # npm package into dist/ (library + Node CLI)
 ```
+
+`test/unit` covers the OT client (including seeded fuzzing against an
+in-memory server, `FUZZ_SEED=n` to reproduce), macros, shell quoting, auth,
+mirroring and argument parsing. `test/e2e` runs the real CLI and every example
+against a socket.io stand-in for HedgeDoc. `test/test-all-features.ts` also
+has live tests that edit a real note; they run only with
+`HEDGESYNC_LIVE_NOTE_URL=<scratch note URL>`.
 
 ## API Reference
 

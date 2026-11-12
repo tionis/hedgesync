@@ -1,76 +1,41 @@
 /**
- * Example: Regex Replace Operations
- * 
- * Demonstrates using regex-based search and replace functionality.
+ * Regex search and replace. Each call sends one operation, and replacement
+ * strings support $1, $<name>, $& like String.prototype.replace.
+ *
+ * Usage:
+ *   bun examples/regex-replace.js <note-url>
  */
 
-import { HedgeDocClient } from '../src/index.js';
+import { HedgeDocClient, parseNoteUrl } from '../src/index.js';
 
-const HEDGEDOC_URL = process.env.HEDGEDOC_URL || 'https://md.tionis.dev';
-const NOTE_ID = process.env.NOTE_ID || '49vCOEWsR0KR6UowrEV8Kg';
-
-async function main() {
-  const client = new HedgeDocClient(HEDGEDOC_URL);
-
-  try {
-    console.log('Connecting to note...');
-    await client.connect(NOTE_ID);
-    console.log('Connected!');
-    
-    // Get current document
-    const doc = client.getDocument();
-    console.log('\n--- Current Document ---');
-    console.log(doc.substring(0, 500) + (doc.length > 500 ? '...' : ''));
-    
-    // Example 1: Replace first match of a pattern
-    console.log('\n--- Replace First Match ---');
-    const replaced = await client.replaceRegex(
-      /TODO/i,  // Pattern to find
-      'DONE'    // Replacement
-    );
-    console.log(`Replaced: ${replaced}`);
-    
-    // Example 2: Replace all matches
-    console.log('\n--- Replace All Matches ---');
-    const count = await client.replaceAllRegex(
-      /\bfoo\b/gi,  // Word "foo" case-insensitive
-      'bar'          // Replace with "bar"
-    );
-    console.log(`Replaced ${count} occurrences`);
-    
-    // Example 3: Replace with capture groups
-    console.log('\n--- Replace with Capture Groups ---');
-    // Convert [text](url) to <a href="url">text</a>
-    const linkCount = await client.replaceAllRegex(
-      /\[([^\]]+)\]\(([^)]+)\)/g,
-      '<a href="$2">$1</a>'
-    );
-    console.log(`Converted ${linkCount} markdown links to HTML`);
-    
-    // Example 4: Replace using function
-    console.log('\n--- Replace with Function ---');
-    // Add current timestamp to date markers
-    const dateDoc = client.getDocument();
-    const dateMatches = dateDoc.match(/\{\{DATE\}\}/g);
-    if (dateMatches) {
-      await client.replaceAllRegex(
-        /\{\{DATE\}\}/g,
-        new Date().toISOString().split('T')[0]
-      );
-      console.log('Replaced date placeholders');
-    }
-    
-    // Show result
-    console.log('\n--- Updated Document ---');
-    const updatedDoc = client.getDocument();
-    console.log(updatedDoc.substring(0, 500) + (updatedDoc.length > 500 ? '...' : ''));
-
-  } catch (error) {
-    console.error('Error:', error.message);
-  } finally {
-    client.disconnect();
-    console.log('\nDisconnected.');
-  }
+const url = process.argv[2];
+if (!url) {
+  console.error('Usage: bun examples/regex-replace.js <note-url>');
+  process.exit(1);
 }
+const client = new HedgeDocClient({ ...parseNoteUrl(url), cookie: process.env.HEDGEDOC_COOKIE });
 
-main();
+try {
+  await client.connect();
+  if (!client.canEdit()) throw new Error('No edit permission for this note');
+
+  // First match only; returns whether one was found.
+  console.log('TODO -> DONE:', client.replaceFirst(/TODO/i, 'DONE'));
+
+  // All matches (replaceRegex is always global); returns the count.
+  console.log('foo -> bar:', client.replaceRegex(/\bfoo\b/gi, 'bar'));
+
+  // Capture groups: [text](url) -> <a href="url">text</a>
+  console.log('links:', client.replaceRegex(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'));
+
+  // A function computes each replacement.
+  console.log('dates:', client.replaceRegex(/\{\{DATE\}\}/g, () => new Date().toISOString().slice(0, 10)));
+
+  await client.flush();
+  console.log('\n' + client.getDocument().slice(0, 500));
+} catch (error) {
+  console.error('Error:', error.message);
+  process.exitCode = 1;
+} finally {
+  client.disconnect();
+}
