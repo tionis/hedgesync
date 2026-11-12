@@ -903,68 +903,55 @@ await pandoc.applyToClient(client, (ast) => {
 
 ### `MacroEngine`
 
-Auto-expand triggers as you type. Listens for document changes and replaces patterns.
+Auto-expand triggers as collaborators type.
+
+- **What triggers a macro:** in watch mode, only text touched by a remote edit
+  can trigger one. If filters are set, the edit must come from an allowed user.
+  The engine's own edits never trigger macros, so macro output cannot loop.
+- **Where the result goes:** each match is tracked through later edits, and the
+  result applies only if the original text is still there.
 
 ```javascript
-import { HedgeDocClient, MacroEngine } from 'hedgesync';
+import { HedgeDocClient, MacroEngine, renderShellTemplate, runShell } from 'hedgesync';
 
-const client = new HedgeDocClient(serverUrl);
-await client.connect(noteId);
+const client = new HedgeDocClient({ serverUrl, noteId, cookie });
+await client.connect();
 
-const macros = new MacroEngine(client);
+const macros = new MacroEngine(client, {
+  allowedUserIds: ['<hedgedoc-account-id>'], // optional: only these accounts trigger macros
+});
 
 // Simple text triggers
-macros.addTextMacro('::date', () => new Date().toISOString().split('T')[0]);
-macros.addTextMacro('::sig', 'Signed by Bot');
+macros.addTextMacro('::date::', () => new Date().toISOString().split('T')[0]);
+macros.addTextMacro('::sig::', 'Signed by Bot');
 
-// Regex-based macros
-macros.addRegexMacro('uppercase', /UPPER\(([^)]+)\)/g, (match, text) => {
-  return text.toUpperCase();
+// Regex macros: handler gets String.replace-style arguments
+// (match, ...groups, index, document); return null to leave the match alone
+macros.addRegexMacro('uppercase', /UPPER\(([^)]+)\)/g, (match, text) => text.toUpperCase());
+
+// Template macros: {{variable}}
+macros.addTemplateMacro('vars', '{{', '}}', (name) => ({ user: 'Alice' })[name.trim()] ?? null);
+
+// Running commands: never splice note text into a command string.
+// renderShellTemplate passes placeholder values via environment variables.
+macros.addRegexMacro('calc', /::calc\s+(.+?)::/g, async (match, expr) => {
+  const result = await runShell(renderShellTemplate('echo {1} | bc -l', { '1': expr }));
+  return result.code === 0 ? result.stdout.trim() : null;
 });
 
-// Template macros ${variable}
-macros.addTemplateMacro('vars', '${', '}', (name) => {
-  const vars = { user: 'Alice', project: 'Demo' };
-  return vars[name] || `[unknown: ${name}]`;
-});
+// Streaming macros: stdout streams into the document as the command runs
+macros.addStreamingExecMacro('ask', /::ask\s+(.+?)::/g,
+  (match, question) => renderShellTemplate('llm {1}', { '1': question }),
+  { trackState: true, timeoutMs: 120_000 } // marks the trigger → / ✓ / ✗; never reruns it
+);
 
-// Exec macros - execute shell commands
-macros.addExecMacro('calc', /::calc\s+(.+?)::/gi, 'echo {1} | bc -l');
+// Block macros: process content between ::BEGIN:name:: and ::END:name:: lines
+macros.addBlockMacro('sort', (content, context) => content.split('\n').sort().join('\n'));
 
-// Streaming exec macros - output streams live into document
-macros.addStreamingExecMacro('slow', /::slow::/gi, 'for i in 1 2 3; do echo $i; sleep 1; done', {
-  lineBuffered: true,
-  trackState: true,      // Show → while running, ✓ when done
-  useDocumentContext: true  // Enable {DOC}, {BEFORE}, {AFTER} placeholders
-});
-
-// Block macros - process content between ::BEGIN:name:: and ::END:name::
-macros.addBlockMacro('sort', (name, content, context) => {
-  const lines = content.trim().split('\n');
-  return lines.sort().join('\n');
-});
-
-// Block macro with shell command
-macros.addBlockMacro('uppercase', async (name, content) => {
-  const proc = Bun.spawn(['tr', 'a-z', 'A-Z'], { stdin: 'pipe' });
-  proc.stdin.write(content);
-  proc.stdin.end();
-  return await new Response(proc.stdout).text();
-});
-
-// Built-in helpers
-const { dateMacro, uuidMacro, counterMacro } = MacroEngine.builtins;
-macros.addTextMacro(...Object.values(dateMacro('::now', 'locale')));
-macros.addTextMacro(...Object.values(uuidMacro('::uuid')));
-
-// Start auto-expansion
-macros.start();
-
-// Manual expansion
-await macros.expand();
-
-// Stop listening
-macros.stop();
+macros.start();          // watch mode
+await macros.expand();   // or: expand everything in the current document once
+await macros.waitForStreams();
+macros.stop();           // also kills running commands
 ```
 
 #### Built-in Macro Helpers
@@ -1024,9 +1011,13 @@ hedgesync macro <url> --text '::sig::=Bot' --exec '/::date::/gi:date +%F' --buil
 | `--block 'name:command'` | Block macro for `::BEGIN:name::` ... `::END:name::` |
 | `--built-in` | Enable built-in macros (see below) |
 | `--config <file>` | Load macros from JSON config file |
-| `--watch` | Run continuously, applying macros as document changes |
+| `--watch` | Run continuously; only text touched by others' edits triggers macros |
 | `--stream` | Stream command output live into document |
-| `--track-state` | Show running/done markers (`→`/`✓`) to prevent re-triggering |
+| `--track-state` | Keep the trigger and mark it `→` running / `✓` done / `✗` failed; marked triggers never rerun |
+| `--timeout <s>` | Kill exec/block commands after this many seconds |
+| `--allow-user <id>` | Only edits by this HedgeDoc account id trigger macros (repeatable; find ids with `hedgesync me`) |
+| `--user-filter <regex>` | Only edits by users whose display name matches (spoofable; prefer `--allow-user`) |
+| `--section-heading`, `--section-lines`, `--section-regex` | Limit macros to part of the note |
 
 #### Built-in Macros (`--built-in`)
 
@@ -1109,45 +1100,42 @@ With streaming enabled:
 3. Multiple streaming commands can run concurrently
 4. The CLI waits for all streams to complete before exiting
 
-**Shell Execution Note:** Commands are executed via `sh -c "command"`, meaning there's an outer shell that interprets your command. This affects quoting:
+#### How Placeholders Reach the Shell
 
-```bash
-# Problem: $i gets expanded by the OUTER shell (to empty string)
---exec '/::run\s+(.+?)::/gi:bash -c "{1}"'
-# Document: ::run for i in 1 2 3; do echo $i; done::
-# Result: empty output (4 blank lines)
+Commands run via `sh -c`, so templates can use pipes, redirects and so on. Note
+content never becomes part of the command text, though. Each placeholder is
+replaced by a reference to an environment variable (`{1}` becomes `"${HS_1}"`,
+`{DOC}` becomes `"${HS_DOC}"`), and the value is passed in the environment. The
+shell expands a variable exactly once and never re-parses the result, so text
+like `$(rm -rf ~)` in the note arrives as a literal argument.
 
-# Solution 1: Use single quotes in the command template
---exec "/::run\s+(.+?)::/gi:bash -c '{1}'"
-# Result: 1\n2\n3 (correct!)
+You can write a placeholder bare, inside double quotes or inside single quotes;
+either way it expands to exactly one argument. If a command exits with a
+non-zero status, the trigger is left unchanged and stderr is logged.
 
-# Solution 2: Escape $ in the document
-# Document: ::run for i in 1 2 3; do echo \$i; done::
-# Result: 1\n2\n3 (correct!)
-```
-
-The outer shell allows pipes, redirects, and other shell features in your command templates, but requires awareness of quoting rules.
-
-**Security Note:** Exec macros execute arbitrary shell commands. Only use on documents you trust, and be careful with user-provided content.
+**Security note:** anyone who can edit the note can trigger your macros and
+choose their input. Shell injection is not possible, but the command still acts
+on that input: `cat {1}` lets collaborators read any file you can read, and
+`bash -c {1}` runs whatever they write. Restrict who can trigger macros with
+`--allow-user`, and only template commands that are safe for any input.
 
 #### State Tracking
 
-Use `--track-state` to visually show when a macro is running and prevent re-triggering:
+Use `--track-state` with `--stream` to keep the trigger visible and mark its status:
 
 ```bash
-# While running: ::ask question:: → ::ask question::→
-# When done:     ::ask question::→ → ::ask question::✓ result
-hedgesync macro <url> --exec '/::ask\s+(.+?)::/gi:llm "{1}"' --stream --track-state
-
-# Custom markers (default: → for running, ✓ for done)
-# Configure via environment or config file
+hedgesync macro <url> --exec '/::ask\s+(.+?)::/gi:llm {1}' --stream --track-state --watch
 ```
 
-With state tracking:
-1. When a macro starts, a running marker (`→`) is appended to the trigger
-2. This prevents the same pattern from re-matching while executing
-3. When complete, the marker changes to done (`✓`) followed by output
-4. Useful for expensive operations (LLM calls, API requests) to show status
+```text
+::ask What is 2+2?::      typed by a collaborator
+::ask What is 2+2?::→     command running; output streams in on the next lines
+::ask What is 2+2?::✓     command finished (✗ if it failed)
+2+2 equals 4.
+```
+
+A marked trigger never runs again, even if it is edited later. Without
+`--track-state`, the trigger is deleted when the command starts.
 
 #### Document Context Placeholders
 
@@ -1213,7 +1201,8 @@ milk
 
 Block macros:
 - Content between markers is piped to stdin of the command
-- Command output replaces the entire block (including markers)
+- Command output replaces the entire block (including markers); if the command fails, the block is left unchanged
+- Placeholders `{CONTENT}`, `{DOC}`, `{BEFORE}`, `{AFTER}` are also available
 - Great for transformations that need multi-line input
 - Can be combined with watch mode for live processing
 
@@ -1247,10 +1236,9 @@ Block macros:
     {
       "type": "exec",
       "pattern": "/::ask\\s+(.+?)::/gi",
-      "command": "llm \"{1}\"",
+      "command": "llm {1}",
       "streaming": true,
-      "trackState": true,
-      "useDocumentContext": true
+      "trackState": true
     },
     {
       "type": "block",
@@ -1273,8 +1261,15 @@ Block macros:
 Config options for exec macros:
 - `streaming`: Set to `true` to enable live streaming output (default: `false`)
 - `lineBuffered`: When streaming, buffer by line instead of character (default: `true`)
-- `trackState`: Show running/done markers to prevent re-triggering (default: `false`)
-- `useDocumentContext`: Enable {DOC}, {BEFORE}, {AFTER} placeholders (default: `false`)
+- `trackState`: Mark triggers running/done/failed; marked triggers never rerun (default: `false`)
+- Placeholders `{0}`, `{1}`…, `{DOC}`, `{BEFORE}`, `{AFTER}` are always available
+
+Config options for builtin macros:
+- `name`: one of `date`, `time`, `datetime`, `ts`
+
+The older `{ "text": { "trigger": "replacement" }, "regex": { "pattern": "replacement" } }`
+format is still accepted. A replacement starting with `$` runs the rest as a
+command; regex commands get `MATCH` and `GROUP1`… in their environment.
 
 Config options for block macros:
 - `name`: The block name that appears in `::BEGIN:name::` markers

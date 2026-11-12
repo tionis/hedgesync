@@ -1,77 +1,91 @@
 /**
- * MacroEngine - Pattern-based auto-replacement system
+ * MacroEngine - pattern-based auto-replacement for live HedgeDoc notes.
  *
- * Listens for document changes and automatically expands macros when
- * patterns are detected.
+ * Design:
+ * - **Dirty ranges.** In watch mode only text touched by a remote edit (from
+ *   an allowed user, if filters are set) can trigger a macro. The engine's
+ *   own edits never mark text dirty, so macro output cannot re-trigger
+ *   macros and a trigger planted by a filtered-out user stays inert.
+ * - **Anchors.** Every match is tracked as a range through all subsequent
+ *   edits (local and remote). After an async handler returns, the result is
+ *   applied only if the original text is still at the anchor; nothing is
+ *   ever relocated by searching for it.
+ * - **In-flight tracking.** Matches being handled are skipped by later scans,
+ *   and streaming macros with state tracking skip triggers already marked
+ *   running/done, so a command never runs twice for the same trigger.
+ * - Changes that arrive while a scan is running schedule another scan.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { Readable } from 'node:stream';
+import type { ChildProcess } from 'node:child_process';
 import { TextOperation } from './text-operation.js';
+import { spawnShell, killShell, toShellCommand, type ShellCommand } from './shell.js';
 
-// Forward declaration for HedgeDocClient to avoid circular imports
+/** The subset of HedgeDocClient the engine needs. */
 interface HedgeDocClientLike {
   getDocument(): string;
   replace(index: number, length: number, text: string): void;
   delete(index: number, length: number): void;
   insert(index: number, text: string): void;
-  on(event: string, handler: (...args: unknown[]) => void): void;
-  off(event: string, handler: (...args: unknown[]) => void): void;
+  on(event: string, handler: (...args: any[]) => void): unknown;
+  off(event: string, handler: (...args: any[]) => void): unknown;
 }
 
 /** User info (mirrors HedgeDoc's UserInfo) */
 interface UserInfo {
   id: string;
+  userid?: string | null;
   name?: string;
-  color?: string;
-  photo?: string;
+}
+
+/** Change event from HedgeDoc client */
+interface ChangeEvent {
+  type: 'local' | 'remote';
+  operation: TextOperation;
+  clientId?: string;
+  user?: UserInfo;
 }
 
 // ===========================================
 // Types
 // ===========================================
 
-/** Change event from HedgeDoc client */
-interface ChangeEvent {
-  type: 'local' | 'remote';
-  operation?: TextOperation;
-  /** Client ID of the user who made the change (only for remote changes) */
-  clientId?: string;
-  /** User info of who made the change (only for remote changes, if available) */
-  user?: UserInfo;
-}
+/** Handler result: replacement text, or null/undefined to leave the match alone. */
+type MaybeText = string | null | undefined;
 
-/** Base macro definition */
+/**
+ * Regex handler, called like a String.prototype.replace callback:
+ * `(match, ...groups, index, document)`.
+ */
+type RegexHandler = (match: string, ...args: any[]) => MaybeText | Promise<MaybeText>;
+
+/** Streaming command builder, same arguments as RegexHandler. */
+type CommandBuilder = (match: string, ...args: any[]) =>
+  string | ShellCommand | null | undefined | Promise<string | ShellCommand | null | undefined>;
+
 interface BaseMacro {
   type: string;
+  name: string;
   pattern: RegExp;
 }
 
-/** Text macro definition */
 interface TextMacro extends BaseMacro {
   type: 'text';
   trigger: string;
-  replacement: (trigger: string) => string | Promise<string>;
-  wordBoundary: boolean;
+  replacement: (trigger: string) => MaybeText | Promise<MaybeText>;
 }
 
-/** Regex macro definition */
 interface RegexMacro extends BaseMacro {
   type: 'regex';
-  name: string;
-  handler: (match: string, ...groups: string[]) => string | null | undefined | Promise<string | null | undefined>;
+  handler: RegexHandler;
 }
 
-/** Template macro definition */
 interface TemplateMacro extends BaseMacro {
   type: 'template';
-  name: string;
   startDelim: string;
   endDelim: string;
-  handler: (content: string) => string | null | undefined | Promise<string | null | undefined>;
+  handler: (content: string) => MaybeText | Promise<MaybeText>;
 }
 
-/** Streaming exec macro callbacks */
 interface StreamingCallbacks {
   onStart?: (match: string, position: number) => void;
   onData?: (chunk: string, position: number) => void;
@@ -79,14 +93,21 @@ interface StreamingCallbacks {
   onError?: (error: Error) => void;
 }
 
-/** State tracking configuration */
 interface StateTracking {
-  enabled: boolean;
-  runningMarker?: string;  // Default: '→'
-  doneMarker?: string;     // Default: '✓'
+  runningMarker: string;
+  doneMarker: string;
+  failedMarker: string;
 }
 
-/** Document context for command building */
+interface StreamingMacro extends BaseMacro, StreamingCallbacks {
+  type: 'streaming';
+  commandBuilder: CommandBuilder;
+  lineBuffered: boolean;
+  stateTracking: StateTracking | null;
+  timeoutMs: number;
+}
+
+/** Document context passed to block handlers */
 interface DocumentContext {
   fullDocument: string;
   beforeMatch: string;
@@ -96,139 +117,56 @@ interface DocumentContext {
   groups: string[];
 }
 
-/** Streaming exec macro definition */
-interface StreamingMacro extends BaseMacro, StreamingCallbacks {
-  type: 'streaming';
-  name: string;
-  /** Basic command builder (match + groups) */
-  commandBuilder?: (match: string, ...groups: string[]) => string | Promise<string>;
-  /** Enhanced command builder with document context */
-  contextCommandBuilder?: (context: DocumentContext) => string | Promise<string>;
-  lineBuffered: boolean;
-  stateTracking?: StateTracking;
-}
-
-/** Block macro definition - matches ::BEGIN:name:: ... ::END:name:: */
 interface BlockMacro extends BaseMacro {
   type: 'block';
-  name: string;
   blockName: string;
-  handler: (content: string, context: DocumentContext) => string | Promise<string>;
+  handler: (content: string, context: DocumentContext) => MaybeText | Promise<MaybeText>;
 }
 
-/** Union of all macro types */
 type Macro = TextMacro | RegexMacro | TemplateMacro | StreamingMacro | BlockMacro;
 
-/** Match info from pattern matching */
-interface MatchInfo {
-  match: string;
-  groups: string[];
-  index: number;
-}
-
-/** Text macro match result */
-interface TextMacroMatch {
-  trigger: string;
-  replacement: string;
-  index: number;
-}
-
-/** Regex macro match result */
-interface RegexMacroMatch {
-  match: string;
-  replacement: string;
-  index: number;
-}
-
-/** Template macro match result */
-interface TemplateMacroMatch {
-  template: string;
-  content: string;
-  replacement: string;
-  index: number;
-}
-
-/** Streaming macro match result */
-interface StreamingMacroMatch {
+/** One expanded (or started) match */
+interface MacroMatch {
   match: string;
   index: number;
-  streaming: boolean;
+  replacement?: string;
+  streaming?: boolean;
 }
 
-/** Match result union */
-type MacroMatch = TextMacroMatch | RegexMacroMatch | TemplateMacroMatch | StreamingMacroMatch;
-
-/** Result from applying a macro */
-interface MacroApplyResult {
-  changed: boolean;
-  matches: MacroMatch[];
-  document: string;
-}
-
-/** Expansion record */
 interface Expansion {
   macro: string;
   matches: MacroMatch[];
 }
 
-/** Streaming started record */
-interface StreamingStarted {
-  name: string;
-  match: string;
-  index: number;
-}
-
-/** Text macro options */
 interface TextMacroOptions {
+  /** Only match when not surrounded by word characters (default: false) */
   wordBoundary?: boolean;
 }
 
-/** Streaming exec macro options */
 interface StreamingExecOptions extends StreamingCallbacks {
+  /** Insert output line by line (default: true) */
   lineBuffered?: boolean;
-  /** Enable state tracking (changes ::trigger:: to ::trigger::→ while running, ::trigger::✓ when done) */
+  /**
+   * Keep the trigger and append a marker: running while the command runs,
+   * then done/failed. Marked triggers never run again. Without this, the
+   * trigger is deleted when the command starts.
+   */
   trackState?: boolean;
-  /** Custom running marker (default: '→') */
   runningMarker?: string;
-  /** Custom done marker (default: '✓') */
   doneMarker?: string;
-  /** Use document context placeholders: {DOC}, {BEFORE}, {AFTER} */
-  useDocumentContext?: boolean;
+  failedMarker?: string;
+  /** Kill the command after this many ms (default: no limit) */
+  timeoutMs?: number;
 }
 
-/** Block macro options */
-interface BlockMacroOptions {
-  /** Callbacks for block processing */
-  onStart?: (blockName: string, content: string) => void;
-  onEnd?: (blockName: string, result: string) => void;
-  onError?: (error: Error) => void;
-}
+/** Options for block macros (reserved for future use). */
+type BlockMacroOptions = Record<string, never>;
 
-/** Built-in date macro result */
-interface DateMacroResult {
+interface BuiltinMacro {
   trigger: string;
   replacement: () => string;
 }
 
-/** Built-in UUID macro result */
-interface UuidMacroResult {
-  trigger: string;
-  replacement: () => string;
-}
-
-/** Built-in counter macro result */
-interface CounterMacroResult {
-  trigger: string;
-  replacement: () => string;
-}
-
-/** Built-in snippet macro result */
-interface SnippetMacroResult {
-  trigger: string;
-  replacement: () => string;
-}
-
-/** Macro info for listing */
 interface MacroInfo {
   name: string;
   type: string;
@@ -240,84 +178,117 @@ interface MacroInfo {
 // Section Filter Types
 // ===========================================
 
-/**
- * Heading-based section filter.
- * Only process macros under sections matching the specified heading pattern.
- * 
- * @example
- * // Only run macros under "## Scripts" heading
- * { type: 'heading', pattern: /^## Scripts$/m }
- * 
- * // Only run macros under any level 2+ heading containing "Code"
- * { type: 'heading', pattern: /^#{2,}\s+.*Code.*$/m }
- */
+/** Only process macros under headings matching `pattern`. */
 export interface HeadingSectionFilter {
   type: 'heading';
-  /** Regex pattern to match the heading line */
   pattern: RegExp;
-  /** If true, include content until the next heading of same or higher level (default: true) */
+  /** Include content until the next heading of same or higher level (default: true) */
   untilNextHeading?: boolean;
-  /** Specific heading level to stop at (1-6). If not set, stops at same or higher level. */
+  /** Specific heading level to stop at (1-6) */
   stopAtLevel?: number;
 }
 
-/**
- * Line number-based section filter.
- * Only process macros within the specified line range.
- * 
- * @example
- * // Only run macros on lines 10-50 (1-indexed, inclusive)
- * { type: 'lines', start: 10, end: 50 }
- * 
- * // Only run macros from line 100 onwards
- * { type: 'lines', start: 100 }
- */
+/** Only process macros within a line range (1-indexed, inclusive). */
 export interface LinesSectionFilter {
   type: 'lines';
-  /** Starting line number (1-indexed, inclusive) */
   start: number;
-  /** Ending line number (1-indexed, inclusive). If omitted, goes to end of document. */
   end?: number;
 }
 
-/**
- * Regex-based section filter.
- * Only process macros between text matching start and end patterns.
- * 
- * @example
- * // Only run macros between HTML comments
- * { type: 'regex', start: /<!--\s*macros:on\s*-->/, end: /<!--\s*macros:off\s*-->/ }
- * 
- * // Only run macros inside fenced code blocks marked "macro"
- * { type: 'regex', start: /^```macro$/m, end: /^```$/m }
- */
+/** Only process macros between start/end delimiter patterns. */
 export interface RegexSectionFilter {
   type: 'regex';
-  /** Pattern marking the start of the section */
   start: RegExp;
-  /** Pattern marking the end of the section */
   end: RegExp;
-  /** If true, include multiple matching sections (default: true) */
+  /** Include multiple sections (default: true) */
   global?: boolean;
-  /** If true, include the delimiter text itself in the section (default: false) */
+  /** Include the delimiters in the section (default: false) */
   includeDelimiters?: boolean;
 }
 
-/** Union of all section filter types */
 export type SectionFilter = HeadingSectionFilter | LinesSectionFilter | RegexSectionFilter;
 
-/** A range within the document where macros should be applied */
 export interface SectionRange {
-  start: number;  // Character offset
-  end: number;    // Character offset
+  start: number;
+  end: number;
 }
 
-/** Options for MacroEngine */
 interface MacroEngineOptions {
-  /** Regex pattern to filter users by name. Only changes from matching users trigger macros. */
+  /**
+   * Only remote edits by users whose display name matches trigger macros.
+   * Display names are chosen by users, so this is a convenience, not a
+   * security boundary; use `allowedUserIds` for that.
+   */
   userFilter?: RegExp;
-  /** Section filter to limit where macros are applied */
+  /** Only remote edits by these HedgeDoc account ids trigger macros. */
+  allowedUserIds?: string[];
+  /** Limit where macros are applied */
   sectionFilter?: SectionFilter;
+  /** Delay before scanning after a change (ms, default 100) */
+  debounceMs?: number;
+}
+
+// ===========================================
+// Range tracking
+// ===========================================
+
+type RangeKind = 'match' | 'point' | 'dirty';
+
+/** A document range kept up to date through every edit. */
+class TrackedRange {
+  constructor(public start: number, public end: number, readonly kind: RangeKind) {}
+
+  transform(op: TextOperation): void {
+    const tp = TextOperation.transformPosition;
+    if (this.kind === 'point') {
+      // Text inserted at the point lands before it (keeps streamed output in order).
+      this.start = this.end = tp(this.start, op, true);
+    } else if (this.kind === 'match') {
+      // Inserts at the edges fall outside the match.
+      this.start = tp(this.start, op, true);
+      this.end = Math.max(this.start, tp(this.end, op, false));
+    } else {
+      // Dirty ranges grow to include adjacent inserts.
+      this.start = tp(this.start, op, false);
+      this.end = Math.max(this.start, tp(this.end, op, true));
+    }
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function withFlags(pattern: RegExp, add: string, remove = ''): RegExp {
+  let flags = pattern.flags;
+  for (const f of remove) flags = flags.replace(f, '');
+  for (const f of add) if (!flags.includes(f)) flags += f;
+  return new RegExp(pattern.source, flags);
+}
+
+/** Ranges changed by `op`, in post-operation coordinates. Deletions yield empty ranges. */
+function changedRanges(op: TextOperation): SectionRange[] {
+  const ranges: SectionRange[] = [];
+  let index = 0;
+  for (const component of op.ops) {
+    if (TextOperation.isRetain(component)) {
+      index += component;
+    } else if (TextOperation.isInsert(component)) {
+      ranges.push({ start: index, end: index + component.length });
+      index += component.length;
+    } else {
+      ranges.push({ start: index, end: index });
+    }
+  }
+  return ranges;
+}
+
+interface Candidate {
+  name: string;
+  macro: Macro;
+  match: string;
+  groups: string[];
+  index: number;
 }
 
 // ===========================================
@@ -328,48 +299,233 @@ class MacroEngine {
   client: HedgeDocClientLike;
   macros: Map<string, Macro>;
   enabled: boolean;
-  /** Regex pattern to filter users by name */
   userFilter: RegExp | null;
-  /** Section filter to limit where macros are applied */
+  allowedUserIds: Set<string> | null;
   sectionFilter: SectionFilter | null;
-  private _processing: boolean;
-  private _changeHandler: ((event: ChangeEvent) => Promise<void>) | null;
-  private _debounceTimer: ReturnType<typeof setTimeout> | null;
-  private _activeStreams: Set<Promise<void>>;
 
-  /**
-   * Create a MacroEngine
-   */
+  private _debounceMs: number;
+  private _watching = false;
+  private _processing = false;
+  private _rescanRequested = false;
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private _ranges = new Set<TrackedRange>();
+  private _dirty = new Set<TrackedRange>();
+  private _inFlight = new Set<TrackedRange>();
+  private _activeStreams = new Set<Promise<void>>();
+  private _processes = new Set<ChildProcess>();
+  private _changeHandler: (event: ChangeEvent) => void;
+  private _attached = false;
+
   constructor(client: HedgeDocClientLike, options: MacroEngineOptions = {}) {
     this.client = client;
     this.macros = new Map();
     this.enabled = true;
-    this.userFilter = options.userFilter || null;
+    this.userFilter = options.userFilter ? withFlags(options.userFilter, '', 'gy') : null;
+    this.allowedUserIds = options.allowedUserIds ? new Set(options.allowedUserIds) : null;
     this.sectionFilter = options.sectionFilter || null;
-    this._processing = false;
-    this._changeHandler = null;
-    this._debounceTimer = null;
-    this._activeStreams = new Set();
+    this._debounceMs = options.debounceMs ?? 100;
+    this._changeHandler = (event) => this._onChange(event);
   }
 
-  /**
-   * Set or update the section filter
-   */
+  // ---- registration ------------------------------------------------------
+
   setSectionFilter(filter: SectionFilter | null): MacroEngine {
     this.sectionFilter = filter;
     return this;
   }
 
-  /**
-   * Get the allowed sections based on the current section filter
-   */
-  private _getAllowedSections(document: string): SectionRange[] {
-    if (!this.sectionFilter) {
-      // No filter - entire document is allowed
-      return [{ start: 0, end: document.length }];
-    }
+  /** Replace a literal trigger string. */
+  addTextMacro(
+    trigger: string,
+    replacement: string | ((trigger: string) => MaybeText | Promise<MaybeText>),
+    options: TextMacroOptions = {}
+  ): MacroEngine {
+    const escaped = escapeRegExp(trigger);
+    const pattern = options.wordBoundary
+      ? new RegExp(`(?<![\\w])${escaped}(?![\\w])`, 'g')
+      : new RegExp(escaped, 'g');
+    this.macros.set(trigger, {
+      type: 'text',
+      name: trigger,
+      trigger,
+      pattern,
+      replacement: typeof replacement === 'function' ? replacement : () => replacement,
+    });
+    return this;
+  }
 
-    switch (this.sectionFilter.type) {
+  /** Replace regex matches with the handler's result. */
+  addRegexMacro(name: string, pattern: RegExp, handler: RegexHandler): MacroEngine {
+    this.macros.set(name, { type: 'regex', name, pattern: withFlags(pattern, 'g', 'y'), handler });
+    return this;
+  }
+
+  /** Replace `start…end` delimited templates, e.g. `{{name}}`. */
+  addTemplateMacro(
+    name: string,
+    startDelim: string,
+    endDelim: string,
+    handler: (content: string) => MaybeText | Promise<MaybeText>
+  ): MacroEngine {
+    const pattern = new RegExp(`${escapeRegExp(startDelim)}([\\s\\S]+?)${escapeRegExp(endDelim)}`, 'g');
+    this.macros.set(name, { type: 'template', name, pattern, startDelim, endDelim, handler });
+    return this;
+  }
+
+  /** Run a command for each match and stream its stdout into the document. */
+  addStreamingExecMacro(
+    name: string,
+    pattern: RegExp,
+    commandBuilder: CommandBuilder,
+    options: StreamingExecOptions = {}
+  ): MacroEngine {
+    this.macros.set(name, {
+      type: 'streaming',
+      name,
+      pattern: withFlags(pattern, 'g', 'y'),
+      commandBuilder,
+      lineBuffered: options.lineBuffered ?? true,
+      stateTracking: options.trackState
+        ? {
+            runningMarker: options.runningMarker ?? '→',
+            doneMarker: options.doneMarker ?? '✓',
+            failedMarker: options.failedMarker ?? '✗',
+          }
+        : null,
+      timeoutMs: options.timeoutMs ?? 0,
+      onStart: options.onStart,
+      onData: options.onData,
+      onEnd: options.onEnd,
+      onError: options.onError,
+    });
+    return this;
+  }
+
+  /** Transform content between `::BEGIN:name::` and `::END:name::` lines. */
+  addBlockMacro(
+    blockName: string,
+    handler: (content: string, context: DocumentContext) => MaybeText | Promise<MaybeText>,
+    _options: BlockMacroOptions = {}
+  ): MacroEngine {
+    const escaped = escapeRegExp(blockName);
+    const pattern = new RegExp(`::BEGIN:${escaped}::\\n([\\s\\S]*?)\\n::END:${escaped}::`, 'g');
+    const name = `block:${blockName}`;
+    this.macros.set(name, { type: 'block', name, blockName, pattern, handler });
+    return this;
+  }
+
+  removeMacro(name: string): boolean {
+    return this.macros.delete(name);
+  }
+
+  listMacros(): MacroInfo[] {
+    return [...this.macros.entries()].map(([name, macro]) => ({
+      name,
+      type: macro.type,
+      trigger: macro.type === 'text' ? macro.trigger : undefined,
+      pattern: macro.pattern.toString(),
+    }));
+  }
+
+  // ---- lifecycle -----------------------------------------------------------
+
+  private _attach(): void {
+    if (!this._attached) {
+      this.client.on('change', this._changeHandler);
+      this._attached = true;
+    }
+  }
+
+  /** Watch for remote edits and expand macros in the text they touch. */
+  start(): void {
+    this._attach();
+    this._watching = true;
+  }
+
+  /** Stop watching, kill running commands and release all tracking. */
+  stop(): void {
+    this._watching = false;
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+    for (const proc of this._processes) killShell(proc);
+    if (this._attached) {
+      this.client.off('change', this._changeHandler);
+      this._attached = false;
+    }
+    this._dirty.clear();
+  }
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  /** Expand every macro match in the current document once. */
+  async expand(): Promise<Expansion[]> {
+    this._attach();
+    return this._process(true);
+  }
+
+  async waitForStreams(): Promise<void> {
+    while (this._activeStreams.size > 0) {
+      await Promise.all([...this._activeStreams]);
+    }
+  }
+
+  hasActiveStreams(): boolean {
+    return this._activeStreams.size > 0;
+  }
+
+  // ---- change tracking ------------------------------------------------------
+
+  private _track(start: number, end: number, kind: RangeKind): TrackedRange {
+    const range = new TrackedRange(start, end, kind);
+    this._ranges.add(range);
+    return range;
+  }
+
+  private _untrack(range: TrackedRange | null | undefined): void {
+    if (range) this._ranges.delete(range);
+  }
+
+  private _isAllowedAuthor(event: ChangeEvent): boolean {
+    if (this.allowedUserIds) {
+      const id = event.user?.userid;
+      if (!id || !this.allowedUserIds.has(id)) return false;
+    }
+    if (this.userFilter && !this.userFilter.test(event.user?.name ?? '')) {
+      return false;
+    }
+    return true;
+  }
+
+  private _onChange(event: ChangeEvent): void {
+    if (!event.operation) return;
+    for (const range of this._ranges) range.transform(event.operation);
+
+    if (!this._watching || !this.enabled || event.type !== 'remote' || !this._isAllowedAuthor(event)) {
+      return;
+    }
+    for (const r of changedRanges(event.operation)) {
+      const range = this._track(r.start, r.end, 'dirty');
+      this._dirty.add(range);
+    }
+    this._schedule();
+  }
+
+  private _schedule(): void {
+    if (this._debounceTimer) clearTimeout(this._debounceTimer);
+    this._debounceTimer = setTimeout(() => {
+      this._debounceTimer = null;
+      this._process(false).catch((err) => console.error('Macro processing failed:', err));
+    }, this._debounceMs);
+  }
+
+  // ---- sections --------------------------------------------------------------
+
+  private _getAllowedSections(document: string): SectionRange[] {
+    switch (this.sectionFilter?.type) {
       case 'heading':
         return this._getHeadingSections(document, this.sectionFilter);
       case 'lines':
@@ -381,1082 +537,322 @@ class MacroEngine {
     }
   }
 
-  /**
-   * Get sections under matching markdown headings
-   */
   private _getHeadingSections(document: string, filter: HeadingSectionFilter): SectionRange[] {
     const sections: SectionRange[] = [];
     const lines = document.split('\n');
-    const { pattern, untilNextHeading = true, stopAtLevel } = filter;
-    
-    // Find all headings and their levels
+    const pattern = withFlags(filter.pattern, '', 'gy');
+    const { untilNextHeading = true, stopAtLevel } = filter;
+
     const headings: { line: number; level: number; offset: number }[] = [];
     let offset = 0;
-    
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const headingMatch = line.match(/^(#{1,6})\s/);
-      if (headingMatch) {
-        headings.push({
-          line: i,
-          level: headingMatch[1].length,
-          offset
-        });
-      }
-      offset += line.length + 1; // +1 for newline
+      const m = lines[i].match(/^(#{1,6})\s/);
+      if (m) headings.push({ line: i, level: m[1].length, offset });
+      offset += lines[i].length + 1;
     }
-    
-    // Find headings that match the pattern
-    offset = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      
-      if (pattern.test(line)) {
-        const matchedHeading = headings.find(h => h.line === i);
-        if (matchedHeading) {
-          const sectionStart = offset + line.length + 1; // Start after the heading line
-          
-          // Find the end of this section
-          let sectionEnd = document.length;
-          
-          if (untilNextHeading) {
-            // Find the next heading at the same or higher level
-            const matchedLevel = matchedHeading.level;
-            const stopLevel = stopAtLevel ?? matchedLevel;
-            
-            for (const h of headings) {
-              if (h.line > i && h.level <= stopLevel) {
-                sectionEnd = h.offset;
-                break;
-              }
-            }
-          }
-          
-          if (sectionStart < sectionEnd) {
-            sections.push({ start: sectionStart, end: sectionEnd });
-          }
-        }
+
+    for (const heading of headings) {
+      const line = lines[heading.line];
+      if (!pattern.test(line)) continue;
+      const sectionStart = Math.min(document.length, heading.offset + line.length + 1);
+      let sectionEnd = document.length;
+      if (untilNextHeading) {
+        const stopLevel = stopAtLevel ?? heading.level;
+        const next = headings.find(h => h.line > heading.line && h.level <= stopLevel);
+        if (next) sectionEnd = next.offset;
       }
-      
-      offset += line.length + 1;
+      if (sectionStart < sectionEnd) sections.push({ start: sectionStart, end: sectionEnd });
     }
-    
     return sections;
   }
 
-  /**
-   * Get sections based on line number ranges
-   */
   private _getLineSections(document: string, filter: LinesSectionFilter): SectionRange[] {
     const lines = document.split('\n');
-    const { start: startLine, end: endLine } = filter;
-    
-    // Convert 1-indexed line numbers to 0-indexed
-    const startIdx = Math.max(0, startLine - 1);
-    const endIdx = endLine !== undefined ? Math.min(lines.length - 1, endLine - 1) : lines.length - 1;
-    
-    if (startIdx > endIdx || startIdx >= lines.length) {
-      return [];
-    }
-    
-    // Calculate character offsets
+    const startIdx = Math.max(0, filter.start - 1);
+    const endIdx = filter.end !== undefined ? Math.min(lines.length - 1, filter.end - 1) : lines.length - 1;
+    if (startIdx > endIdx || startIdx >= lines.length) return [];
+
     let startOffset = 0;
-    for (let i = 0; i < startIdx; i++) {
-      startOffset += lines[i].length + 1; // +1 for newline
-    }
-    
+    for (let i = 0; i < startIdx; i++) startOffset += lines[i].length + 1;
     let endOffset = startOffset;
     for (let i = startIdx; i <= endIdx; i++) {
-      endOffset += lines[i].length + (i < lines.length - 1 ? 1 : 0); // Don't add newline for last line
+      endOffset += lines[i].length + (i < lines.length - 1 ? 1 : 0);
     }
-    
     return [{ start: startOffset, end: endOffset }];
   }
 
-  /**
-   * Get sections between regex delimiters
-   */
   private _getRegexSections(document: string, filter: RegexSectionFilter): SectionRange[] {
     const sections: SectionRange[] = [];
-    const { start: startPattern, end: endPattern, global = true, includeDelimiters = false } = filter;
-    
-    // Ensure patterns have global flag for multiple matches
-    const startRegex = new RegExp(startPattern.source, startPattern.flags.includes('g') ? startPattern.flags : startPattern.flags + 'g');
-    const endRegex = new RegExp(endPattern.source, endPattern.flags.includes('g') ? endPattern.flags : endPattern.flags + 'g');
-    
+    const { global = true, includeDelimiters = false } = filter;
+    const startRegex = withFlags(filter.start, 'g', 'y');
+    const endRegex = withFlags(filter.end, 'g', 'y');
+
     let startMatch: RegExpExecArray | null;
-    startRegex.lastIndex = 0;
-    
     while ((startMatch = startRegex.exec(document)) !== null) {
-      const sectionStart = includeDelimiters ? startMatch.index : startMatch.index + startMatch[0].length;
-      
-      // Find the matching end delimiter
-      endRegex.lastIndex = startMatch.index + startMatch[0].length;
+      const afterStart = startMatch.index + startMatch[0].length;
+      const sectionStart = includeDelimiters ? startMatch.index : afterStart;
+      endRegex.lastIndex = afterStart;
       const endMatch = endRegex.exec(document);
-      
-      if (endMatch) {
-        const sectionEnd = includeDelimiters ? endMatch.index + endMatch[0].length : endMatch.index;
-        
-        if (sectionStart < sectionEnd) {
-          sections.push({ start: sectionStart, end: sectionEnd });
-        }
-        
-        // Move start regex past this section for next iteration
-        startRegex.lastIndex = endMatch.index + endMatch[0].length;
-      } else {
-        // No end delimiter found - extend to end of document
+      if (!endMatch) {
         sections.push({ start: sectionStart, end: document.length });
         break;
       }
-      
-      if (!global) break; // Only find first section
+      const sectionEnd = includeDelimiters ? endMatch.index + endMatch[0].length : endMatch.index;
+      if (sectionStart < sectionEnd) sections.push({ start: sectionStart, end: sectionEnd });
+      startRegex.lastIndex = Math.max(endMatch.index + endMatch[0].length, startRegex.lastIndex + (startMatch[0].length === 0 ? 1 : 0));
+      if (!global) break;
     }
-    
     return sections;
   }
 
-  /**
-   * Check if a position is within any allowed section
-   */
-  private _isPositionAllowed(position: number, sections: SectionRange[]): boolean {
-    return sections.some(s => position >= s.start && position < s.end);
+  // ---- processing ------------------------------------------------------------
+
+  private _takeDirty(): SectionRange[] {
+    const ranges = [...this._dirty].map(r => ({ start: r.start, end: r.end }));
+    for (const r of this._dirty) this._untrack(r);
+    this._dirty.clear();
+    return ranges;
   }
 
-  /**
-   * Register a simple text replacement macro
-   */
-  addTextMacro(
-    trigger: string, 
-    replacement: string | ((trigger: string) => string | Promise<string>), 
-    options: TextMacroOptions = {}
-  ): MacroEngine {
-    const { wordBoundary = false } = options;  // Default to false - triggers like ::date:: are already unambiguous
-    const escapedTrigger = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
-    // For word boundary mode, use lookarounds to check for word boundaries without consuming them
-    // This allows ::date:: to work at start/end of words without requiring spaces
-    const pattern = wordBoundary 
-      ? new RegExp(`(?<![\\w])(${escapedTrigger})(?![\\w])`, 'g')
-      : new RegExp(`(${escapedTrigger})`, 'g');
-    
-    this.macros.set(trigger, {
-      type: 'text',
-      trigger,
-      pattern,
-      replacement: typeof replacement === 'function' ? replacement : () => replacement,
-      wordBoundary
-    });
-    
-    return this;
-  }
+  private _findCandidates(document: string, dirty: SectionRange[] | null): Candidate[] {
+    const sections = this._getAllowedSections(document);
+    const inFlight = [...this._inFlight];
+    const candidates: Candidate[] = [];
 
-  /**
-   * Register a regex-based macro
-   */
-  addRegexMacro(
-    name: string, 
-    pattern: RegExp, 
-    handler: (match: string, ...groups: string[]) => string | null | undefined | Promise<string | null | undefined>
-  ): MacroEngine {
-    // Ensure the pattern has the global flag
-    const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
-    const globalPattern = new RegExp(pattern.source, flags);
-    
-    this.macros.set(name, {
-      type: 'regex',
-      name,
-      pattern: globalPattern,
-      handler
-    });
-    
-    return this;
-  }
-
-  /**
-   * Register a template macro (e.g., {{templateName}} or ${expression})
-   */
-  addTemplateMacro(
-    name: string, 
-    startDelim: string, 
-    endDelim: string, 
-    handler: (content: string) => string | null | undefined | Promise<string | null | undefined>
-  ): MacroEngine {
-    const escapedStart = startDelim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const escapedEnd = endDelim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(`${escapedStart}([^${escapedEnd[0]}]+)${escapedEnd}`, 'g');
-    
-    this.macros.set(name, {
-      type: 'template',
-      name,
-      pattern,
-      startDelim,
-      endDelim,
-      handler
-    });
-    
-    return this;
-  }
-
-  /**
-   * Remove a macro by name/trigger
-   */
-  removeMacro(name: string): boolean {
-    return this.macros.delete(name);
-  }
-
-  /**
-   * Register a streaming exec macro that streams command output into the document
-   */
-  addStreamingExecMacro(
-    name: string, 
-    pattern: RegExp, 
-    commandBuilder: (match: string, ...groups: string[]) => string | Promise<string>, 
-    options: StreamingExecOptions = {}
-  ): MacroEngine {
-    const { 
-      lineBuffered = true, 
-      onStart, 
-      onData, 
-      onEnd, 
-      onError,
-      trackState = false,
-      runningMarker = '→',
-      doneMarker = '✓',
-      useDocumentContext = false
-    } = options;
-    
-    // Ensure the pattern has the global flag
-    const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
-    const globalPattern = new RegExp(pattern.source, flags);
-    
-    const stateTracking: StateTracking | undefined = trackState ? {
-      enabled: true,
-      runningMarker,
-      doneMarker
-    } : undefined;
-    
-    this.macros.set(name, {
-      type: 'streaming',
-      name,
-      pattern: globalPattern,
-      commandBuilder: useDocumentContext ? undefined : commandBuilder,
-      contextCommandBuilder: useDocumentContext ? (ctx: DocumentContext) => {
-        return commandBuilder(ctx.matchText, ...ctx.groups);
-      } : undefined,
-      lineBuffered,
-      stateTracking,
-      onStart,
-      onData,
-      onEnd,
-      onError
-    });
-    
-    return this;
-  }
-
-  /**
-   * Register a block macro that transforms content between ::BEGIN:name:: and ::END:name::
-   */
-  addBlockMacro(
-    blockName: string,
-    handler: (content: string, context: DocumentContext) => string | Promise<string>,
-    options: BlockMacroOptions = {}
-  ): MacroEngine {
-    // Pattern matches ::BEGIN:name::\n...content...\n::END:name::
-    const escapedName = blockName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(
-      `::BEGIN:${escapedName}::\\n([\\s\\S]*?)\\n::END:${escapedName}::`,
-      'g'
-    );
-    
-    this.macros.set(`block:${blockName}`, {
-      type: 'block',
-      name: `block:${blockName}`,
-      blockName,
-      pattern,
-      handler
-    });
-    
-    return this;
-  }
-
-  /**
-   * Start listening for document changes
-   */
-  start(): void {
-    if (this._changeHandler) {
-      return; // Already started
-    }
-
-    this._changeHandler = async (event: ChangeEvent) => {
-      if (!this.enabled || this._processing) {
-        return;
-      }
-      
-      // Only process on REMOTE changes to avoid infinite loops
-      // (our own replacements are local changes)
-      if (event.type === 'remote') {
-        // Check user filter if set
-        if (this.userFilter) {
-          const userName = event.user?.name || '';
-          if (!this.userFilter.test(userName)) {
-            return; // User doesn't match filter, skip
+    for (const [name, macro] of this.macros) {
+      const regex = new RegExp(macro.pattern.source, macro.pattern.flags);
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(document)) !== null) {
+        if (m[0].length === 0) {
+          regex.lastIndex++;
+          continue; // zero-length matches have nothing to replace
+        }
+        const start = m.index;
+        const end = start + m[0].length;
+        if (!sections.some(s => start >= s.start && end <= s.end)) continue;
+        if (dirty && !dirty.some(d => d.start <= end && d.end >= start)) continue;
+        if (inFlight.some(r => r.start < end && r.end > start)) continue;
+        if (macro.type === 'streaming' && macro.stateTracking) {
+          const st = macro.stateTracking;
+          const rest = document.slice(end);
+          if (rest.startsWith(st.runningMarker) || rest.startsWith(st.doneMarker) || rest.startsWith(st.failedMarker)) {
+            continue; // already handled
           }
         }
-        
-        // Debounce to avoid rapid processing
-        if (this._debounceTimer) {
-          clearTimeout(this._debounceTimer);
-        }
-        this._debounceTimer = setTimeout(async () => {
-          this._debounceTimer = null;
-          await this._processDocument();
-        }, 100);
+        candidates.push({ name, macro, match: m[0], groups: m.slice(1), index: start });
       }
-    };
-
-    this.client.on('change', this._changeHandler as (...args: unknown[]) => void);
-  }
-
-  /**
-   * Stop listening for document changes
-   */
-  stop(): void {
-    if (this._debounceTimer) {
-      clearTimeout(this._debounceTimer);
-      this._debounceTimer = null;
     }
-    if (this._changeHandler) {
-      this.client.off('change', this._changeHandler as (...args: unknown[]) => void);
-      this._changeHandler = null;
+
+    // Document order; when macros overlap, the earliest (then first registered) wins.
+    candidates.sort((a, b) => a.index - b.index);
+    const accepted: Candidate[] = [];
+    let lastEnd = -1;
+    for (const c of candidates) {
+      if (c.index >= lastEnd) {
+        accepted.push(c);
+        lastEnd = c.index + c.match.length;
+      }
     }
+    return accepted;
   }
 
-  /**
-   * Enable or disable macro processing
-   */
-  setEnabled(enabled: boolean): void {
-    this.enabled = enabled;
-  }
-
-  /**
-   * Process the document for all registered macros
-   */
-  private async _processDocument(): Promise<Expansion[]> {
+  private async _process(all: boolean): Promise<Expansion[]> {
     if (this._processing) {
+      this._rescanRequested = true;
       return [];
     }
-
     this._processing = true;
-    const expansions: Expansion[] = [];
+    const expansions = new Map<string, MacroMatch[]>();
+    const record = (name: string, m: MacroMatch) => {
+      const list = expansions.get(name) ?? [];
+      list.push(m);
+      expansions.set(name, list);
+    };
 
     try {
-      let document = this.client.getDocument();
-      let madeChanges = true;
-      let iterations = 0;
-      const maxIterations = 10; // Prevent infinite loops
+      if (!this.enabled) return [];
+      const dirty = all ? null : this._takeDirty();
+      if (dirty && dirty.length === 0) return [];
 
-      while (madeChanges && iterations < maxIterations) {
-        madeChanges = false;
-        iterations++;
+      const document = this.client.getDocument();
+      const candidates = this._findCandidates(document, dirty);
 
-        for (const [name, macro] of this.macros) {
-          // Skip streaming macros in the sync loop - they're handled separately
-          if (macro.type === 'streaming') {
-            continue;
-          }
-          
-          // Handle block macros
-          if (macro.type === 'block') {
-            const result = await this._applyBlockMacro(document, macro);
-            if (result.changed) {
-              document = result.document;
-              expansions.push({
-                macro: name,
-                matches: result.matches
-              });
-              madeChanges = true;
-              break;
-            }
-            continue;
-          }
-          
-          const result = await this._applyMacro(document, macro);
-          if (result.changed) {
-            document = result.document;
-            expansions.push({
-              macro: name,
-              matches: result.matches
-            });
-            madeChanges = true;
-            break; // Start over after each change to get fresh document
-          }
+      // Reserve every candidate up front so concurrent scans skip them.
+      const anchors = candidates.map(c => {
+        const anchor = this._track(c.index, c.index + c.match.length, 'match');
+        this._inFlight.add(anchor);
+        return anchor;
+      });
+
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const anchor = anchors[i];
+        if (c.macro.type === 'streaming') {
+          const stream = this._runStream(c.macro, c, document, anchor);
+          this._activeStreams.add(stream);
+          stream.finally(() => this._activeStreams.delete(stream));
+          record(c.name, { match: c.match, index: c.index, streaming: true });
+          continue;
         }
-      }
-      
-      // Process streaming macros asynchronously (fire and forget)
-      const streamingStarted = await this._processStreamingMacros();
-      for (const s of streamingStarted) {
-        expansions.push({
-          macro: s.name,
-          matches: [{ match: s.match, index: s.index, streaming: true }]
-        });
+        try {
+          const replacement = await this._evaluate(c, document);
+          if (replacement === null || replacement === undefined || replacement === c.match) continue;
+          const current = this.client.getDocument();
+          if (current.slice(anchor.start, anchor.end) !== c.match) {
+            continue; // trigger was edited or removed meanwhile
+          }
+          const index = anchor.start;
+          this.client.replace(index, c.match.length, replacement);
+          record(c.name, { match: c.match, index, replacement });
+        } catch (err) {
+          console.error(`Macro ${c.name} failed:`, err instanceof Error ? err.message : err);
+        } finally {
+          this._inFlight.delete(anchor);
+          this._untrack(anchor);
+        }
       }
     } finally {
       this._processing = false;
+      if (this._rescanRequested) {
+        this._rescanRequested = false;
+        if (this._watching) this._schedule();
+      }
     }
 
-    return expansions;
+    return [...expansions.entries()].map(([macro, matches]) => ({ macro, matches }));
   }
 
-  /**
-   * Apply a single macro to the document
-   */
-  private async _applyMacro(document: string, macro: TextMacro | RegexMacro | TemplateMacro): Promise<MacroApplyResult> {
-    const matches: MacroMatch[] = [];
-    let changed = false;
-    let updatedDocument = document;
-
-    // Reset regex lastIndex
-    macro.pattern.lastIndex = 0;
-
-    // Find all matches first
-    let match: RegExpExecArray | null;
-    const allMatches: MatchInfo[] = [];
-    while ((match = macro.pattern.exec(document)) !== null) {
-      allMatches.push({
-        match: match[0],
-        groups: match.slice(1),
-        index: match.index
-      });
-      // Prevent infinite loop on zero-length matches
-      if (match.index === macro.pattern.lastIndex) {
-        macro.pattern.lastIndex++;
-      }
-    }
-
-    // Filter matches by section if section filter is configured
-    const sectionRanges = this._getAllowedSections(document);
-    const filteredMatches = allMatches.filter(m => {
-      const matchEnd = m.index + m.match.length;
-      return sectionRanges.some((range: SectionRange) => m.index >= range.start && matchEnd <= range.end);
-    });
-
-    // Process matches in reverse order to maintain indices
-    for (let i = filteredMatches.length - 1; i >= 0; i--) {
-      const m = filteredMatches[i];
-      let replacement: string | null | undefined;
-      let replaceIndex: number;
-      let replaceLength: number;
-      let originalMatch = m.match;
-
-      try {
-        if (macro.type === 'text') {
-          // For text macros, the capture group contains exactly the trigger
-          // (lookarounds don't consume characters, so m.groups[0] is the trigger)
-          const capturedTrigger = m.groups[0] || m.match;
-          replaceIndex = m.index;
-          replaceLength = capturedTrigger.length;
-          replacement = await Promise.resolve(macro.replacement(macro.trigger));
-          originalMatch = capturedTrigger;
-          
-        } else if (macro.type === 'regex') {
-          replacement = await Promise.resolve(macro.handler(m.match, ...m.groups));
-          if (replacement === m.match || replacement === null || replacement === undefined) {
-            continue; // No change needed
-          }
-          replaceIndex = m.index;
-          replaceLength = m.match.length;
-          
-        } else if (macro.type === 'template') {
-          const content = m.groups[0];
-          replacement = await Promise.resolve(macro.handler(content));
-          if (replacement === null || replacement === undefined) {
-            continue; // No change needed
-          }
-          replaceIndex = m.index;
-          replaceLength = m.match.length;
-        } else {
-          continue;
-        }
-
-        // Re-fetch current document state after async operation
-        // The document may have changed during the async handler
-        const currentDocument = this.client.getDocument();
-        
-        // Re-locate the match in the current document
-        // The position may have shifted due to other edits
-        const currentTextAtPos = currentDocument.substring(replaceIndex, replaceIndex + replaceLength);
-        
-        if (currentTextAtPos !== originalMatch) {
-          // Match has moved or been modified, try to find it again
-          const newIndex = currentDocument.indexOf(originalMatch);
-          if (newIndex === -1) {
-            // Match no longer exists, skip it
-            console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: match "${originalMatch}" no longer found, skipping`);
-            continue;
-          }
-          replaceIndex = newIndex;
-        }
-        
-        // Verify the position is valid
-        if (replaceIndex < 0 || replaceIndex + replaceLength > currentDocument.length) {
-          console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: position out of bounds, skipping`);
-          continue;
-        }
-        
-        // Try to apply the replacement - wrap in try/catch to handle OT errors gracefully
-        try {
-          this.client.replace(replaceIndex, replaceLength, replacement!);
-        } catch (replaceErr) {
-          const errMsg = (replaceErr as Error).message || '';
-          // OT composition errors mean the document changed while we were processing
-          // Just skip this match and let the next iteration handle it
-          if (errMsg.includes('base length') || errMsg.includes('target length') || errMsg.includes('Position out of bounds')) {
-            console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name}: document changed during processing, will retry`);
-            continue;
-          }
-          throw replaceErr; // Re-throw unexpected errors
-        }
-        
-        if (macro.type === 'text') {
-          matches.push({ trigger: macro.trigger, replacement: replacement!, index: replaceIndex } as TextMacroMatch);
-        } else if (macro.type === 'regex') {
-          matches.push({ match: m.match, replacement: replacement!, index: replaceIndex } as RegexMacroMatch);
-        } else if (macro.type === 'template') {
-          matches.push({ template: m.match, content: m.groups[0], replacement: replacement!, index: replaceIndex } as TemplateMacroMatch);
-        }
-        changed = true;
-        
-        // Update our local copy of the document to reflect the change
-        updatedDocument = 
-          currentDocument.substring(0, replaceIndex) +
-          replacement +
-          currentDocument.substring(replaceIndex + replaceLength);
-          
-      } catch (err) {
-        console.error(`Macro ${(macro as TextMacro).trigger || (macro as RegexMacro | TemplateMacro).name} error:`, err);
-      }
-
-      // Only process one match at a time to keep indices valid
-      if (changed) break;
-    }
-
-    return {
-      changed,
-      matches,
-      document: updatedDocument
-    };
-  }
-
-  /**
-   * Apply a block macro to the document (::BEGIN:name:: ... ::END:name::)
-   */
-  private async _applyBlockMacro(document: string, macro: BlockMacro): Promise<MacroApplyResult> {
-    const matches: MacroMatch[] = [];
-    let changed = false;
-    let updatedDocument = document;
-
-    // Reset regex lastIndex
-    macro.pattern.lastIndex = 0;
-
-    // Find all matches first
-    let match: RegExpExecArray | null;
-    const allMatches: MatchInfo[] = [];
-    while ((match = macro.pattern.exec(document)) !== null) {
-      allMatches.push({
-        match: match[0],
-        groups: match.slice(1),  // groups[0] is the content between BEGIN and END
-        index: match.index
-      });
-      
-      // Prevent infinite loop on zero-length matches
-      if (match.index === macro.pattern.lastIndex) {
-        macro.pattern.lastIndex++;
-      }
-    }
-
-    // Filter matches by section if section filter is configured
-    const sectionRanges = this._getAllowedSections(document);
-    const filteredMatches = allMatches.filter(m => {
-      const matchEnd = m.index + m.match.length;
-      return sectionRanges.some((range: SectionRange) => m.index >= range.start && matchEnd <= range.end);
-    });
-
-    // Process first match only (to keep indices valid)
-    for (const m of filteredMatches) {
-      const fullMatch = m.match;
-      const content = m.groups[0] || '';
-      const originalIndex = m.index;
-
-      try {
-        // Build document context
-        const context: DocumentContext = {
+  private async _evaluate(c: Candidate, document: string): Promise<MaybeText> {
+    const macro = c.macro;
+    switch (macro.type) {
+      case 'text':
+        return macro.replacement(macro.trigger);
+      case 'regex':
+        return macro.handler(c.match, ...c.groups, c.index, document);
+      case 'template':
+        return macro.handler(c.groups[0] ?? '');
+      case 'block':
+        return macro.handler(c.groups[0] ?? '', {
           fullDocument: document,
-          beforeMatch: document.substring(0, originalIndex),
-          afterMatch: document.substring(originalIndex + fullMatch.length),
-          matchIndex: originalIndex,
-          matchText: fullMatch,
-          groups: m.groups
-        };
-
-        // Call the handler with content and context
-        const replacement = await Promise.resolve(macro.handler(content, context));
-        
-        if (replacement === null || replacement === undefined) {
-          continue;
-        }
-
-        // Re-fetch current document state after async operation
-        const currentDocument = this.client.getDocument();
-        
-        // Re-locate the match in the current document
-        let replaceIndex = originalIndex;
-        const currentTextAtPos = currentDocument.substring(replaceIndex, replaceIndex + fullMatch.length);
-        
-        if (currentTextAtPos !== fullMatch) {
-          const newIndex = currentDocument.indexOf(fullMatch);
-          if (newIndex === -1) {
-            console.error(`Block macro ${macro.blockName}: block no longer found, skipping`);
-            continue;
-          }
-          replaceIndex = newIndex;
-        }
-        
-        // Replace the entire block (including markers) with the result
-        try {
-          this.client.replace(replaceIndex, fullMatch.length, replacement);
-        } catch (replaceErr) {
-          const errMsg = (replaceErr as Error).message || '';
-          if (errMsg.includes('base length') || errMsg.includes('target length') || errMsg.includes('Position out of bounds')) {
-            console.error(`Block macro ${macro.blockName}: document changed during processing, will retry`);
-            continue;
-          }
-          throw replaceErr;
-        }
-        
-        matches.push({ 
-          match: fullMatch, 
-          replacement, 
-          index: replaceIndex 
-        } as RegexMacroMatch);
-        changed = true;
-        
-        updatedDocument = 
-          currentDocument.substring(0, replaceIndex) +
-          replacement +
-          currentDocument.substring(replaceIndex + fullMatch.length);
-          
-      } catch (err) {
-        console.error(`Block macro ${macro.blockName} error:`, err);
-      }
-
-      // Only process one match at a time
-      if (changed) break;
+          beforeMatch: document.slice(0, c.index),
+          afterMatch: document.slice(c.index + c.match.length),
+          matchIndex: c.index,
+          matchText: c.match,
+          groups: c.groups,
+        });
+      default:
+        return null;
     }
-
-    return {
-      changed,
-      matches,
-      document: updatedDocument
-    };
   }
 
-  /**
-   * Process streaming macros - these run asynchronously and stream output into the document
-   */
-  private async _processStreamingMacros(): Promise<StreamingStarted[]> {
-    const document = this.client.getDocument();
-    const streamingMacros: Array<{ name: string; macro: StreamingMacro }> = [];
-    
-    // Find all streaming macros
-    for (const [name, macro] of this.macros) {
-      if (macro.type === 'streaming') {
-        streamingMacros.push({ name, macro });
-      }
-    }
-    
-    if (streamingMacros.length === 0) return [];
-    
-    const started: StreamingStarted[] = [];
-    
-    // Get allowed sections for filtering
-    const sectionRanges = this._getAllowedSections(document);
-    
-    // Find matches for streaming macros
-    for (const { name, macro } of streamingMacros) {
-      macro.pattern.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      
-      while ((match = macro.pattern.exec(document)) !== null) {
-        const matchText = match[0];
-        const groups = match.slice(1);
-        const index = match.index;
-        
-        // Check if match is within allowed sections
-        const matchEnd = index + matchText.length;
-        const isInAllowedSection = sectionRanges.some(
-          (range: SectionRange) => index >= range.start && matchEnd <= range.end
-        );
-        
-        if (!isInAllowedSection) {
-          // Skip matches outside allowed sections
-          if (match.index === macro.pattern.lastIndex) {
-            macro.pattern.lastIndex++;
-          }
-          continue;
-        }
-        
-        // Start streaming this match asynchronously
-        // Track the promise so we can wait for completion
-        const streamPromise = this._startStreamingExec(name, macro, matchText, groups, index);
-        this._activeStreams.add(streamPromise);
-        streamPromise.finally(() => this._activeStreams.delete(streamPromise));
-        
-        started.push({ name, match: matchText, index });
-        
-        // Prevent infinite loop on zero-length matches
-        if (match.index === macro.pattern.lastIndex) {
-          macro.pattern.lastIndex++;
-        }
-      }
-    }
-    
-    return started;
-  }
+  // ---- streaming -------------------------------------------------------------
 
-  /**
-   * Wait for all active streaming macros to complete
-   */
-  async waitForStreams(): Promise<void> {
-    if (this._activeStreams.size === 0) {
-      return;
-    }
-    await Promise.all([...this._activeStreams]);
-  }
-
-  /**
-   * Check if there are active streaming macros
-   */
-  hasActiveStreams(): boolean {
-    return this._activeStreams.size > 0;
-  }
-
-  /**
-   * Start a streaming exec macro - removes match and streams command output
-   */
-  private async _startStreamingExec(
-    name: string, 
-    macro: StreamingMacro, 
-    matchText: string, 
-    groups: string[], 
-    originalIndex: number
-  ): Promise<void> {
+  private async _runStream(macro: StreamingMacro, c: Candidate, document: string, anchor: TrackedRange): Promise<void> {
+    let cursor: TrackedRange | null = null;
+    let marker: TrackedRange | null = null;
+    let proc: (ChildProcess & { exitCode$: Promise<number> }) | null = null;
     try {
-      // Get current document for context
-      let currentDoc = this.client.getDocument();
-      
-      // Build the command using either commandBuilder or contextCommandBuilder
-      let cmd: string | undefined;
-      
-      if (macro.contextCommandBuilder) {
-        const context: DocumentContext = {
-          fullDocument: currentDoc,
-          beforeMatch: currentDoc.substring(0, originalIndex),
-          afterMatch: currentDoc.substring(originalIndex + matchText.length),
-          matchIndex: originalIndex,
-          matchText,
-          groups
-        };
-        cmd = await Promise.resolve(macro.contextCommandBuilder(context));
-      } else if (macro.commandBuilder) {
-        cmd = await Promise.resolve(macro.commandBuilder(matchText, ...groups));
+      const built = await macro.commandBuilder(c.match, ...c.groups, c.index, document);
+      if (!built) return;
+      const cmd = toShellCommand(built);
+
+      const current = this.client.getDocument();
+      if (current.slice(anchor.start, anchor.end) !== c.match) return;
+
+      // Claim the trigger: mark it as running, or remove it.
+      const st = macro.stateTracking;
+      if (st) {
+        const at = anchor.end;
+        this.client.insert(at, st.runningMarker + '\n');
+        marker = this._track(at, at + st.runningMarker.length, 'match');
+        cursor = this._track(at + st.runningMarker.length + 1, at + st.runningMarker.length + 1, 'point');
+      } else {
+        const at = anchor.start;
+        this.client.delete(at, c.match.length);
+        cursor = this._track(at, at, 'point');
       }
-      
-      if (!cmd) {
-        return; // Command builder returned nothing
-      }
-      
-      // Re-fetch document and find current position of the match
-      currentDoc = this.client.getDocument();
-      let insertPos = originalIndex;
-      
-      // Verify match still exists at expected position
-      const textAtPos = currentDoc.substring(insertPos, insertPos + matchText.length);
-      if (textAtPos !== matchText) {
-        // Try to find it elsewhere
-        const newIndex = currentDoc.indexOf(matchText);
-        if (newIndex === -1) {
-          console.error(`Streaming macro ${name}: match "${matchText}" no longer found`);
-          return;
-        }
-        insertPos = newIndex;
-      }
-      
-      // State tracking: instead of deleting, replace with running marker
-      const stateTracking = macro.stateTracking;
-      let runningMarkerText = '';
-      let markerInsertPos = insertPos;
-      
-      if (stateTracking?.enabled) {
-        // Create the running marker version of the match
-        // e.g., ::ask prompt:: → ::ask prompt::→
-        runningMarkerText = matchText + (stateTracking.runningMarker || '→') + '\n';
-      }
-      
-      // Delete or replace the matched text with retry
-      let deleteSuccess = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      this._inFlight.delete(anchor);
+      this._untrack(anchor);
+
+      macro.onStart?.(c.match, cursor.start);
+
+      proc = spawnShell(cmd, { timeoutMs: macro.timeoutMs });
+      this._processes.add(proc);
+      let stderr = '';
+      proc.stderr?.setEncoding('utf8');
+      proc.stderr?.on('data', (d: string) => {
+        stderr = (stderr + d).slice(-4096);
+      });
+
+      let unsent = '';
+      const emit = (text: string) => {
+        if (!text) return;
+        unsent += text;
         try {
-          // Re-verify position before delete in case document changed
-          currentDoc = this.client.getDocument();
-          const verifyText = currentDoc.substring(insertPos, insertPos + matchText.length);
-          if (verifyText !== matchText) {
-            const newIndex = currentDoc.indexOf(matchText);
-            if (newIndex === -1) {
-              console.error(`Streaming macro ${name}: match "${matchText}" no longer found`);
-              return;
-            }
-            insertPos = newIndex;
-          }
-          
-          if (stateTracking?.enabled) {
-            // Replace with running marker
-            this.client.replace(insertPos, matchText.length, runningMarkerText);
-            markerInsertPos = insertPos + runningMarkerText.length;
-          } else {
-            // Just delete the match
-            this.client.delete(insertPos, matchText.length);
-            markerInsertPos = insertPos;
-          }
-          deleteSuccess = true;
-          break;
-        } catch (err) {
-          if (attempt < 2) {
-            console.error(`Streaming macro ${name}: delete failed (attempt ${attempt + 1}/3):`, (err as Error).message);
-            await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
-          } else {
-            console.error(`Streaming macro ${name}: delete failed after 3 attempts:`, (err as Error).message);
-            return;
-          }
-        }
-      }
-      
-      if (!deleteSuccess) return;
-      
-      // Small delay to let the delete operation settle
-      await new Promise(r => setTimeout(r, 50));
-      
-      // Track our cursor position - starts after the running marker (or where we deleted)
-      let cursorPos = markerInsertPos;
-      let aborted = false;
-      let isInserting = false; // Flag to avoid double-counting our own inserts
-      
-      // Listen for remote changes to adjust our cursor position
-      const remoteChangeHandler = (event: ChangeEvent) => {
-        // Only handle remote operations, and skip if we're currently inserting
-        // (our own operations will update cursorPos directly)
-        if (event.type === 'remote' && event.operation && !isInserting) {
-          // Transform our cursor position through the remote operation
-          cursorPos = TextOperation.transformPosition(cursorPos, event.operation, true);
+          const at = cursor!.start;
+          this.client.insert(at, unsent);
+          macro.onData?.(unsent, at);
+          unsent = '';
+        } catch {
+          // Not connected right now: keep the text and retry with the next chunk.
         }
       };
-      this.client.on('change', remoteChangeHandler as (...args: unknown[]) => void);
-      
-      // Callback: onStart
-      if (macro.onStart) {
-        macro.onStart(matchText, insertPos);
-      }
-      
-      // Start the process using Node.js child_process for cross-runtime compatibility
-      const proc = spawn('sh', ['-c', cmd], {
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
 
-      // Create a promise that resolves when the process exits
-      const exitedPromise = new Promise<number>((resolve) => {
-        proc.on('exit', (code) => resolve(code ?? 0));
-        proc.on('error', () => resolve(1));
-      });
-      // Attach exited promise to proc for later use
-      (proc as ChildProcess & { exited: Promise<number> }).exited = exitedPromise;
-
-      // Convert Node.js stream to Web Stream for cross-runtime compatibility
-      const webStream = Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>;
-      const reader = webStream.getReader();
       const decoder = new TextDecoder();
       let lineBuffer = '';
-      
-      // Helper to safely insert text at tracked cursor position with retry
-      const safeInsert = async (text: string, maxRetries = 3): Promise<boolean> => {
-        if (aborted) return false;
-        
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-          // Get current document state fresh for each attempt
-          const doc = this.client.getDocument();
-          
-          // Bounds check - clamp to valid range
-          const insertAt = Math.max(0, Math.min(cursorPos, doc.length));
-          
-          if (insertAt !== cursorPos) {
-            // Position was out of bounds, adjust it
-            cursorPos = insertAt;
-          }
-          
-          try {
-            isInserting = true;
-            this.client.insert(insertAt, text);
-            // Move our cursor forward by the inserted length
-            cursorPos += text.length;
-            isInserting = false;
-            
-            // Small delay to let OT process the operation
-            await new Promise(r => setTimeout(r, 30));
-            return true;
-          } catch (err) {
-            isInserting = false;
-            
-            if (attempt < maxRetries - 1) {
-              // Wait a bit and let OT settle before retrying
-              console.error(`Streaming macro ${name}: insert failed (attempt ${attempt + 1}/${maxRetries}):`, (err as Error).message);
-              await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
-              // Re-sync cursor position from document length in case of desync
-              cursorPos = Math.min(cursorPos, this.client.getDocument().length);
-            } else {
-              console.error(`Streaming macro ${name}: insert failed after ${maxRetries} attempts:`, (err as Error).message);
-              return false;
-            }
-          }
+      const handleText = (text: string) => {
+        if (!macro.lineBuffered) {
+          emit(text);
+          return;
         }
-        return false;
+        lineBuffer += text;
+        const lastNewline = lineBuffer.lastIndexOf('\n');
+        if (lastNewline !== -1) {
+          emit(lineBuffer.slice(0, lastNewline + 1));
+          lineBuffer = lineBuffer.slice(lastNewline + 1);
+        }
       };
-      
-      try {
-        // Stream output into document
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value, { stream: true });
-          
-          if (macro.lineBuffered) {
-            // Buffer by line
-            lineBuffer += chunk;
-            const lines = lineBuffer.split('\n');
-            
-            // Process all complete lines
-            for (let i = 0; i < lines.length - 1; i++) {
-              const line = lines[i] + '\n';
-              
-              const insertedAt = cursorPos;
-              if (!await safeInsert(line)) {
-                // Insert failed, abort streaming
-                aborted = true;
-                proc.kill();
-                break;
-              }
-              
-              if (macro.onData) {
-                macro.onData(line, insertedAt);
-              }
-            }
-            
-            if (aborted) break;
-            
-            // Keep incomplete line in buffer
-            lineBuffer = lines[lines.length - 1];
-          } else {
-            // Character-by-character (or chunk-by-chunk)
-            const insertedAt = cursorPos;
-            if (!await safeInsert(chunk)) {
-              aborted = true;
-              proc.kill();
-              break;
-            }
-            
-            if (macro.onData) {
-              macro.onData(chunk, insertedAt);
-            }
-          }
-        }
-        
-        // Flush remaining buffer (line without trailing newline)
-        if (!aborted && macro.lineBuffered && lineBuffer) {
-          const insertedAt = cursorPos;
-          await safeInsert(lineBuffer);
-          if (macro.onData) {
-            macro.onData(lineBuffer, insertedAt);
-          }
-        }
-        
-        const exitCode = await (proc as ChildProcess & { exited: Promise<number> }).exited;
-        
-        // State tracking: replace running marker with done marker
-        if (stateTracking?.enabled && !aborted) {
-          try {
-            const runningMarker = matchText + (stateTracking.runningMarker || '→') + '\n';
-            const doneMarker = matchText + (stateTracking.doneMarker || '✓') + '\n';
-            
-            // Find and replace the running marker
-            const doc = this.client.getDocument();
-            const markerIndex = doc.indexOf(runningMarker);
-            if (markerIndex !== -1) {
-              this.client.replace(markerIndex, runningMarker.length, doneMarker);
-            }
-          } catch (err) {
-            console.error(`Streaming macro ${name}: failed to update done marker:`, (err as Error).message);
-          }
-        }
-        
-        // Callback: onEnd
-        if (macro.onEnd) {
-          macro.onEnd(exitCode, cursorPos);
-        }
-      } finally {
-        // Always remove the change handler
-        this.client.off('change', remoteChangeHandler as (...args: unknown[]) => void);
+
+      for await (const chunk of proc.stdout!) {
+        handleText(decoder.decode(chunk as Uint8Array, { stream: true }));
       }
-      
+      handleText(decoder.decode());
+      emit(lineBuffer);
+      const exitCode = await proc.exitCode$;
+
+      if (unsent) {
+        console.error(`Streaming macro ${macro.name}: ${unsent.length} characters of output could not be inserted (disconnected)`);
+      }
+      if (exitCode !== 0 && stderr.trim()) {
+        console.error(`Streaming macro ${macro.name} exited with ${exitCode}: ${stderr.trim()}`);
+      }
+
+      if (st && marker) {
+        const doc = this.client.getDocument();
+        if (doc.slice(marker.start, marker.end) === st.runningMarker) {
+          this.client.replace(marker.start, st.runningMarker.length, exitCode === 0 ? st.doneMarker : st.failedMarker);
+        }
+      }
+
+      macro.onEnd?.(exitCode, cursor.start);
     } catch (err) {
-      console.error(`Streaming macro ${name} error:`, err);
-      if (macro.onError) {
-        macro.onError(err as Error);
-      }
+      console.error(`Streaming macro ${macro.name} error:`, err instanceof Error ? err.message : err);
+      macro.onError?.(err as Error);
+    } finally {
+      if (proc) this._processes.delete(proc);
+      this._inFlight.delete(anchor);
+      this._untrack(anchor);
+      this._untrack(cursor);
+      this._untrack(marker);
     }
-  }
-
-  /**
-   * Manually trigger macro expansion on current document
-   */
-  async expand(): Promise<Expansion[]> {
-    return this._processDocument();
-  }
-
-  /**
-   * List all registered macros
-   */
-  listMacros(): MacroInfo[] {
-    const result: MacroInfo[] = [];
-    for (const [name, macro] of this.macros) {
-      result.push({
-        name: name,
-        type: macro.type,
-        trigger: (macro as TextMacro).trigger,
-        pattern: macro.pattern.toString()
-      });
-    }
-    return result;
   }
 
   // ===========================================
   // Built-in macro helpers (static)
   // ===========================================
-  
+
   static builtins = {
-    /**
-     * Create a date/time macro
-     */
-    dateMacro(trigger: string, format: 'iso' | 'locale' | 'date' | 'time' | 'isoDate' | (() => string) = 'iso'): DateMacroResult {
+    dateMacro(trigger: string, format: 'iso' | 'locale' | 'date' | 'time' | 'isoDate' | (() => string) = 'iso'): BuiltinMacro {
       const formatters: Record<string, () => string> = {
         iso: () => new Date().toISOString(),
         locale: () => new Date().toLocaleString(),
@@ -1464,53 +860,26 @@ class MacroEngine {
         time: () => new Date().toLocaleTimeString(),
         isoDate: () => new Date().toISOString().split('T')[0]
       };
-      
       return {
         trigger,
         replacement: typeof format === 'function' ? format : (formatters[format] || formatters.iso)
       };
     },
 
-    /**
-     * Create a UUID macro
-     */
-    uuidMacro(trigger: string): UuidMacroResult {
-      return {
-        trigger,
-        replacement: () => {
-          // Simple UUID v4 generator
-          return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-            const r = Math.random() * 16 | 0;
-            const v = c === 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-          });
-        }
-      };
+    uuidMacro(trigger: string): BuiltinMacro {
+      return { trigger, replacement: () => globalThis.crypto.randomUUID() };
     },
 
-    /**
-     * Create a counter macro
-     */
-    counterMacro(trigger: string, start: number = 1): CounterMacroResult {
+    counterMacro(trigger: string, start: number = 1): BuiltinMacro {
       let counter = start;
-      return {
-        trigger,
-        replacement: () => String(counter++)
-      };
+      return { trigger, replacement: () => String(counter++) };
     },
 
-    /**
-     * Create a snippet/template expansion macro
-     */
-    snippetMacro(trigger: string, template: string): SnippetMacroResult {
-      return {
-        trigger,
-        replacement: () => template.replace('$CURSOR', '')
-      };
+    snippetMacro(trigger: string, template: string): BuiltinMacro {
+      return { trigger, replacement: () => template.replace('$CURSOR', '') };
     }
   };
 }
-
 
 export { MacroEngine };
 export type {
@@ -1529,6 +898,7 @@ export type {
   BlockMacroOptions,
   StateTracking,
   DocumentContext,
-  MacroEngineOptions
+  MacroEngineOptions,
+  RegexHandler,
+  CommandBuilder,
 };
-

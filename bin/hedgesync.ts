@@ -18,7 +18,8 @@
  */
 
 import { HedgeDocClient, PandocTransformer, MacroEngine, UserInfo, HedgeDocAPI, HedgeDocAPIError, loginWithEmail, loginWithLDAP, loginWithOIDC, loginWithOAuth2Password, loginWithDeviceCodeOIDC, AuthError } from '../src/index.js';
-import type { StreamingMacro, DocumentContext } from '../src/macro-engine.js';
+import { renderShellTemplate, runShell, type ShellCommand } from '../src/shell.js';
+import { expandReplacement } from '../src/replace.js';
 import type { DeviceCodeInfo } from '../src/auth.js';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -120,7 +121,7 @@ function parseArgs(args: string[]): ParsedArgs {
   };
 
   // Options that can be specified multiple times (will be collected into arrays)
-  const multiValueOptions = new Set(['text', 'regex', 'exec', 'block', 'header', 'H']);
+  const multiValueOptions = new Set(['text', 'regex', 'exec', 'block', 'header', 'H', 'allow-user']);
 
   let i = 0;
   while (i < args.length) {
@@ -391,6 +392,7 @@ ${c('yellow', 'MACRO TYPES:')}
                     Format: ${c('dim', "'/pattern/flags:shell-command'")}
                     The matched text is replaced with command output.
                     Use {0} for full match, {1},{2}... for capture groups.
+                    If the command fails, the trigger is left unchanged.
                     Example: --exec '/::calc\\s+(.+?)::/i:echo {1} | bc -l'
                     "::calc 2+2::" becomes "4"
 
@@ -405,15 +407,25 @@ ${c('yellow', 'EXEC OPTIONS:')}
   ${c('cyan', '--stream')}       Stream command output into document as it runs.
                     Useful for slow commands (LLMs, builds) to show progress.
 
-  ${c('cyan', '--track-state')}  Prevent re-triggering while command runs.
-                    Appends "→" while running, changes to "✓" when done.
-                    Example: "::ask hi::" → "::ask hi::→" → "::ask hi::✓ Hello!"
+  ${c('cyan', '--track-state')}  Keep the trigger and mark it instead of deleting it.
+                    Appends "→" while running, "✓" when done ("✗" on failure);
+                    marked triggers never run again. Output goes on the next line.
+
+  ${c('cyan', '--timeout')} <s>  Kill exec/block commands after this many seconds.
 
 ${c('yellow', 'FILTER OPTIONS:')}
+  In --watch mode only text touched by someone else's edit can trigger a
+  macro; macro output never triggers macros.
+
+  ${c('cyan', '--allow-user')} <id>  Only edits by this HedgeDoc account id trigger macros.
+                    Repeatable. Account ids cannot be spoofed, so this is the
+                    option to use when running exec/block macros.
+                    Find an id with: hedgesync me <server-url> -c <cookie>
+
   ${c('cyan', '--user-filter')}  Only trigger macros for edits from users matching this
-                    regex pattern. Matches against the user's display name.
+                    regex pattern. Matches against the user's display name,
+                    which users choose themselves: a convenience, not security.
                     Example: --user-filter 'Alice|Bob' (only Alice or Bob)
-                    Example: --user-filter '^Guest' (only guest users)
 
 ${c('yellow', 'SECTION FILTER OPTIONS:')}
   ${c('cyan', '--section-heading')} <pattern>
@@ -463,8 +475,13 @@ ${c('green', 'Example: Summarize document with an LLM')}
   Command:
     hedgesync macro <url> --exec '/::summarize::/i:llm "Summarize: {DOC}"' --stream
 
-  The {DOC} placeholder is replaced with the entire document text, so the
-  LLM receives the full context. Output replaces "::summarize::".
+  The LLM receives the entire document text as one argument. Output
+  replaces "::summarize::".
+
+Placeholder values are passed to the shell as environment variables
+(HS_0, HS_1, HS_DOC, ...), never pasted into the command text, so note
+content cannot inject shell syntax. Write placeholders bare or inside
+quotes; either way each one expands to exactly one argument.
 
 ${c('green', 'Example: Generate conclusion from preceding text')}
 
@@ -567,19 +584,18 @@ ${c('green', 'LLM with streaming and state tracking:')}
     --exec '/::ask\\s+(.+?)::/i:llm "{1}"' \\
     --stream --track-state --watch
 
-  "::ask What is 2+2?::" → "::ask What is 2+2::→" → "::ask What is 2+2::✓ 2+2 equals 4."
+  "::ask What is 2+2?::" → "::ask What is 2+2?::→" (running) → "::ask What is 2+2?::✓"
+  with the answer streamed in on the following lines.
 
 ${c('green', 'Load from config file:')}
   hedgesync macro <url> --config macros.json --watch
 
-${c('yellow', 'SHELL EXECUTION NOTE:')}
-  Commands run via 'sh -c "command"'. Use single quotes in the command
-  template to prevent the outer shell from expanding variables:
-  ${c('dim', "--exec \"/::run (.+?)::/i:bash -c '{1}'\"")}
-
 ${c('yellow', 'SECURITY NOTE:')}
-  Exec and block macros run arbitrary shell commands. Only use on documents
-  you trust. Malicious document content could execute harmful commands.
+  Anyone who can edit the note can trigger your exec/block macros and choose
+  their input. Note content cannot inject shell syntax, but the command still
+  acts on it: "cat {1}" lets collaborators read any file you can, and
+  "bash -c {1}" runs whatever they write. Use --allow-user to restrict who
+  can trigger macros, and only template commands that are safe for any input.
 `,
 
   watch: `
@@ -2686,7 +2702,7 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       process.exit(1);
     }
     const startLine = parseInt(lineMatch[1], 10);
-    const endLine = lineMatch[2] ? (lineMatch[2] === '' ? undefined : parseInt(lineMatch[2], 10)) : startLine;
+    const endLine = lineMatch[2] === undefined ? startLine : (lineMatch[2] === '' ? undefined : parseInt(lineMatch[2], 10));
     sectionFilter = { type: 'lines', start: startLine, end: endLine };
     if (!quiet) {
       console.error(c('cyan', `Section filter: lines ${startLine}${endLine !== undefined ? `-${endLine}` : ' to end'}`));
@@ -2716,15 +2732,143 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
     }
   }
   
-  // Create macro engine with options
-  const engine = new MacroEngine(client, { userFilter, sectionFilter });
+  // Only edits by these account ids trigger macros (unlike names, ids cannot be spoofed)
+  const allowedUserIds = ([] as string[]).concat((args.options['allow-user'] || []) as string[]);
+  const timeoutStr = args.options.timeout;
+  const timeoutMs = typeof timeoutStr === 'string' ? Math.round(parseFloat(timeoutStr) * 1000) : 0;
+  if (typeof timeoutStr === 'string' && !(timeoutMs > 0)) {
+    console.error(c('red', `Invalid --timeout (seconds): ${timeoutStr}`));
+    process.exit(1);
+  }
+  if (allowedUserIds.length > 0 && !quiet) {
+    console.error(c('cyan', `Only edits by user ids ${allowedUserIds.join(', ')} trigger macros`));
+  }
+
+  const engine = new MacroEngine(client, {
+    userFilter,
+    sectionFilter,
+    allowedUserIds: allowedUserIds.length > 0 ? allowedUserIds : undefined,
+  });
+
+  /**
+   * Run a macro command. Note content only ever reaches the shell through
+   * environment variables (see renderShellTemplate), never as command text.
+   * Returns stdout, or null on failure so the trigger is left in place.
+   */
+  const runMacroCommand = async (cmd: ShellCommand, label: string): Promise<string | null> => {
+    if (!quiet) {
+      console.error(c('dim', `  ${label}: ${cmd.command}`));
+    }
+    const result = await runShell(cmd, { timeoutMs });
+    if (result.code !== 0) {
+      const detail = result.stderr.trim() ? `: ${result.stderr.trim()}` : '';
+      console.error(c('red', `  ${label} failed (exit ${result.code})${detail}`));
+      return null;
+    }
+    return result.stdout;
+  };
+
+  /** Split String.replace-style handler args into groups, index and document. */
+  const splitMatchArgs = (rest: unknown[]) => {
+    const document = rest[rest.length - 1] as string;
+    const index = rest[rest.length - 2] as number;
+    const groups = rest.slice(0, -2).map(g => (g ?? '') as string);
+    return { document, index, groups };
+  };
   
+  const builtinMacros: Record<string, () => string> = {
+    '::date::': () => new Date().toISOString().split('T')[0],
+    '::time::': () => new Date().toTimeString().split(' ')[0],
+    '::datetime::': () => new Date().toISOString(),
+    '::ts::': () => String(Date.now()),
+  };
+
+  /** Register a regex macro whose replacement is a String.replace template. */
+  const registerRegexReplace = (name: string, regex: RegExp, replacement: string) => {
+    engine.addRegexMacro(name, regex, (m: string, ...rest: unknown[]) => {
+      const { document, index, groups } = splitMatchArgs(rest);
+      return expandReplacement(replacement, m, groups, index, document, undefined);
+    });
+  };
+
+  /**
+   * Register an exec macro. Placeholders: {0} full match, {1}.. groups,
+   * {DOC}, {BEFORE}, {AFTER}.
+   */
+  const registerExec = (
+    regex: RegExp,
+    cmdTemplate: string,
+    opts: { streaming?: boolean; trackState?: boolean; lineBuffered?: boolean } = {},
+  ) => {
+    const name = `exec:${regex.source}`;
+    const buildCommand = (fullMatch: string, rest: unknown[]): ShellCommand => {
+      const { document, index, groups } = splitMatchArgs(rest);
+      const values: Record<string, string> = {
+        '0': fullMatch,
+        DOC: document,
+        BEFORE: document.slice(0, index),
+        AFTER: document.slice(index + fullMatch.length),
+      };
+      groups.forEach((g, i) => { values[String(i + 1)] = g; });
+      return renderShellTemplate(cmdTemplate, values);
+    };
+
+    if (opts.streaming) {
+      engine.addStreamingExecMacro(name, regex,
+        (fullMatch: string, ...rest: unknown[]) => {
+          const cmd = buildCommand(fullMatch, rest);
+          if (!quiet) {
+            console.error(c('dim', `  Streaming: ${cmd.command}`));
+          }
+          return cmd;
+        },
+        {
+          lineBuffered: opts.lineBuffered ?? true,
+          trackState: !!opts.trackState,
+          timeoutMs,
+          onEnd: (exitCode: number) => {
+            if (!quiet) {
+              console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
+            }
+          },
+          onError: (err: Error) => {
+            console.error(c('red', `  Stream error: ${err.message}`));
+          }
+        });
+    } else {
+      engine.addRegexMacro(name, regex, async (fullMatch: string, ...rest: unknown[]) => {
+        const out = await runMacroCommand(buildCommand(fullMatch, rest), 'Executing');
+        return out === null ? null : out.trim();
+      });
+    }
+  };
+
+  /**
+   * Register a block macro. The block content is piped to stdin; placeholders
+   * {CONTENT}, {DOC}, {BEFORE}, {AFTER} are also available.
+   */
+  const registerBlock = (blockName: string, cmdTemplate: string) => {
+    engine.addBlockMacro(blockName, async (content, ctx) => {
+      const cmd = renderShellTemplate(cmdTemplate, {
+        CONTENT: content,
+        DOC: ctx.fullDocument,
+        BEFORE: ctx.beforeMatch,
+        AFTER: ctx.afterMatch,
+      });
+      return runMacroCommand({ ...cmd, stdin: content }, `Block ${blockName}`);
+    });
+  };
+
+  /** Parse "/source/flags" (or a bare source) into a global regex. */
+  const parsePattern = (pattern: string): RegExp => {
+    const m = pattern.match(/^\/(.+)\/([a-z]*)$/s);
+    const [source, flags] = m ? [m[1], m[2]] : [pattern, ''];
+    return new RegExp(source, flags.includes('g') ? flags : flags + 'g');
+  };
+
   // Built-in macros
   if (args.options['built-in'] || args.options.b) {
-    engine.addTextMacro('::date::', () => new Date().toISOString().split('T')[0]);
-    engine.addTextMacro('::time::', () => new Date().toTimeString().split(' ')[0]);
-    engine.addTextMacro('::datetime::', () => new Date().toISOString());
-    engine.addTextMacro('::ts::', () => String(Date.now()));
+    for (const [trigger, fn] of Object.entries(builtinMacros)) engine.addTextMacro(trigger, fn);
     
     if (!quiet) {
       console.error(c('cyan', 'Loaded built-in macros: ::date::, ::time::, ::datetime::, ::ts::'));
@@ -2737,15 +2881,54 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       const configPath = resolve(process.cwd(), configFile);
       const config = JSON.parse(readFileSync(configPath, 'utf-8'));
       
-      // Text macros from config
+      // Documented format: { "macros": [ { "type": ..., ... } ] }
+      if (Array.isArray(config.macros)) {
+        for (const [i, entry] of (config.macros as Record<string, unknown>[]).entries()) {
+          const where = `${configFile} macros[${i}]`;
+          const str = (key: string): string => {
+            const v = entry[key];
+            if (typeof v !== 'string') throw new Error(`${where}: "${key}" must be a string`);
+            return v;
+          };
+          switch (entry.type) {
+            case 'text':
+              engine.addTextMacro(str('trigger'), str('replacement'));
+              break;
+            case 'regex':
+              registerRegexReplace(str('pattern'), parsePattern(str('pattern')), str('replacement'));
+              break;
+            case 'exec':
+              registerExec(parsePattern(str('pattern')), str('command'), {
+                streaming: entry.streaming === true,
+                trackState: entry.trackState === true,
+                lineBuffered: entry.lineBuffered !== false,
+              });
+              break;
+            case 'block':
+              registerBlock(str('name'), str('command'));
+              break;
+            case 'builtin': {
+              const trigger = `::${str('name')}::`;
+              const fn = builtinMacros[trigger];
+              if (!fn) throw new Error(`${where}: unknown builtin "${entry.name}"`);
+              engine.addTextMacro(trigger, fn);
+              break;
+            }
+            default:
+              throw new Error(`${where}: unknown macro type ${JSON.stringify(entry.type)}`);
+          }
+        }
+      }
+      
+      // Legacy format: { "text": { trigger: replacement }, "regex": { pattern: replacement } }
+      // Text macros from config ("$cmd" runs a command; it receives no note content)
       if (config.text) {
         for (const [trigger, replacement] of Object.entries(config.text)) {
           if (typeof replacement === 'string' && replacement.startsWith('$')) {
-            const cmd = replacement.slice(1);
+            const command = replacement.slice(1);
             engine.addTextMacro(trigger, async () => {
-              const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe' });
-              const text = await new Response(proc.stdout).text();
-              return text.trim();
+              const out = await runMacroCommand({ command }, `Text ${trigger}`);
+              return out === null ? null : out.trim();
             });
           } else {
             engine.addTextMacro(trigger, replacement as string);
@@ -2753,28 +2936,21 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
         }
       }
       
-      // Regex macros from config
+      // Regex macros from config ("$cmd" gets MATCH and GROUP<n> in its environment)
       if (config.regex) {
         for (const [pattern, replacement] of Object.entries(config.regex)) {
           const regex = new RegExp(pattern, 'g');
           if (typeof replacement === 'string' && replacement.startsWith('$')) {
-            const cmd = replacement.slice(1);
-            engine.addRegexMacro(pattern, regex, async (match: string, ...groups: string[]) => {
+            const command = replacement.slice(1);
+            engine.addRegexMacro(pattern, regex, async (match: string, ...rest: unknown[]) => {
+              const { groups } = splitMatchArgs(rest);
               const env: Record<string, string> = { MATCH: match };
-              groups.forEach((g, i) => env[`GROUP${i + 1}`] = g || '');
-              const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', env: { ...process.env, ...env } });
-              const text = await new Response(proc.stdout).text();
-              return text.trim();
+              groups.forEach((g, i) => env[`GROUP${i + 1}`] = g);
+              const out = await runMacroCommand({ command, env }, `Regex ${pattern}`);
+              return out === null ? null : out.trim();
             });
           } else {
-            engine.addRegexMacro(pattern, regex, (match: string, ...groups: string[]) => {
-              let result = replacement as string;
-              groups.forEach((g, i) => {
-                result = result.replace(new RegExp(`\\$${i + 1}`, 'g'), g || '');
-              });
-              result = result.replace(/\$&/g, match);
-              return result;
-            });
+            registerRegexReplace(pattern, regex, replacement as string);
           }
         }
       }
@@ -2801,11 +2977,10 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
     const trigger = macro.slice(0, eqIndex);
     const replacement = macro.slice(eqIndex + 1);
     if (replacement.startsWith('$(') && replacement.endsWith(')')) {
-      const cmd = replacement.slice(2, -1);
+      const command = replacement.slice(2, -1);
       engine.addTextMacro(trigger, async () => {
-        const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe' });
-        const text = await new Response(proc.stdout).text();
-        return text.trim();
+        const out = await runMacroCommand({ command }, `Text ${trigger}`);
+        return out === null ? null : out.trim();
       });
     } else {
       engine.addTextMacro(trigger, replacement);
@@ -2823,14 +2998,7 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
     const [, pattern, flags, replacement] = match;
     const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
     
-    engine.addRegexMacro(pattern, regex, (m: string, ...groups: string[]) => {
-      let result = replacement;
-      groups.forEach((g, i) => {
-        result = result.replace(new RegExp(`\\$${i + 1}`, 'g'), g || '');
-      });
-      result = result.replace(/\$&/g, m);
-      return result;
-    });
+    registerRegexReplace(pattern, regex, replacement);
   }
   
   // Add exec macros from command line
@@ -2840,104 +3008,12 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       console.error(c('red', `Invalid exec macro format: ${macro}`));
       process.exit(1);
     }
-    
     const [, pattern, flags, cmdTemplate] = execMatch;
     const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
-    
-    // Check if command template uses document context placeholders
-    const usesDocContext = /\{DOC\}|\{BEFORE\}|\{AFTER\}/.test(cmdTemplate);
-    
-    const buildCommand = (fullMatch: string, ...groups: string[]): string => {
-      let cmd = cmdTemplate;
-      cmd = cmd.replace(/\{0\}/g, fullMatch);
-      groups.forEach((g, i) => {
-        cmd = cmd.replace(new RegExp(`\\{${i + 1}\\}`, 'g'), g || '');
-      });
-      return cmd;
-    };
-    
-    const buildCommandWithContext = (ctx: { fullDocument: string; beforeMatch: string; afterMatch: string; matchText: string; groups: string[] }): string => {
-      let cmd = cmdTemplate;
-      // Replace document context placeholders
-      // Use shell-safe escaping for document content
-      const escapeForShell = (s: string): string => s.replace(/'/g, "'\\''");
-      cmd = cmd.replace(/\{DOC\}/g, escapeForShell(ctx.fullDocument));
-      cmd = cmd.replace(/\{BEFORE\}/g, escapeForShell(ctx.beforeMatch));
-      cmd = cmd.replace(/\{AFTER\}/g, escapeForShell(ctx.afterMatch));
-      cmd = cmd.replace(/\{0\}/g, ctx.matchText);
-      ctx.groups.forEach((g, i) => {
-        cmd = cmd.replace(new RegExp(`\\{${i + 1}\\}`, 'g'), g || '');
-      });
-      return cmd;
-    };
-    
-    if (streamOutput) {
-      engine.addStreamingExecMacro(`exec:${pattern}`, regex, 
-        usesDocContext 
-          ? (match: string, ...groups: string[]) => buildCommand(match, ...groups)  // Will be overridden by contextCommandBuilder
-          : buildCommand, 
-        {
-          lineBuffered: true,
-          trackState: !!trackState,
-          useDocumentContext: usesDocContext,
-          onStart: (match: string, pos: number) => {
-            if (!quiet) {
-              console.error(c('dim', `  Streaming: ${buildCommand(match)} at position ${pos}`));
-            }
-          },
-          onEnd: (exitCode: number) => {
-            if (!quiet) {
-              console.error(c('dim', `  Stream ended (exit: ${exitCode})`));
-            }
-          },
-          onError: (err: Error) => {
-            console.error(c('red', `  Stream error: ${err.message}`));
-          }
-        });
-      
-      // If using document context, we need to set up a custom context command builder
-      if (usesDocContext) {
-        const macroEntry = engine.macros.get(`exec:${pattern}`);
-        if (macroEntry && macroEntry.type === 'streaming') {
-          (macroEntry as StreamingMacro).contextCommandBuilder = (ctx: DocumentContext) => buildCommandWithContext(ctx);
-        }
-      }
-    } else {
-      engine.addRegexMacro(`exec:${pattern}`, regex, async (fullMatch: string, ...groups: string[]) => {
-        let cmd: string;
-        if (usesDocContext) {
-          const doc = client.getDocument();
-          const idx = doc.indexOf(fullMatch);
-          cmd = buildCommandWithContext({
-            fullDocument: doc,
-            beforeMatch: idx >= 0 ? doc.substring(0, idx) : '',
-            afterMatch: idx >= 0 ? doc.substring(idx + fullMatch.length) : '',
-            matchText: fullMatch,
-            groups
-          });
-        } else {
-          cmd = buildCommand(fullMatch, ...groups);
-        }
-        
-        if (!quiet) {
-          console.error(c('dim', `  Executing: ${cmd}`));
-        }
-      
-        try {
-          const proc = Bun.spawn(['sh', '-c', cmd], { stdout: 'pipe', stderr: 'pipe' });
-          const stdout = await new Response(proc.stdout).text();
-          return stdout.trim();
-        } catch (err) {
-          console.error(c('red', `  Command failed: ${(err as Error).message}`));
-          return fullMatch;
-        }
-      });
-    }
+    registerExec(regex, cmdTemplate, { streaming: !!streamOutput, trackState: !!trackState });
   }
   
-  // Add block macros from command line
-  // Format: --block 'blockname:command'
-  // Transforms content between ::BEGIN:blockname:: and ::END:blockname::
+  // Add block macros from command line (format: --block 'blockname:command')
   for (const macro of blockMacros) {
     const blockMatch = macro.match(/^(\w+):(.+)$/);
     if (!blockMatch) {
@@ -2945,37 +3021,8 @@ async function cmdMacro(args: ParsedArgs): Promise<void> {
       console.error(c('red', `  Expected: blockname:command (e.g., "sort:sort" or "upper:tr a-z A-Z")`));
       process.exit(1);
     }
-    
     const [, blockName, cmdTemplate] = blockMatch;
-    
-    engine.addBlockMacro(blockName, async (content, ctx) => {
-      // Build the command - pass content via stdin
-      let cmd = cmdTemplate;
-      // Replace placeholders if present
-      cmd = cmd.replace(/\{CONTENT\}/g, content);
-      cmd = cmd.replace(/\{DOC\}/g, ctx.fullDocument);
-      cmd = cmd.replace(/\{BEFORE\}/g, ctx.beforeMatch);
-      cmd = cmd.replace(/\{AFTER\}/g, ctx.afterMatch);
-      
-      if (!quiet) {
-        console.error(c('dim', `  Block ${blockName}: ${cmd}`));
-      }
-      
-      try {
-        // Pipe content to the command
-        const proc = Bun.spawn(['sh', '-c', cmd], { 
-          stdout: 'pipe', 
-          stderr: 'pipe',
-          stdin: new Response(content).body
-        });
-        const stdout = await new Response(proc.stdout).text();
-        return stdout;
-      } catch (err) {
-        console.error(c('red', `  Block command failed: ${(err as Error).message}`));
-        return ctx.matchText; // Return original on error
-      }
-    });
-    
+    registerBlock(blockName, cmdTemplate);
     if (!quiet) {
       console.error(c('cyan', `Registered block macro: ${blockName}`));
     }
