@@ -2,7 +2,8 @@
  * End-to-end tests: run the real CLI against a socket.io HedgeDoc stand-in.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HedgeDocClient } from '../../src/hedgedoc-client.js';
@@ -240,5 +241,49 @@ describe('saved sessions', () => {
     expect(r.code).toBe(0);
     expect(JSON.parse(r.stdout).profile).toMatchObject({ status: 'ok', name: 'Tester' });
     rmSync(join(tmp, 'cookies.json'));
+  });
+});
+
+describe('login --from-browser', () => {
+  /** A fake HOME with one Firefox profile holding the given session cookie for the test server. */
+  function browserHome(sid: string): string {
+    const home = mkdtempSync(join(tmp, 'home-'));
+    const root = join(home, '.mozilla', 'firefox');
+    mkdirSync(join(root, 'p1.default'), { recursive: true });
+    writeFileSync(join(root, 'profiles.ini'), '[Profile0]\nName=default\nIsRelative=1\nPath=p1.default\n');
+    const db = new Database(join(root, 'p1.default', 'cookies.sqlite'));
+    db.run(`CREATE TABLE moz_cookies (id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '', name TEXT,
+      value TEXT, host TEXT, path TEXT, isSecure INTEGER, lastAccessed INTEGER)`);
+    db.run("INSERT INTO moz_cookies (name, value, host, path, isSecure, lastAccessed) VALUES ('connect.sid', ?, ?, '/', 0, 1)",
+      [sid, new URL(server.url).hostname]);
+    db.close();
+    return home;
+  }
+
+  test('imports and saves a logged-in browser session', async () => {
+    const cookieFile = join(tmp, 'browser-cookies.json');
+    const r = await cli(['login', server.url, '--from-browser', 'firefox', '--save'],
+      { env: { HOME: browserHome('good'), HEDGESYNC_COOKIE_FILE: cookieFile } });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain('Logged in as Tester (from firefox, profile default)');
+    const saved = JSON.parse(readFileSync(cookieFile, 'utf8')).servers[server.url];
+    expect(saved).toMatchObject({ cookie: 'connect.sid=good', source: { method: 'browser', browser: 'firefox', profile: 'default' } });
+
+    const me = await cli(['me', server.url, '--json'], { env: { HEDGESYNC_COOKIE_FILE: cookieFile } });
+    expect(JSON.parse(me.stdout).profile).toMatchObject({ name: 'Tester' });
+  });
+
+  test('a logged-out browser is an error, and bad options are rejected', async () => {
+    const out = await cli(['login', server.url, '-b', 'firefox'], { env: { HOME: browserHome('expired') } });
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain('not logged in');
+
+    const bad = await cli(['login', server.url, '--from-browser', 'netscape']);
+    expect(bad.stderr).toContain("Unsupported browser 'netscape'");
+    const mixed = await cli(['login', server.url, '--from-browser', 'firefox', '-u', 'x']);
+    expect(mixed.stderr).toContain('cannot be combined');
+    const oidc = await cli(['login', 'oidc', server.url]);
+    expect(oidc.stderr).toContain('--from-browser');
   });
 });

@@ -13,6 +13,8 @@ import { dirname, join } from 'node:path';
 export interface StoredSession {
   cookie: string;
   user?: { id: string; name: string };
+  /** Where the cookie came from, so `login --from-browser` can be repeated. */
+  source?: { method: string; browser?: string; profile?: string };
   savedAt: string;
 }
 

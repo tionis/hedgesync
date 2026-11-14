@@ -192,13 +192,31 @@ Private, locked or protected notes need a HedgeDoc session cookie. hedgesync
 uses, in order: `-c/--cookie`, the `HEDGEDOC_COOKIE` environment variable, and
 a cookie saved for that server by `hedgesync login --save`.
 
+#### From a browser (OIDC, OAuth2, GitHub, SAML, ...)
+
+These providers are browser redirect flows, so the CLI reuses the session of
+a browser you are already signed in with. Sign in to the server there, then:
+
+```bash
+hedgesync login https://md.example.com --from-browser firefox --save
+hedgesync login https://md.example.com -b chromium --profile Work --save
+```
+
+Supported: `firefox`, `librewolf`, `zen`, `chrome`, `chromium`, `brave`,
+`vivaldi`, `edge`. hedgesync reads a copy of the browser's cookie database
+(the browser may stay open), tries every profile and Firefox container,
+freshest first, unless `--profile` names one, and keeps the first cookie set
+that the server's `/me` accepts. Chromium-based browsers on Linux may need
+the desktop keyring (`secret-tool` or `kwallet-query`); on macOS the Keychain
+asks for permission. Chromium cookies on Windows are not supported.
+
+HedgeDoc sessions expire after two weeks without use (by default); run the
+same command again to refresh the saved cookie.
+
 #### Email or LDAP login
 
-If the server has email or LDAP accounts enabled, `hedgesync login` signs in.
-With `--save` it stores the cookie for that server in
-`~/.config/hedgesync/cookies.json` (mode 0600; `$XDG_CONFIG_HOME` and
-`HEDGESYNC_COOKIE_FILE` are honoured) and later commands pick it up; without
-it, the cookie alone is printed to stdout:
+If the server has email or LDAP accounts enabled, `hedgesync login` signs in
+directly:
 
 ```bash
 hedgesync login https://md.example.com -u user@example.com --save
@@ -213,21 +231,19 @@ accepted as a command-line argument, where other local users could see it.
 
 HedgeDoc answers a failed login exactly like a successful one, so `login`
 checks the new session against `/me` and fails on a wrong password instead
-of handing back a useless cookie. Use `--json` to also get the account id and
-name, and `--timeout <seconds>` for slow servers.
+of handing back a useless cookie.
 
-#### Browser cookie (OAuth2, OIDC, GitHub, SAML, ...)
+#### Saving and passing cookies
 
-These providers only work as browser redirect flows, so the CLI cannot do
-them. Sign in with a browser and copy the session cookie from its developer
-tools (Application/Storage -> Cookies, usually named `connect.sid`):
+With `--save`, `login` stores the cookie for that server in
+`~/.config/hedgesync/cookies.json` (mode 0600; `$XDG_CONFIG_HOME` and
+`HEDGESYNC_COOKIE_FILE` are honoured) and later commands pick it up; without
+it, the cookie alone is printed to stdout. Use `--json` to also get the
+account id and name, and `--timeout <seconds>` for slow servers.
 
-```bash
-export HEDGEDOC_COOKIE='connect.sid=s%3A...'
-```
-
-A bare value without `connect.sid=` also works. The cookie lasts as long as
-the server's session lifetime (14 days by default).
+A cookie copied by hand from a browser's developer tools also works
+(`export HEDGEDOC_COOKIE='connect.sid=s%3A...'`; a bare value without
+`connect.sid=` is accepted too).
 
 ### Scripting Examples
 
@@ -340,6 +356,19 @@ const client = new HedgeDocClient({
   serverUrl: 'https://hedgedoc.example.com',
   noteId: 'private-note',
   cookie
+});
+```
+
+For OIDC/OAuth/SAML servers, take the session from an installed browser
+(Bun, or Node 22.5+ for `node:sqlite`). It throws `BrowserCookieError` with a
+`hint` when no profile is logged in:
+
+```javascript
+import { sessionFromBrowser } from 'hedgesync';
+
+const { cookie, user, profile } = await sessionFromBrowser('firefox', {
+  serverUrl: 'https://hedgedoc.example.com',
+  // profile: 'work',   // default: every profile, freshest first
 });
 ```
 
@@ -1185,7 +1214,8 @@ const client = new HedgeDocClient({
 });
 ```
 
-You can get the session cookie from your browser's developer tools after logging in.
+Get the cookie with `hedgesync login <server> --from-browser <browser>`,
+`sessionFromBrowser()`, or from your browser's developer tools.
 
 ## How It Works
 

@@ -116,7 +116,7 @@ export class Context {
     const cookie = this.cookieFor(serverUrl);
     if (!cookie) {
       throw new CliError('This command needs a session cookie',
-        'Use --cookie, set HEDGEDOC_COOKIE, or run: hedgesync login <server> -u <user> --save');
+        `Use --cookie, set HEDGEDOC_COOKIE, or run: hedgesync login ${serverUrl} --from-browser firefox --save (or -u <user> for email/LDAP)`);
     }
     return cookie;
   }

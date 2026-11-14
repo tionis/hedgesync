@@ -94,6 +94,21 @@ export type {
   SessionCheckOptions
 } from './auth.js';
 
+// Session cookies from installed browsers (for OIDC/OAuth/SAML servers)
+export {
+  readBrowserCookies,
+  sessionFromBrowser,
+  BrowserCookieError,
+  SUPPORTED_BROWSERS
+} from './browser-cookies.js';
+export type {
+  BrowserName,
+  BrowserCookie,
+  CookieCandidate,
+  BrowserCookieOptions,
+  BrowserSession
+} from './browser-cookies.js';
+
 // Note mirroring
 export { NoteMirror, mergeText, createMirrorTransform } from './mirror.js';
 export type { MirrorClient, MirrorOptions, MirrorSyncEvent, MirrorDirection, MirrorTransformOptions } from './mirror.js';

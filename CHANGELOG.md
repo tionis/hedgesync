@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hedgesync login <server> --from-browser <browser> [--profile <name>]`
+  reuses a browser's HedgeDoc session, so servers that only offer OIDC,
+  OAuth2, GitHub or SAML login work from the CLI. Firefox, LibreWolf and Zen
+  (including containers) and Chrome, Chromium, Brave, Vivaldi and Edge on
+  Linux and macOS are supported; the session is verified against `/me`.
+- Library: `sessionFromBrowser`, `readBrowserCookies`, `BrowserCookieError`,
+  `SUPPORTED_BROWSERS`.
+- Saved sessions record where they came from (`source`).
+
 ## 2.0.0
 
 A correctness and safety overhaul. Several APIs and CLI behaviours changed;
