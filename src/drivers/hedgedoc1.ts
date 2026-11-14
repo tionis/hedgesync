@@ -3,7 +3,7 @@
  *
  * Protocol summary (server side: lib/realtime/*.js in hedgedoc 1.x):
  * - The socket is authenticated by the express session cookie; without one
- *   the driver first fetches the note page to get an anonymous session.
+ *   the driver first fetches /config to get an anonymous session.
  * - The server sends `doc` {str, revision, clients, force}; the client asks
  *   for `refresh` (title, permission, owner, authorship, ...).
  * - Edits: client `operation`(revision, op, selection) -> server `ack`(revision)
@@ -164,12 +164,16 @@ export class HedgeDoc1Driver implements NoteDriver {
   private async sessionCookie(): Promise<string> {
     if (this.options.cookie) return this.options.cookie;
 
+    // Any route behind HedgeDoc's session middleware (saveUninitialized) hands
+    // out an anonymous session. Not the note page itself: GET /<noteId>
+    // creates the note when it does not exist and free URLs are enabled.
+    // (/status is excluded from the session middleware; /config is not.)
     const response = await this.options.request({
-      url: `${this.serverUrl}/${this.options.noteId}`,
+      url: `${this.serverUrl}/config`,
       method: 'GET',
       redirect: 'manual',
       credentials: 'include',
-      headers: { Accept: 'text/html', ...this.options.headers },
+      headers: this.options.headers,
     });
     const cookies = parseSetCookie(getHeader(response.headers, 'set-cookie') ?? '');
     if (cookies.size > 0) return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ');

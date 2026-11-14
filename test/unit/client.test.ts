@@ -360,3 +360,20 @@ describe('drivers', () => {
     });
   });
 });
+
+describe('anonymous session bootstrap', () => {
+  test('uses /config, never the note page (which would create missing notes)', async () => {
+    const urls: string[] = [];
+    const client = new HedgeDocClient({
+      serverUrl: 'https://md.example.com/hd/',
+      noteId: 'typo',
+      runtime: 'node',
+      request: async (req) => {
+        urls.push(req.url);
+        return { status: 200, headers: { 'set-cookie': 'connect.sid=s%3Aanon; Path=/; HttpOnly' }, text: async () => '', json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) };
+      },
+    });
+    expect(await (client.driver as any).sessionCookie()).toBe('connect.sid=s%3Aanon');
+    expect(urls).toEqual(['https://md.example.com/hd/config']);
+  });
+});

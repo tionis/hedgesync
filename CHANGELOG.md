@@ -16,6 +16,13 @@
   the server version, and connecting to a HedgeDoc 2 server fails with a
   clear "not supported yet" error instead of a timeout.
 
+### Fixed
+
+- Without a cookie, the client fetched the note page to get an anonymous
+  session, which on servers with free URLs created the note if it did not
+  exist (a typo in a note URL left an empty note behind). It now uses
+  `/config`, which has no side effects; missing notes are reported as such.
+
 ### Changed
 
 - `HedgeDocClient` is split into a protocol-neutral client and a HedgeDoc 1
