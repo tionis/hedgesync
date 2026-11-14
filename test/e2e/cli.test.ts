@@ -287,3 +287,27 @@ describe('login --from-browser', () => {
     expect(oidc.stderr).toContain('--from-browser');
   });
 });
+
+describe('server detection', () => {
+  test('status reports the HedgeDoc version', async () => {
+    const r = await cli(['status', server.url, '--json']);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).server).toEqual({ protocol: 'hedgedoc1', version: '1.12.2' });
+  });
+
+  test('a HedgeDoc 2 server gets a clear error instead of a timeout', async () => {
+    const hd2 = Bun.serve({
+      port: 0,
+      fetch: req => new URL(req.url).pathname === '/api/private/config'
+        ? Response.json({ allowRegister: false, version: { major: 2, minor: 0, patch: 0, preRelease: 'alpha.3' } })
+        : new Response('Not found', { status: 404 }),
+    });
+    try {
+      const r = await cli(['get', `http://127.0.0.1:${hd2.port}/abc`, '--cookie', 'connect.sid=x']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('runs HedgeDoc 2.0.0-alpha.3, which hedgesync does not support yet');
+    } finally {
+      hd2.stop(true);
+    }
+  });
+});

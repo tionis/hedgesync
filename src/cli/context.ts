@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HedgeDocClient, type HedgeDocClientOptions } from '../hedgedoc-client.js';
+import { detectServer } from '../server-detect.js';
 import { HedgeDocAPI, HedgeDocAPIError } from '../hedgedoc-api.js';
 import { parseNoteUrl, parseServerUrl } from '../url.js';
 import { flag, str, list, type OptionSpec, type ParsedArgs } from './args.js';
@@ -167,7 +168,14 @@ export class Context {
       await client.connect();
     } catch (err) {
       client.disconnect();
-      throw new CliError(`Could not connect: ${(err as Error).message}`);
+      // A HedgeDoc 2 server never answers the Socket.IO handshake; say so instead of timing out.
+      const server = await detectServer({ serverUrl, headers: this.headers(), timeout: 3000 }).catch(() => null);
+      if (server?.protocol === 'hedgedoc2') {
+        throw new CliError(`${serverUrl} runs HedgeDoc ${server.version ?? '2'}, which hedgesync does not support yet`,
+          'Only HedgeDoc 1.x realtime editing is implemented so far.');
+      }
+      throw new CliError(`Could not connect: ${(err as Error).message}`,
+        server && !server.protocol ? `${serverUrl} does not look like a HedgeDoc server.` : undefined);
     }
     this.info(c('green', '✓ Connected'));
     return client;

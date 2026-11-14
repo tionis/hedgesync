@@ -195,8 +195,8 @@ async function testRuntimeOverrideAndRequestTransport() {
     },
   });
 
-  assertEqual((nodeClient as any)._isBrowserRuntime(), false, 'runtime: node forces non-browser mode');
-  const cookie = await (nodeClient as any)._getSessionCookie();
+  assertEqual((nodeClient.driver as any).isBrowserRuntime(), false, 'runtime: node forces non-browser mode');
+  const cookie = await (nodeClient.driver as any).sessionCookie();
   assertEqual(cookie, 'connect.sid=s%3Atest-session; lang=en-US', 'session bootstrap uses injected request');
   assertEqual(clientCalls.length, 1, 'client bootstrap called custom request once');
   assertEqual(clientCalls[0].method, 'GET', 'client bootstrap uses GET');
@@ -209,8 +209,8 @@ async function testRuntimeOverrideAndRequestTransport() {
     request: async () => makeMockResponse({ headers: {} }),
   });
 
-  assertEqual((browserClient as any)._isBrowserRuntime(), true, 'runtime: browser forces browser mode');
-  const browserCookie = await (browserClient as any)._getSessionCookie();
+  assertEqual((browserClient.driver as any).isBrowserRuntime(), true, 'runtime: browser forces browser mode');
+  const browserCookie = await (browserClient.driver as any).sessionCookie();
   assertEqual(browserCookie, '', 'browser runtime accepts missing Set-Cookie');
 
   const websocketClient = new HedgeDocClient({
@@ -219,7 +219,7 @@ async function testRuntimeOverrideAndRequestTransport() {
     socketTransports: ['websocket'],
   });
   assertEqual(
-    (websocketClient as any)._socketTransports.join(','),
+    (websocketClient.driver as any).socketTransports.join(','),
     'websocket',
     'client stores custom Socket.IO transports'
   );
@@ -233,7 +233,7 @@ async function testRuntimeOverrideAndRequestTransport() {
 
   let threw = false;
   try {
-    await (nodeNoCookieClient as any)._getSessionCookie();
+    await (nodeNoCookieClient.driver as any).sessionCookie();
   } catch {
     threw = true;
   }
@@ -250,7 +250,7 @@ async function testRuntimeOverrideAndRequestTransport() {
       },
     }),
   });
-  const expiresCookie = await (expiresCookieClient as any)._getSessionCookie();
+  const expiresCookie = await (expiresCookieClient.driver as any).sessionCookie();
   assertEqual(
     expiresCookie,
     'connect.sid=s%3Aexpires-session; lang=en-US',
@@ -431,8 +431,8 @@ async function testObsidianEntrypointParity() {
     }),
   });
 
-  assertEqual((obsidianClient as any)._isBrowserRuntime(), false, 'obsidian HedgeDocClient accepts runtime override');
-  const cookie = await (obsidianClient as any)._getSessionCookie();
+  assertEqual((obsidianClient.driver as any).isBrowserRuntime(), false, 'obsidian HedgeDocClient accepts runtime override');
+  const cookie = await (obsidianClient.driver as any).sessionCookie();
   assertEqual(cookie, 'connect.sid=s%3Aobsidian-session', 'obsidian HedgeDocClient accepts custom request transport');
 
   const obsidianApi = new ObsidianAPI({

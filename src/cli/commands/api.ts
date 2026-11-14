@@ -2,6 +2,7 @@
  * Commands that use HedgeDoc's HTTP API (no realtime connection).
  */
 
+import { detectServer } from '../../server-detect.js';
 import { buildNoteUrl } from '../../url.js';
 import { readFile, readStdin, type Command } from '../context.js';
 import { helpText } from '../help-text.js';
@@ -181,9 +182,17 @@ export const status: Command = {
   help: helpText.status,
   async run(ctx) {
     const serverUrl = ctx.server(0, 'hedgesync status <server-url>');
+    const server = await detectServer({ serverUrl, headers: ctx.headers() });
+    if (server.protocol === 'hedgedoc2') {
+      ctx.result({ action: 'status', server }, () => {
+        print(`  ${c('cyan', 'Server:'.padEnd(28))} HedgeDoc ${server.version ?? '2'} (not supported by hedgesync yet)`);
+      });
+      return;
+    }
     const s = await ctx.api(serverUrl).getStatus();
-    ctx.result({ action: 'status', status: s }, () => {
+    ctx.result({ action: 'status', server, status: s }, () => {
       const rows: [string, unknown][] = [
+        ['Server', server.protocol ? `HedgeDoc ${server.version ?? '1.x'}` : 'unknown'],
         ['Online users', s.onlineUsers],
         ['Online notes', s.onlineNotes],
         ['Distinct online users', s.distinctOnlineUsers],

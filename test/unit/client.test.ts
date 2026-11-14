@@ -329,3 +329,34 @@ describe('connect', () => {
     expect(a.canEdit()).toBe(true);
   });
 });
+
+describe('drivers', () => {
+  test('protocol hedgedoc2 is refused clearly; a custom driver can be plugged in', () => {
+    expect(() => new HedgeDocClient({ serverUrl: 'http://x', noteId: 'n', protocol: 'hedgedoc2' })).toThrow('not supported yet');
+    const client = new HedgeDocClient({
+      serverUrl: 'http://x',
+      noteId: 'n',
+      driver: (host) => ({
+        protocol: 'hedgedoc2', connected: true, ready: true, revision: 0,
+        noteInfo: { title: '', permission: 'freely', owner: null, authors: {}, createtime: null, updatetime: null },
+        users: new Map(),
+        reconnectPolicy: undefined as any,
+        connect: async () => host.loadDocument('hello'),
+        disconnect: () => {},
+        submit: (op) => sent.push(op.toJSON()),
+        isSynchronized: () => true,
+        syncState: () => 'synced',
+        permissionError: () => null,
+        refresh: () => {}, requestOnlineUsers: () => {}, requestVersion: () => {},
+      }),
+    });
+    const sent: unknown[] = [];
+    return client.connect().then(() => {
+      client.insert(5, ' world');
+      expect(client.getDocument()).toBe('hello world');
+      expect(sent).toEqual([[5, ' world']]);
+      expect(client.protocol).toBe('hedgedoc2');
+      expect(client.socket).toBeNull();
+    });
+  });
+});

@@ -1,63 +1,59 @@
-import { io } from 'socket.io-client';
-import type { ManagerOptions, SocketOptions } from 'socket.io-client';
-import { TextOperation, OperationJSON } from './text-operation.js';
-import { OTClient, OTDesyncError, ReconnectOutcome } from './ot-client.js';
+import { TextOperation } from './text-operation.js';
+import type { ReconnectOutcome } from './ot-client.js';
 import { diffToOperation } from './diff.js';
 import { expandReplacement } from './replace.js';
 import { normalizeCookie } from './cookie.js';
 import { SimpleEventEmitter } from './simple-event-emitter.js';
+import { HedgeSyncRuntime, HedgeSyncRequestFn, defaultHedgeSyncRequest } from './http.js';
 import {
-  HedgeSyncRuntime,
-  HedgeSyncRequestFn,
-  defaultHedgeSyncRequest,
-  getHeader,
-} from './http.js';
+  HedgeDoc1Driver,
+  createHedgeDoc1Driver,
+  type SocketFactory,
+  type SocketLike,
+  type SocketTransport,
+} from './drivers/hedgedoc1.js';
+import type { ReconnectConfig } from './drivers/reconnect.js';
+import {
+  HedgeDocError,
+  type AuthorProfile,
+  type ChangeOrigin,
+  type DriverHost,
+  type NoteDriver,
+  type NoteDriverFactory,
+  type NoteInfo,
+  type NoteProtocol,
+  type UserInfo,
+} from './drivers/types.js';
+
+export { HedgeDocError };
+export type { AuthorProfile, NoteInfo, UserInfo, ReconnectConfig, SocketTransport, SocketLike, SocketFactory };
+export type { SocketFactoryOptions } from './drivers/hedgedoc1.js';
 
 // ===========================================
 // Types
 // ===========================================
-
-/** Reconnection configuration */
-export interface ReconnectConfig {
-  enabled?: boolean;
-  maxAttempts?: number;
-  initialDelay?: number;
-  maxDelay?: number;
-  backoffFactor?: number;
-}
-
-/** Socket.IO transport modes. */
-export type SocketTransport = 'polling' | 'websocket';
-
-/** The subset of a Socket.IO client socket that HedgeDocClient uses. */
-export interface SocketLike {
-  id?: string;
-  on(event: string, listener: (...args: any[]) => void): unknown;
-  emit(event: string, ...args: any[]): unknown;
-  disconnect(): unknown;
-  removeAllListeners(): unknown;
-}
-
-/** Options passed to a socket factory. */
-export type SocketFactoryOptions = Partial<ManagerOptions & SocketOptions>;
-
-/** Creates the realtime socket. Defaults to socket.io-client's `io`. */
-export type SocketFactory = (url: string, options: SocketFactoryOptions) => SocketLike;
 
 /** Client options */
 export interface HedgeDocClientOptions {
   serverUrl: string;
   noteId: string;
   cookie?: string | null;
+  /**
+   * Server protocol (default "hedgedoc1"). HedgeDoc 2 is not supported yet;
+   * use detectServer() to find out what a server speaks.
+   */
+  protocol?: NoteProtocol;
+  /** Custom driver (overrides `protocol`); mainly for tests and experiments. */
+  driver?: NoteDriverFactory;
   /** Force runtime mode instead of auto-detection (default: "auto"). */
   runtime?: HedgeSyncRuntime;
   /** Custom HTTP transport for bootstrap requests. Falls back to fetch. */
   request?: HedgeSyncRequestFn;
   /** Custom headers to include in all requests (for reverse proxy authentication, etc.) */
   headers?: Record<string, string>;
-  /** Socket.IO transports to use. Defaults to polling with websocket upgrade, or websocket-only in Bun. */
+  /** HedgeDoc 1: Socket.IO transports. Defaults to polling with websocket upgrade, or websocket-only in Bun. */
   socketTransports?: SocketTransport[];
-  /** Custom socket factory (mainly for tests). */
+  /** HedgeDoc 1: custom socket factory (mainly for tests). */
   socketFactory?: SocketFactory;
   /** How long connect() waits for the document (ms, default 15000). */
   connectTimeout?: number;
@@ -68,41 +64,6 @@ export interface HedgeDocClientOptions {
   trackUndo?: boolean;
   /** Local edits closer together than this are undone as one step (ms, default 500). */
   undoGroupInterval?: number;
-}
-
-/** Author profile */
-export interface AuthorProfile {
-  name?: string;
-  color?: string;
-  photo?: string | null;
-}
-
-/** Note metadata */
-export interface NoteInfo {
-  title: string;
-  permission: string;
-  owner: string | null;
-  ownerprofile?: AuthorProfile | null;
-  lastchangeuser?: string | null;
-  lastchangeuserprofile?: AuthorProfile | null;
-  authors: Record<string, AuthorProfile>;
-  authorship?: Array<[string | null, number, number, number | null, number | null]>;
-  createtime: number | null;
-  updatetime: number | null;
-  docmaxlength?: number | null;
-}
-
-/** User info */
-export interface UserInfo {
-  /** Socket id of the connection. */
-  id: string;
-  /** Account id for signed-in users. */
-  userid?: string | null;
-  login?: boolean;
-  name?: string;
-  color?: string;
-  photo?: string;
-  cursor?: unknown;
 }
 
 /** Authorship span */
@@ -146,69 +107,7 @@ export interface ChangeEvent {
 /** Emitted as 'resync' whenever a fresh document from the server replaced or rebased local state. */
 export type ResyncEvent = ReconnectOutcome;
 
-/** Doc event data */
-interface DocData {
-  str?: string;
-  revision?: number;
-  clients?: Record<string, UserInfo>;
-  force?: boolean;
-}
-
-/** Refresh event data */
-interface RefreshData {
-  title?: string;
-  permission?: string;
-  owner?: string | null;
-  ownerprofile?: AuthorProfile | null;
-  lastchangeuser?: string | null;
-  lastchangeuserprofile?: AuthorProfile | null;
-  authors?: Record<string, AuthorProfile>;
-  authorship?: Array<[string | null, number, number, number | null, number | null]>;
-  createtime?: number | null;
-  updatetime?: number | null;
-  docmaxlength?: number | null;
-}
-
-/** Info event data */
-interface InfoData {
-  code?: number;
-  message?: string;
-}
-
 type ReplacementFn = (match: string, ...args: any[]) => string;
-
-// ===========================================
-// Error Types
-// ===========================================
-
-export class HedgeDocError extends Error {
-  code?: number;
-
-  constructor(message: string, code?: number) {
-    super(message);
-    this.code = code;
-    this.name = 'HedgeDocError';
-  }
-}
-
-function splitSetCookieHeader(headerValue: string): string[] {
-  if (!headerValue) {
-    return [];
-  }
-
-  if (headerValue.includes('\n')) {
-    return headerValue
-      .split('\n')
-      .map(cookie => cookie.trim())
-      .filter(Boolean);
-  }
-
-  // Split combined Set-Cookie headers while preserving Expires dates.
-  return headerValue
-    .split(/,(?=\s*[^;,\s]+=[^;]+)/g)
-    .map(cookie => cookie.trim())
-    .filter(Boolean);
-}
 
 /** Clone a regex with the global flag, so callers' lastIndex is never touched. */
 function toGlobalRegex(pattern: RegExp | string): RegExp {
@@ -216,17 +115,24 @@ function toGlobalRegex(pattern: RegExp | string): RegExp {
   return new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
 }
 
+function createDriver(protocol: NoteProtocol): NoteDriverFactory {
+  if (protocol === 'hedgedoc1') return createHedgeDoc1Driver as NoteDriverFactory;
+  if (protocol === 'hedgedoc2') {
+    throw new HedgeDocError('HedgeDoc 2 servers are not supported yet (only HedgeDoc 1.x)', 501);
+  }
+  throw new Error(`Unknown protocol: ${String(protocol)}`);
+}
+
 // ===========================================
 // HedgeDocClient Class
 // ===========================================
 
 /**
- * HedgeDocClient - Connect to a HedgeDoc 1.x server and edit a note in real time.
+ * HedgeDocClient - edit a HedgeDoc note in real time.
  *
- * Edits are applied locally right away and sent through an OT client that
- * keeps at most one operation in flight (later edits are composed into a
- * buffer). Use `flush()` to wait until the server has acknowledged every
- * local edit.
+ * Edits are applied to `document` right away and handed to a protocol driver
+ * (HedgeDoc 1.x: Socket.IO + OT, see drivers/hedgedoc1.ts) that sends them to
+ * the server. Use `flush()` to wait until the server has every local edit.
  *
  * Events:
  * - `ready` ({document, revision}) after each (re)load of the document
@@ -239,39 +145,16 @@ function toGlobalRegex(pattern: RegExp | string): RegExp {
  *   `connect`, `disconnect`, `error`, `info`, `delete`, `version`,
  *   `reconnect:scheduled|attempting|success|error|failed`, `undo`, `redo`
  */
-export class HedgeDocClient extends SimpleEventEmitter {
+export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
   serverUrl: string;
   noteId: string;
   cookie: string | null;
   customHeaders: Record<string, string>;
-  socket: SocketLike | null;
   document: string;
-  connected: boolean;
-  ready: boolean;
-  otClient: OTClientImpl | null;
-  noteInfo: NoteInfo;
-  users: Map<string, UserInfo>;
+  /** The protocol driver this client talks through. */
+  readonly driver: NoteDriver;
 
-  private _sessionCookie: string | null;
-  private _isLoggedIn: boolean;
-  private _runtime: HedgeSyncRuntime;
-  private _request: HedgeSyncRequestFn;
-  private _socketTransports: SocketTransport[] | null;
-  private _socketFactory: SocketFactory;
-  private _connectTimeoutMs: number;
   private _operationTimeoutMs: number;
-
-  /** Client id of the remote operation currently being applied, if known. */
-  _remoteOrigin: string | null;
-
-  // Reconnection
-  private _reconnect: Required<ReconnectConfig>;
-  private _reconnectAttempts: number;
-  private _reconnectTimer: ReturnType<typeof setTimeout> | null;
-  private _intentionalDisconnect: boolean;
-  private _everReady: boolean;
-  /** Set after an unexpected OT failure: local OT state cannot be trusted. */
-  private _discardPendingOnNextDoc: boolean;
 
   // Batch
   private _batch: { op: TextOperation } | null;
@@ -295,54 +178,17 @@ export class HedgeDocClient extends SimpleEventEmitter {
     if (!options.noteId) {
       throw new Error('noteId is required');
     }
+    const runtime = options.runtime ?? 'auto';
+    if (!['auto', 'node', 'browser'].includes(runtime)) {
+      throw new Error(`Invalid runtime mode: ${String(runtime)}`);
+    }
 
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
     this.noteId = options.noteId;
     this.cookie = options.cookie ? normalizeCookie(options.cookie) : null;
-    this._runtime = options.runtime ?? 'auto';
-    this._request = options.request || defaultHedgeSyncRequest;
-    this._socketTransports = options.socketTransports ? [...options.socketTransports] : null;
-    this._socketFactory = options.socketFactory ?? ((url, opts) => io(url, opts) as unknown as SocketLike);
-    this._connectTimeoutMs = options.connectTimeout ?? 15000;
-    this._operationTimeoutMs = options.operationTimeout ?? 10000;
     this.customHeaders = options.headers || {};
-
-    if (!['auto', 'node', 'browser'].includes(this._runtime)) {
-      throw new Error(`Invalid runtime mode: ${String(this._runtime)}`);
-    }
-
-    this.socket = null;
+    this._operationTimeoutMs = options.operationTimeout ?? 10000;
     this.document = '';
-    this.connected = false;
-    this.ready = false;
-    this.otClient = null;
-
-    this.noteInfo = {
-      title: '',
-      permission: '',
-      owner: null,
-      authors: {},
-      createtime: null,
-      updatetime: null
-    };
-
-    this.users = new Map();
-    this._sessionCookie = null;
-    this._isLoggedIn = !!this.cookie;
-    this._remoteOrigin = null;
-
-    this._reconnect = {
-      enabled: options.reconnect?.enabled ?? true,
-      maxAttempts: options.reconnect?.maxAttempts ?? 10,
-      initialDelay: options.reconnect?.initialDelay ?? 1000,
-      maxDelay: options.reconnect?.maxDelay ?? 30000,
-      backoffFactor: options.reconnect?.backoffFactor ?? 2
-    };
-    this._reconnectAttempts = 0;
-    this._reconnectTimer = null;
-    this._intentionalDisconnect = false;
-    this._everReady = false;
-    this._discardPendingOnNextDoc = false;
 
     this._batch = null;
 
@@ -354,72 +200,76 @@ export class HedgeDocClient extends SimpleEventEmitter {
     this._lastUndoTimestamp = 0;
     this._undoMayCompose = false;
     this._applyingUndo = false;
+
+    const factory = options.driver ?? createDriver(options.protocol ?? 'hedgedoc1');
+    this.driver = factory(this, {
+      ...options,
+      serverUrl: this.serverUrl,
+      cookie: this.cookie,
+      runtime,
+      request: options.request || defaultHedgeSyncRequest,
+      headers: this.customHeaders,
+      connectTimeout: options.connectTimeout ?? 15000,
+    });
   }
 
-  /** Current server revision known to this client. */
+  // ============================================
+  // Driver state
+  // ============================================
+
+  /** Server protocol of the driver. */
+  get protocol(): NoteProtocol {
+    return this.driver.protocol;
+  }
+
+  /** Current server revision known to this client (0 for revisionless protocols). */
   get revision(): number {
-    return this.otClient?.revision ?? 0;
+    return this.driver.revision;
+  }
+
+  get connected(): boolean {
+    return this.driver.connected;
+  }
+
+  get ready(): boolean {
+    return this.driver.ready;
+  }
+
+  get noteInfo(): NoteInfo {
+    return this.driver.noteInfo;
+  }
+
+  get users(): Map<string, UserInfo> {
+    return this.driver.users;
+  }
+
+  /** HedgeDoc 1 only: the Socket.IO socket. */
+  get socket(): SocketLike | null {
+    return this.driver instanceof HedgeDoc1Driver ? this.driver.socket : null;
+  }
+
+  /** HedgeDoc 1 only: the OT state machine. */
+  get otClient(): HedgeDoc1Driver['otClient'] {
+    return this.driver instanceof HedgeDoc1Driver ? this.driver.otClient : null;
   }
 
   // ============================================
   // Permissions
   // ============================================
 
-  /** Account id of this connection, once the server has told us. */
-  private _selfUserId(): string | null {
-    const id = this.socket?.id;
-    if (!id) return null;
-    return this.users.get(id)?.userid ?? null;
-  }
-
   /**
    * Whether this session may edit the note, as far as the client can tell.
-   * For owner-only notes this is only certain once the online-user list has
-   * told us our own account id; until then signed-in users get the benefit
-   * of the doubt and `flush()` reports a silent server-side rejection.
+   * Servers may still reject edits silently; `flush()` reports that.
    */
   canEdit(): boolean {
-    switch (this.noteInfo.permission) {
-      case 'freely':
-        return true;
-      case 'editable':
-      case 'limited':
-        return this._isLoggedIn;
-      case 'locked':
-      case 'private':
-      case 'protected': {
-        if (!this._isLoggedIn) return false;
-        const self = this._selfUserId();
-        return !self || !this.noteInfo.owner || self === this.noteInfo.owner;
-      }
-      default:
-        return false;
-    }
-  }
-
-  private _getPermissionError(): string | null {
-    if (this.canEdit()) {
-      return null;
-    }
-    const permission = this.noteInfo.permission;
-    switch (permission) {
-      case 'editable':
-      case 'limited':
-        return `This note requires login to edit (permission: ${permission}). Please provide an authenticated session cookie.`;
-      case 'locked':
-      case 'private':
-      case 'protected':
-        return `This note can only be edited by its owner (permission: ${permission}).`;
-      default:
-        return `Cannot edit this note (permission: ${permission || 'unknown'}).`;
-    }
+    return this.driver.permissionError() === null;
   }
 
   private _assertEditable(): void {
-    if (!this.ready || !this.otClient) {
+    if (!this.driver.ready) {
       throw new Error('Client not ready. Wait for connection to complete.');
     }
-    const permError = this._getPermissionError();
+    const permError = this.driver.permissionError();
     if (permError) {
       throw new Error(permError);
     }
@@ -429,326 +279,17 @@ export class HedgeDocClient extends SimpleEventEmitter {
   // Connection
   // ============================================
 
-  private _isBrowserRuntime(): boolean {
-    if (this._runtime === 'browser') {
-      return true;
-    }
-    if (this._runtime === 'node') {
-      return false;
-    }
-    return typeof (globalThis as { window?: unknown }).window !== 'undefined';
-  }
-
-  private async _getSessionCookie(): Promise<string> {
-    if (this.cookie) {
-      this._sessionCookie = this.cookie;
-      this._isLoggedIn = true;
-      return this.cookie;
-    }
-
-    const response = await this._request({
-      url: `${this.serverUrl}/${this.noteId}`,
-      method: 'GET',
-      redirect: 'manual',
-      credentials: 'include',
-      headers: {
-        'Accept': 'text/html',
-        ...this.customHeaders,
-      },
-    });
-
-    const setCookie = getHeader(response.headers, 'set-cookie');
-    const cookies = setCookie ? splitSetCookieHeader(setCookie) : [];
-    const sessionCookies = cookies.map(cookie => cookie.split(';')[0]).filter(Boolean);
-
-    if (sessionCookies.length > 0) {
-      this._sessionCookie = sessionCookies.join('; ');
-      return this._sessionCookie;
-    }
-
-    // Browsers do not expose Set-Cookie to JavaScript, but the cookie jar can
-    // still be populated and sent by Socket.IO when withCredentials is enabled.
-    if (this._isBrowserRuntime()) {
-      this._sessionCookie = '';
-      return '';
-    }
-
-    throw new Error('Failed to obtain session cookie from server');
-  }
-
   /**
    * Connect to the server. Resolves once the document and note metadata
    * (including permissions) have loaded.
    */
   connect(): Promise<void> {
-    this._intentionalDisconnect = false;
-    this._reconnectAttempts = 0;
-    this._cancelReconnect();
-    return this._openSocket();
-  }
-
-  private _teardownSocket(): void {
-    const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    this.ready = false;
-    if (socket) {
-      socket.removeAllListeners();
-      socket.disconnect();
-    }
-  }
-
-  private async _openSocket(): Promise<void> {
-    const cookie = await this._getSessionCookie();
-    const isBrowser = this._isBrowserRuntime();
-    const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
-
-    // Socket.IO treats a URL path as a namespace, so connect to the origin and
-    // pass a subpath deployment's prefix through the `path` option instead.
-    let socketPath = '/socket.io/';
-    let socketUrl = this.serverUrl;
-    try {
-      const urlObj = new URL(this.serverUrl);
-      if (urlObj.pathname && urlObj.pathname !== '/') {
-        socketPath = urlObj.pathname.replace(/\/$/, '') + '/socket.io/';
-        socketUrl = urlObj.origin;
-      }
-    } catch {
-      // Keep defaults
-    }
-
-    const socketOptions: SocketFactoryOptions = {
-      path: socketPath,
-      query: { noteId: this.noteId },
-      // Bun has issues with XHR polling, so use websocket-only in Bun.
-      transports: this._socketTransports ?? (isBun ? ['websocket'] : ['polling', 'websocket']),
-      withCredentials: true,
-      reconnection: false,
-    };
-
-    if (!isBrowser) {
-      const extraHeaders: Record<string, string> = { ...this.customHeaders };
-      if (cookie) {
-        extraHeaders.Cookie = cookie;
-      }
-      socketOptions.extraHeaders = extraHeaders;
-    } else if (Object.keys(this.customHeaders).length > 0) {
-      console.warn('HedgeDocClient: custom socket headers are not supported in browser runtimes.');
-    }
-
-    this._teardownSocket();
-    const socket = this._socketFactory(socketUrl, socketOptions);
-    this.socket = socket;
-
-    return new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let refreshFallback: ReturnType<typeof setTimeout> | null = null;
-      const connectTimer = setTimeout(() => {
-        fail(new HedgeDocError(`Timed out after ${this._connectTimeoutMs}ms waiting for the document`, 408));
-      }, this._connectTimeoutMs);
-
-      const settle = () => {
-        settled = true;
-        clearTimeout(connectTimer);
-        if (refreshFallback) clearTimeout(refreshFallback);
-      };
-      const succeed = () => {
-        if (settled) return;
-        settle();
-        resolve();
-      };
-      const fail = (error: Error) => {
-        if (settled) return;
-        settle();
-        if (this.socket === socket) this._teardownSocket();
-        reject(error);
-      };
-
-      this._attachSocketHandlers(socket, {
-        onDocLoaded: () => {
-          // Permissions arrive with 'refresh'; give it a moment before resolving anyway.
-          refreshFallback = setTimeout(succeed, 3000);
-        },
-        onRefresh: succeed,
-        fail,
-      });
-    });
-  }
-
-  private _attachSocketHandlers(
-    socket: SocketLike,
-    lifecycle: { onDocLoaded: () => void; onRefresh: () => void; fail: (error: Error) => void },
-  ): void {
-    // Ignore events from sockets that have been replaced.
-    const on = (event: string, handler: (...args: any[]) => void) => {
-      socket.on(event, (...args: any[]) => {
-        if (this.socket === socket) handler(...args);
-      });
-    };
-    // OT messages are only meaningful after this socket delivered its document.
-    let docLoaded = false;
-    const onOT = (event: string, handler: (...args: any[]) => void) => {
-      on(event, (...args: any[]) => {
-        if (docLoaded) handler(...args);
-      });
-    };
-
-    on('connect', () => {
-      this.connected = true;
-      this._reconnectAttempts = 0;
-      this.emit('connect');
-    });
-
-    on('disconnect', (reason: string) => {
-      this.connected = false;
-      this.ready = false;
-      this.emit('disconnect', reason);
-      lifecycle.fail(new HedgeDocError(`Disconnected before the document loaded (${reason})`));
-      if (!this._intentionalDisconnect && this._reconnect.enabled && this._everReady) {
-        this._scheduleReconnect();
-      }
-    });
-
-    on('connect_error', (error: Error) => {
-      this.emit('error', error);
-      lifecycle.fail(error);
-    });
-
-    on('doc', (data: DocData) => {
-      docLoaded = true;
-      this._handleDoc(data);
-      socket.emit('refresh');
-      lifecycle.onDocLoaded();
-    });
-
-    on('info', (data: InfoData) => {
-      if (data.code === 403 || data.code === 404) {
-        const error = new HedgeDocError(data.code === 403 ? 'Access forbidden' : 'Note not found', data.code);
-        this.emit('error', error);
-        lifecycle.fail(error);
-      } else {
-        this.emit('info', data);
-      }
-    });
-
-    on('refresh', (data: RefreshData) => {
-      this._handleRefresh(data);
-      lifecycle.onRefresh();
-    });
-
-    onOT('ack', (revision: number) => this._handleAck(revision));
-
-    onOT('operation', (clientId: string, revision: number, operation: OperationJSON) => {
-      this._handleOperation(clientId, revision, operation);
-    });
-
-    onOT('operations', (head: number, operations: OperationJSON[]) => {
-      this._handleOperations(head, operations);
-    });
-
-    on('online users', (data: { users?: UserInfo[] }) => this._handleOnlineUsers(data));
-
-    on('user status', (user: UserInfo) => {
-      if (user && user.id) {
-        this.users.set(user.id, user);
-        this.emit('user:status', user);
-      }
-    });
-
-    on('cursor focus', (user: unknown) => this.emit('cursor:focus', user));
-    on('cursor activity', (user: unknown) => this.emit('cursor:activity', user));
-    on('cursor blur', (data: unknown) => this.emit('cursor:blur', data));
-
-    on('client_left', (clientId: string) => {
-      this.users.delete(clientId);
-      this.emit('user:left', clientId);
-    });
-
-    on('permission', (data: { permission: string }) => {
-      this.noteInfo.permission = data.permission;
-      this.emit('permission', data.permission);
-    });
-
-    on('delete', () => {
-      this.emit('delete');
-      this.disconnect();
-    });
-
-    on('version', (data: unknown) => this.emit('version', data));
-  }
-
-  private _scheduleReconnect(): void {
-    if (this._reconnectTimer) {
-      return;
-    }
-
-    if (this._reconnectAttempts >= this._reconnect.maxAttempts) {
-      this.emit('reconnect:failed', {
-        attempts: this._reconnectAttempts,
-        maxAttempts: this._reconnect.maxAttempts
-      });
-      return;
-    }
-
-    const delay = Math.min(
-      this._reconnect.initialDelay * Math.pow(this._reconnect.backoffFactor, this._reconnectAttempts),
-      this._reconnect.maxDelay
-    );
-
-    this._reconnectAttempts++;
-
-    this.emit('reconnect:scheduled', {
-      attempt: this._reconnectAttempts,
-      maxAttempts: this._reconnect.maxAttempts,
-      delay
-    });
-
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnectTimer = null;
-      this.emit('reconnect:attempting', {
-        attempt: this._reconnectAttempts,
-        maxAttempts: this._reconnect.maxAttempts
-      });
-      this._openSocket().then(
-        () => this.emit('reconnect:success', { attempts: this._reconnectAttempts }),
-        (error) => {
-          this.emit('reconnect:error', { error, attempt: this._reconnectAttempts });
-          if (this._reconnect.enabled && !this._intentionalDisconnect) {
-            this._scheduleReconnect();
-          }
-        },
-      );
-    }, delay);
-  }
-
-  private _cancelReconnect(): void {
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
-    }
-  }
-
-  /**
-   * Drop the socket and load a fresh document from the server. Pending local
-   * edits are re-sent or rebased unless `discardPending` is set.
-   */
-  _resync(discardPending: boolean): void {
-    if (discardPending) this._discardPendingOnNextDoc = true;
-    if (this._intentionalDisconnect) return;
-    this._teardownSocket();
-    this._openSocket().catch((error) => {
-      this.emit('reconnect:error', { error, attempt: this._reconnectAttempts });
-      if (this._reconnect.enabled && !this._intentionalDisconnect) {
-        this._scheduleReconnect();
-      }
-    });
+    return this.driver.connect();
   }
 
   /** Disconnect from the server. Unacknowledged edits are lost; call flush() first. */
   disconnect(intentional: boolean = true): void {
-    this._intentionalDisconnect = intentional;
-    this._cancelReconnect();
-    this._teardownSocket();
+    this.driver.disconnect(intentional);
   }
 
   /** Manually reconnect. Pending local edits are kept and re-sent. */
@@ -757,13 +298,13 @@ export class HedgeDocClient extends SimpleEventEmitter {
   }
 
   /**
-   * Wait until the server has acknowledged every local edit.
+   * Wait until the server has every local edit.
    *
    * HedgeDoc silently ignores edits from sessions without write access, so a
    * timeout here usually means the edit was rejected.
    */
   flush(timeoutMs: number = this._operationTimeoutMs): Promise<void> {
-    if (!this.otClient || this.otClient.isSynchronized()) {
+    if (this.driver.isSynchronized()) {
       return Promise.resolve();
     }
     return new Promise((resolve, reject) => {
@@ -774,7 +315,7 @@ export class HedgeDocClient extends SimpleEventEmitter {
       const timer = setTimeout(() => {
         cleanup();
         reject(new HedgeDocError(
-          `Edits were not acknowledged within ${timeoutMs}ms (state: ${this.otClient?.stateName ?? 'none'}). ` +
+          `Edits were not acknowledged within ${timeoutMs}ms (state: ${this.driver.syncState()}). ` +
           'The server may have rejected them; check that this session is allowed to edit the note.',
           408,
         ));
@@ -807,9 +348,9 @@ export class HedgeDocClient extends SimpleEventEmitter {
     return Array.from(this.users.values());
   }
 
-  /** True when the server has acknowledged every local edit. */
+  /** True when the server has every local edit. */
   isSynchronized(): boolean {
-    return this.otClient ? this.otClient.isSynchronized() : true;
+    return this.driver.isSynchronized();
   }
 
   getDocumentWithAuthorship(): DocumentWithAuthorship {
@@ -1129,21 +670,15 @@ export class HedgeDocClient extends SimpleEventEmitter {
   // ============================================
 
   refresh(): void {
-    if (this.socket && this.connected) {
-      this.socket.emit('refresh');
-    }
+    this.driver.refresh();
   }
 
   requestOnlineUsers(): void {
-    if (this.socket && this.connected) {
-      this.socket.emit('online users');
-    }
+    this.driver.requestOnlineUsers();
   }
 
   requestVersion(): void {
-    if (this.socket && this.connected) {
-      this.socket.emit('version');
-    }
+    this.driver.requestVersion();
   }
 
   // ============================================
@@ -1151,137 +686,26 @@ export class HedgeDocClient extends SimpleEventEmitter {
   // ============================================
 
   setReconnectEnabled(enabled: boolean): void {
-    this._reconnect.enabled = enabled;
-    if (!enabled) {
-      this._cancelReconnect();
-    }
+    this.driver.reconnectPolicy.setEnabled(enabled);
   }
 
   isReconnectEnabled(): boolean {
-    return this._reconnect.enabled;
+    return this.driver.reconnectPolicy.config.enabled;
   }
 
   configureReconnect(options: Partial<ReconnectConfig>): void {
-    if (options.maxAttempts !== undefined) {
-      this._reconnect.maxAttempts = options.maxAttempts;
-    }
-    if (options.initialDelay !== undefined) {
-      this._reconnect.initialDelay = options.initialDelay;
-    }
-    if (options.maxDelay !== undefined) {
-      this._reconnect.maxDelay = options.maxDelay;
-    }
-    if (options.backoffFactor !== undefined) {
-      this._reconnect.backoffFactor = options.backoffFactor;
-    }
+    this.driver.reconnectPolicy.configure(options);
   }
 
   getReconnectConfig(): Required<ReconnectConfig> & { attempts: number; scheduled: boolean } {
-    return {
-      ...this._reconnect,
-      attempts: this._reconnectAttempts,
-      scheduled: this._reconnectTimer !== null
-    };
+    return this.driver.reconnectPolicy.snapshot();
   }
 
   // ============================================
-  // Server message handling
+  // Document changes (local edits; DriverHost callbacks)
   // ============================================
 
-  private _handleDoc(data: DocData): void {
-    const str = data.str || '';
-    const revision = data.revision || 0;
-
-    if (data.clients) {
-      for (const [id, user] of Object.entries(data.clients)) {
-        this.users.set(id, { ...user, id });
-      }
-    }
-
-    if (!this.otClient) {
-      const old = this.document;
-      this.document = str;
-      this.otClient = new OTClientImpl(this, revision, str);
-      this.ready = true;
-      this._everReady = true;
-      if (old !== str) this.emit('document', this.document);
-    } else {
-      // Mark ready first so a resend can go out on this socket.
-      this.ready = true;
-      const outcome = this.otClient.serverReconnect(revision, str, !!data.force || this._discardPendingOnNextDoc);
-      this._discardPendingOnNextDoc = false;
-      this.emit('resync', outcome);
-    }
-
-    this.emit('ready', { document: this.document, revision: this.revision });
-  }
-
-  private _handleRefresh(data: RefreshData): void {
-    this.noteInfo = {
-      title: data.title || '',
-      permission: data.permission || '',
-      owner: data.owner || null,
-      ownerprofile: data.ownerprofile || null,
-      lastchangeuser: data.lastchangeuser || null,
-      lastchangeuserprofile: data.lastchangeuserprofile || null,
-      authors: data.authors || {},
-      authorship: data.authorship || [],
-      createtime: data.createtime || null,
-      updatetime: data.updatetime || null,
-      docmaxlength: data.docmaxlength || null
-    };
-    this.emit('refresh', this.noteInfo);
-  }
-
-  /** Run an OT step; on failure report it and reload from the server. */
-  private _otStep(details: Record<string, unknown>, step: () => void): void {
-    if (!this.otClient) return;
-    try {
-      step();
-    } catch (error) {
-      this.emit('ot-error', { ...details, error });
-      // A desync error is raised before any state changes, so pending edits
-      // are still valid and can be re-sent. Anything else means the local OT
-      // state is suspect.
-      this._resync(!(error instanceof OTDesyncError));
-    }
-  }
-
-  private _handleAck(revision: number): void {
-    this._otStep({ type: 'ack', revision }, () => this.otClient!.serverAck(revision));
-  }
-
-  private _handleOperation(clientId: string, revision: number, operation: OperationJSON): void {
-    this._otStep({ type: 'operation', clientId, revision, operation }, () => {
-      const op = TextOperation.fromJSON(operation);
-      this._remoteOrigin = clientId;
-      try {
-        this.otClient!.applyServer(revision, op);
-      } finally {
-        this._remoteOrigin = null;
-      }
-    });
-  }
-
-  private _handleOperations(head: number, operations: OperationJSON[]): void {
-    this._otStep({ type: 'operations', head }, () => this.otClient!.applyOperations(head, operations));
-  }
-
-  private _handleOnlineUsers(data: { users?: UserInfo[] }): void {
-    this.users.clear();
-    if (data.users) {
-      for (const user of data.users) {
-        this.users.set(user.id, user);
-      }
-    }
-    this.emit('users', this.getOnlineUsers());
-  }
-
-  // ============================================
-  // Local edit pipeline
-  // ============================================
-
-  /** Apply a local operation and hand it to the OT client. */
+  /** Apply a local operation and hand it to the driver. */
   private _submit(operation: TextOperation): void {
     if (this._batch) {
       this.document = operation.apply(this.document);
@@ -1294,18 +718,32 @@ export class HedgeDocClient extends SimpleEventEmitter {
     const oldDocument = this.document;
     this.document = operation.apply(oldDocument);
     this._recordUndo(operation, oldDocument);
-    this.otClient!.applyClient(operation);
+    this.driver.submit(operation);
     this.emit('document', this.document);
     this.emit('change', { type: 'local', operation } satisfies ChangeEvent);
   }
 
-  /** Called by the OT client when a remote change has been applied to `document`. */
-  _onRemoteChange(operation: TextOperation): void {
+  /** @internal DriverHost: first document of a session. */
+  loadDocument(text: string): void {
+    const old = this.document;
+    this.document = text;
+    if (old !== text) this.emit('document', this.document);
+  }
+
+  /** @internal DriverHost: a remote edit based on the current document. */
+  applyRemoteChange(operation: TextOperation, origin: ChangeOrigin = {}): void {
+    this.document = operation.apply(this.document);
     this._transformUndoStacks(operation);
-    const clientId = this._remoteOrigin ?? undefined;
-    const user = clientId ? this.users.get(clientId) : undefined;
     this.emit('document', this.document);
-    this.emit('change', { type: 'remote', operation, clientId, user } satisfies ChangeEvent);
+    this.emit('change', { type: 'remote', operation, clientId: origin.clientId, user: origin.user } satisfies ChangeEvent);
+  }
+
+  /** @internal DriverHost: the server replaced the document; history is dropped. */
+  replaceDocument(text: string): void {
+    const old = this.document;
+    this.clearHistory();
+    if (old === text) return;
+    this.applyRemoteChange(diffToOperation(old, text));
   }
 
   // ============================================
@@ -1397,51 +835,5 @@ export class HedgeDocClient extends SimpleEventEmitter {
 
   getRedoStackSize(): number {
     return this._redoStack.length;
-  }
-}
-
-// ===========================================
-// OTClientImpl - binds the OT state machine to the client and socket
-// ===========================================
-
-class OTClientImpl extends OTClient {
-  constructor(private readonly client: HedgeDocClient, revision: number, document: string) {
-    super(revision, document);
-  }
-
-  sendOperation(revision: number, operation: TextOperation): void {
-    // While disconnected the op stays outstanding and is re-sent on reconnect.
-    if (this.client.socket && this.client.ready) {
-      this.client.socket.emit('operation', revision, operation.toJSON(), null);
-    }
-  }
-
-  applyOperation(operation: TextOperation): void {
-    this.client.document = operation.apply(this.client.document);
-    this.client._onRemoteChange(operation);
-  }
-
-  resetDocument(document: string): void {
-    const old = this.client.document;
-    this.client.clearHistory();
-    if (old === document) return;
-    this.client.document = document;
-    this.client._onRemoteChange(diffToOperation(old, document));
-  }
-
-  getOperations(base: number, head: number): void {
-    // The server ignores requests with base 0 (`if (!base) return`), so
-    // recover through a fresh document instead.
-    if (base === 0) {
-      queueMicrotask(() => this.client._resync(false));
-      return;
-    }
-    if (this.client.socket && this.client.ready) {
-      this.client.socket.emit('get_operations', base, head);
-    }
-  }
-
-  onSynchronized(): void {
-    this.client.emit('synchronized');
   }
 }

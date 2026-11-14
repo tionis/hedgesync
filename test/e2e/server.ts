@@ -49,6 +49,9 @@ export async function startTestServer(initial: Record<string, string | { documen
       const loggedIn = (req.headers.cookie ?? '').includes('connect.sid=good');
       return send(200, JSON.stringify(loggedIn ? { status: 'ok', id: 'u1', name: 'Tester' } : { status: 'forbidden' }), 'application/json');
     }
+    if (url.pathname === '/config') {
+      return send(200, "window.domain = 'localhost'\nwindow.urlpath = ''\nwindow.version = '1.12.2'\nwindow.userToken = 'tok'\n", 'application/javascript');
+    }
     if (url.pathname === '/status') {
       return send(200, JSON.stringify({ onlineNotes: notes.size, onlineUsers: 0 }), 'application/json');
     }

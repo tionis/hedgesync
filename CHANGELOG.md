@@ -12,6 +12,17 @@
 - Library: `sessionFromBrowser`, `readBrowserCookies`, `BrowserCookieError`,
   `SUPPORTED_BROWSERS`.
 - Saved sessions record where they came from (`source`).
+- `detectServer()` tells HedgeDoc 1 and 2 apart; `hedgesync status` shows
+  the server version, and connecting to a HedgeDoc 2 server fails with a
+  clear "not supported yet" error instead of a timeout.
+
+### Changed
+
+- `HedgeDocClient` is split into a protocol-neutral client and a HedgeDoc 1
+  driver (`HedgeDoc1Driver`: Socket.IO, OT, permissions, reconnection) behind
+  a `NoteDriver` interface, ready for a HedgeDoc 2 (Yjs) driver. The public
+  API is unchanged; new options `protocol` and `driver`, new getter
+  `protocol`. Private members such as `_getSessionCookie` moved to the driver.
 
 ## 2.0.0
 

@@ -24,6 +24,21 @@ export type {
   ChangeEvent
 } from './hedgedoc-client.js';
 
+// Protocol drivers and server detection
+export { HedgeDoc1Driver, createHedgeDoc1Driver } from './drivers/hedgedoc1.js';
+export type { HedgeDoc1DriverOptions } from './drivers/hedgedoc1.js';
+export { ReconnectPolicy } from './drivers/reconnect.js';
+export type {
+  NoteDriver,
+  NoteDriverFactory,
+  NoteProtocol,
+  DriverHost,
+  DriverOptions,
+  ChangeOrigin
+} from './drivers/types.js';
+export { detectServer } from './server-detect.js';
+export type { ServerInfo, DetectServerOptions } from './server-detect.js';
+
 // Operational Transformation
 export { TextOperation } from './text-operation.js';
 export type {

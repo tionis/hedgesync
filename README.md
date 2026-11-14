@@ -1219,6 +1219,12 @@ Get the cookie with `hedgesync login <server> --from-browser <browser>`,
 
 ## How It Works
 
+`HedgeDocClient` owns the document text, the editing helpers, batching and
+undo/redo. Everything server-specific lives in a protocol driver
+(`src/drivers/`): transport, session bootstrap, synchronisation, note
+metadata and permissions. Edits cross between the two as `TextOperation`s.
+The HedgeDoc 1.x driver works like this:
+
 1. **Session Cookie**: The library first makes an HTTP request to get a session cookie (HedgeDoc requires this even for anonymous users).
 
 2. **Socket.IO**: Connects to HedgeDoc's real-time WebSocket endpoint using Socket.IO.
@@ -1234,7 +1240,11 @@ Get the cookie with `hedgesync login <server> --from-browser <browser>`,
 - **HedgeDoc**: Version 1.10.4 or later (uses OT-based real-time sync with Socket.IO v4)
 - **Runtime**: Node.js 18+, Bun, Deno (with import map), and Obsidian plugins via `hedgesync/obsidian`
 - **Node-only modules**: Auth helper flows, macro engine, and pandoc transformer are not part of the Obsidian entrypoint
-- **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (uses Y.js instead of OT)
+- **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (a plain
+  WebSocket with Y.js instead of Socket.IO with OT). `detectServer()` and
+  `hedgesync status` tell the two apart, and connecting to a HedgeDoc 2 server
+  fails with a clear message. The driver interface (`NoteDriver`, option
+  `driver`) is where a HedgeDoc 2 driver will plug in.
 
 ## License
 
