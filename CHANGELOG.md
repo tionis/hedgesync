@@ -26,7 +26,14 @@
   `HedgeDocAPI.uploadImage()`.
 - Library: `sessionFromBrowser`, `readBrowserCookies`, `BrowserCookieError`,
   `SUPPORTED_BROWSERS`.
-- Saved sessions record where they came from (`source`).
+- Saved sessions record where they came from (`source`) and when they were
+  last checked.
+- `hedgesync sessions` lists saved sessions; `sessions refresh` renews them
+  (HedgeDoc sessions are rolling) and re-imports expired browser sessions
+  when the browser is still logged in as the same account;
+  `sessions install-timer` sets up a daily systemd user timer for that.
+- `logout` only forgets a browser-imported session (it is shared with the
+  browser) unless `--end-session` is given.
 - `detectServer()` tells HedgeDoc 1 and 2 apart; `hedgesync status` shows
   the server version, and connecting to a HedgeDoc 2 server fails with a
   clear "not supported yet" error instead of a timeout.

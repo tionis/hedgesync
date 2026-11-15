@@ -237,8 +237,27 @@ the desktop keyring: install `secret-tool` (Debian/Ubuntu: `libsecret-tools`)
 for GNOME Keyring, or `kwallet-query` for KDE. On macOS the Keychain asks for
 permission. Chromium cookies on Windows are not supported.
 
-HedgeDoc sessions expire after two weeks without use (by default); run the
-same command again to refresh the saved cookie.
+HedgeDoc sessions expire after two weeks without use (by default), and any
+request renews them. The imported session is the browser's own session, so
+using either keeps both alive, and `hedgesync logout` only forgets the
+cookie unless you pass `--end-session` (which would log the browser out too).
+
+#### Keeping sessions alive
+
+```bash
+hedgesync sessions                  # saved sessions, their source and last check
+hedgesync sessions refresh          # renew them; re-import expired browser sessions
+hedgesync sessions install-timer    # do that daily (systemd user timer, Linux)
+```
+
+`refresh` calls `/me` for each saved session, which renews it. An expired
+session that came from a browser is imported again from the same browser,
+provided it is still logged in as the same account; password logins have to
+be repeated. It exits with status 1 when a session needs attention.
+`install-timer` writes `~/.config/systemd/user/hedgesync-refresh.{service,timer}`
+(daily, catching up after downtime) and enables it; logs are in
+`journalctl --user -u hedgesync-refresh`. On other systems, run
+`hedgesync sessions refresh -q` from cron or launchd.
 
 #### Email or LDAP login
 

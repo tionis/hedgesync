@@ -105,6 +105,8 @@ ${c('yellow', 'EXAMPLES:')}
         cookie: outcome.cookie,
         user: { id: outcome.user.id, name: outcome.user.name },
         source: { method: outcome.method, browser: outcome.browser, profile: outcome.profile },
+        checkedAt: new Date().toISOString(),
+        status: 'ok',
       });
     }
 
@@ -214,37 +216,54 @@ async function loginWithPassword(ctx: Context): Promise<LoginOutcome & { serverU
 export const logout: Command = {
   name: 'logout',
   summary: 'End and forget a saved session',
-  options: [],
+  options: [{ name: 'end-session', type: 'flag' }],
   help: () => `
 ${c('bold', 'hedgesync logout')} - End and forget a saved session
 
 ${c('yellow', 'USAGE:')}
-  hedgesync logout <server-url>
+  hedgesync logout <server-url> [--end-session]
 
 Ends the session on the server (GET /logout) and removes the cookie saved by
 ${c('cyan', 'hedgesync login --save')}. With --cookie or HEDGEDOC_COOKIE, ends that session
 instead (nothing is removed from disk).
+
+A session imported with ${c('cyan', '--from-browser')} is the browser's own session, so ending it
+would log the browser out too. For those, logout only forgets the cookie,
+unless --end-session is given.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '--end-session')}      Also end a browser-imported session on the server
 `,
   async run(ctx) {
     const serverUrl = ctx.server(0, 'hedgesync logout <server-url>');
     const explicit = ctx.str('cookie') || process.env.HEDGEDOC_COOKIE;
-    const cookie = explicit || getStoredSession(serverUrl)?.cookie;
+    const stored = explicit ? undefined : getStoredSession(serverUrl);
+    const cookie = explicit || stored?.cookie;
     if (!cookie) throw new CliError(`No saved session for ${serverUrl}`);
 
+    const sharedWithBrowser = stored?.source?.method === 'browser';
+    const endOnServer = !sharedWithBrowser || ctx.flag('end-session');
     let endedOnServer = false;
-    try {
-      const res = await defaultHedgeSyncRequest({
-        url: `${parseServerUrl(serverUrl)}/logout`,
-        headers: { ...ctx.headers(), Cookie: normalizeCookie(cookie) },
-        redirect: 'manual',
-      });
-      endedOnServer = res.status >= 200 && res.status < 400;
-    } catch {
-      endedOnServer = false;
+    if (endOnServer) {
+      try {
+        const res = await defaultHedgeSyncRequest({
+          url: `${parseServerUrl(serverUrl)}/logout`,
+          headers: { ...ctx.headers(), Cookie: normalizeCookie(cookie) },
+          redirect: 'manual',
+        });
+        endedOnServer = res.status >= 200 && res.status < 400;
+      } catch {
+        endedOnServer = false;
+      }
     }
     const removed = explicit ? false : removeStoredSession(serverUrl);
     ctx.result({ action: 'logout', serverUrl, endedOnServer, removed }, () => {
-      if (!endedOnServer) ctx.warn('Could not reach the server to end the session');
+      if (endOnServer && !endedOnServer) ctx.warn('Could not reach the server to end the session');
+      if (!endOnServer) {
+        ctx.info(c('green', '✓ Forgot the saved cookie'));
+        ctx.info(c('dim', `The session belongs to ${stored!.source!.browser}, which stays logged in. Use --end-session to log out there too.`));
+        return;
+      }
       ctx.info(c('green', removed ? '✓ Logged out and removed the saved cookie' : '✓ Logged out'));
     });
   },

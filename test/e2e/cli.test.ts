@@ -54,6 +54,21 @@ function newNote(document = '', permission = 'freely'): { id: string; url: strin
   return { id, url: `${server.url}/${id}` };
 }
 
+/** A fake HOME with one Firefox profile holding the given session cookie for the test server. */
+function browserHome(sid: string): string {
+  const home = mkdtempSync(join(tmp, 'home-'));
+  const root = join(home, '.mozilla', 'firefox');
+  mkdirSync(join(root, 'p1.default'), { recursive: true });
+  writeFileSync(join(root, 'profiles.ini'), '[Profile0]\nName=default\nIsRelative=1\nPath=p1.default\n');
+  const db = new Database(join(root, 'p1.default', 'cookies.sqlite'));
+  db.run(`CREATE TABLE moz_cookies (id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '', name TEXT,
+    value TEXT, host TEXT, path TEXT, isSecure INTEGER, lastAccessed INTEGER)`);
+  db.run("INSERT INTO moz_cookies (name, value, host, path, isSecure, lastAccessed) VALUES ('connect.sid', ?, ?, '/', 0, 1)",
+    [sid, new URL(server.url).hostname]);
+  db.close();
+  return home;
+}
+
 describe('reading', () => {
   test('get prints the document exactly (no added newline)', async () => {
     const { url } = newNote('line one\nline two');
@@ -248,20 +263,6 @@ describe('saved sessions', () => {
 });
 
 describe('login --from-browser', () => {
-  /** A fake HOME with one Firefox profile holding the given session cookie for the test server. */
-  function browserHome(sid: string): string {
-    const home = mkdtempSync(join(tmp, 'home-'));
-    const root = join(home, '.mozilla', 'firefox');
-    mkdirSync(join(root, 'p1.default'), { recursive: true });
-    writeFileSync(join(root, 'profiles.ini'), '[Profile0]\nName=default\nIsRelative=1\nPath=p1.default\n');
-    const db = new Database(join(root, 'p1.default', 'cookies.sqlite'));
-    db.run(`CREATE TABLE moz_cookies (id INTEGER PRIMARY KEY, originAttributes TEXT NOT NULL DEFAULT '', name TEXT,
-      value TEXT, host TEXT, path TEXT, isSecure INTEGER, lastAccessed INTEGER)`);
-    db.run("INSERT INTO moz_cookies (name, value, host, path, isSecure, lastAccessed) VALUES ('connect.sid', ?, ?, '/', 0, 1)",
-      [sid, new URL(server.url).hostname]);
-    db.close();
-    return home;
-  }
 
   test('imports and saves a logged-in browser session', async () => {
     const cookieFile = join(tmp, 'browser-cookies.json');
@@ -522,5 +523,99 @@ describe('sharing, settings, revisions, presence', () => {
     } finally {
       other.disconnect();
     }
+  });
+});
+
+describe('sessions', () => {
+  /** A cookie store with the given servers, in its own file. */
+  function store(servers: Record<string, object>): string {
+    const file = join(mkdtempSync(join(tmp, 'store-')), 'cookies.json');
+    writeFileSync(file, JSON.stringify({ version: 1, servers }));
+    return file;
+  }
+  const saved = (file: string) => JSON.parse(readFileSync(file, 'utf8')).servers;
+  const old = '2026-01-01T00:00:00.000Z';
+
+  test('refresh renews live sessions and re-imports expired browser sessions', async () => {
+    const file = store({
+      [server.url]: { cookie: 'connect.sid=expired', user: { id: 'u1', name: 'Tester' }, savedAt: old,
+        source: { method: 'browser', browser: 'firefox', profile: 'default' } },
+    });
+    const r = await cli(['sessions', 'refresh'], { env: { HOME: browserHome('good'), HEDGESYNC_COOKIE_FILE: file } });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain('had expired, re-imported from firefox');
+    const after = saved(file)[server.url];
+    expect(after).toMatchObject({ cookie: 'connect.sid=good', status: 'ok', source: { profile: 'default' } });
+    expect(after.savedAt).not.toBe(old);
+
+    const again = await cli(['sessions', 'refresh', '--json'], { env: { HEDGESYNC_COOKIE_FILE: file } });
+    expect(JSON.parse(again.stdout).results).toEqual([{ server: server.url, user: 'Tester', result: 'alive' }]);
+    expect(saved(file)[server.url].savedAt).toBe(after.savedAt); // a renewal is not a new cookie
+  });
+
+  test('refresh reports what needs attention, with exit status 1', async () => {
+    const file = store({
+      [server.url]: { cookie: 'connect.sid=expired', user: { id: 'u1', name: 'Tester' }, savedAt: old, source: { method: 'email' } },
+      'http://127.0.0.1:9': { cookie: 'connect.sid=x', savedAt: old, source: { method: 'ldap' } },
+    });
+    const r = await cli(['sessions', 'refresh', '-q'], { env: { HEDGESYNC_COOKIE_FILE: file } });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(`✗ ${server.url} (Tester): expired (log in again)`);
+    expect(r.stderr).toContain('! http://127.0.0.1:9: could not check');
+    expect(saved(file)[server.url].status).toBe('expired');
+    expect(saved(file)['http://127.0.0.1:9'].status).toBe('unreachable');
+
+    // A browser now logged in as somebody else is not silently swapped in.
+    const other = store({
+      [server.url]: { cookie: 'connect.sid=expired', user: { id: 'someone-else', name: 'Other' }, savedAt: old,
+        source: { method: 'browser', browser: 'firefox', profile: 'default' } },
+    });
+    const swapped = await cli(['sessions', 'refresh'], { env: { HOME: browserHome('good'), HEDGESYNC_COOKIE_FILE: other } });
+    expect(swapped.code).toBe(1);
+    expect(swapped.stderr).toContain('firefox is logged in as Tester, not Other');
+
+    const list = await cli(['sessions'], { env: { HEDGESYNC_COOKIE_FILE: file } });
+    expect(list.stdout).toContain(`${server.url}  expired`);
+    expect(list.stdout).toContain('source:  email login');
+    expect(list.stdout).toContain('Auto-refresh: off');
+  });
+
+  test('install-timer writes systemd user units and enables them', async () => {
+    const config = mkdtempSync(join(tmp, 'xdg-'));
+    const log = join(config, 'systemctl.log');
+    const fake = join(config, 'systemctl');
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> '${log}'\n`, { mode: 0o755 });
+    const env = { XDG_CONFIG_HOME: config, HEDGESYNC_SYSTEMCTL: fake, HEDGESYNC_COOKIE_FILE: join(config, 'my cookies.json') };
+
+    const r = await cli(['sessions', 'install-timer', '--exec', '/opt/hedge sync/bin'], { env });
+    expect(r.code).toBe(0);
+    const unit = join(config, 'systemd', 'user');
+    const service = readFileSync(join(unit, 'hedgesync-refresh.service'), 'utf8');
+    expect(service).toContain('ExecStart="/opt/hedge sync/bin" sessions refresh -q');
+    expect(service).toContain(`Environment="HEDGESYNC_COOKIE_FILE=${config}/my cookies.json"`);
+    const timer = readFileSync(join(unit, 'hedgesync-refresh.timer'), 'utf8');
+    expect(timer).toContain('OnCalendar=daily');
+    expect(timer).toContain('Persistent=true');
+    expect(readFileSync(log, 'utf8')).toBe('--user daemon-reload\n--user enable --now hedgesync-refresh.timer\n');
+
+    const removed = await cli(['sessions', 'uninstall-timer'], { env });
+    expect(removed.code).toBe(0);
+    expect(existsSync(join(unit, 'hedgesync-refresh.timer'))).toBe(false);
+    expect(readFileSync(log, 'utf8')).toContain('--user disable --now hedgesync-refresh.timer');
+  });
+
+  test('logout leaves a browser-imported session running unless --end-session', async () => {
+    const browserSession = { cookie: 'connect.sid=shared', savedAt: old, source: { method: 'browser', browser: 'brave', profile: 'Default' } };
+    const before = server.logouts.length;
+    const file = store({ [server.url]: browserSession });
+    const r = await cli(['logout', server.url], { env: { HEDGESYNC_COOKIE_FILE: file } });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain('brave, which stays logged in');
+    expect(server.logouts.length).toBe(before);
+    expect(saved(file)).toEqual({});
+
+    const file2 = store({ [server.url]: browserSession });
+    await cli(['logout', server.url, '--end-session'], { env: { HEDGESYNC_COOKIE_FILE: file2 } });
+    expect(server.logouts.slice(before)).toEqual(['connect.sid=shared']);
   });
 });

@@ -27,6 +27,8 @@ export interface TestServer {
   history: HistoryItem[];
   /** Bodies received by /uploadimage. */
   uploads: string[];
+  /** Cookies sent to /logout. */
+  logouts: string[];
   note(id: string): Note;
   close(): Promise<void>;
 }
@@ -38,6 +40,7 @@ export async function startTestServer(initial: Record<string, string | { documen
   const notes = new Map<string, Note>();
   const history: HistoryItem[] = [];
   const uploads: string[] = [];
+  const logouts: string[] = [];
   let created = 0;
   const note = (id: string): Note => {
     let n = notes.get(id);
@@ -84,6 +87,11 @@ export async function startTestServer(initial: Record<string, string | { documen
         return rev ? send(200, JSON.stringify({ content: rev.content, patch: [], authorship: [] }), 'application/json') : send(404, 'Not found');
       }
       return send(200, JSON.stringify({ revision: existing.revisions.map(r => ({ time: r.time, length: r.content.length })) }), 'application/json');
+    }
+    if (url.pathname === '/logout') {
+      logouts.push(req.headers.cookie ?? '');
+      res.writeHead(302, { location: '/' });
+      return res.end();
     }
     if (url.pathname === '/history' && req.method === 'GET') {
       if (!userOf(req.headers.cookie)) return send(403, 'Forbidden');
@@ -176,6 +184,7 @@ export async function startTestServer(initial: Record<string, string | { documen
     notes,
     history,
     uploads,
+    logouts,
     note,
     close: () => new Promise<void>((resolve) => {
       io.disconnectSockets(true);

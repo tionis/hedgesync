@@ -16,6 +16,12 @@ export interface StoredSession {
   /** Where the cookie came from, so `login --from-browser` can be repeated. */
   source?: { method: string; browser?: string; profile?: string };
   savedAt: string;
+  /** Last time `sessions refresh` (or login) asked the server about this session. */
+  checkedAt?: string;
+  /** Result of that check. */
+  status?: 'ok' | 'expired' | 'unreachable';
+  /** Error detail for status 'unreachable' or a failed re-import. */
+  error?: string;
 }
 
 interface StoreFile {
@@ -68,6 +74,28 @@ export function getStoredSession(serverUrl: string): StoredSession | undefined {
 export function storeSession(serverUrl: string, session: Omit<StoredSession, 'savedAt'>): void {
   const store = load();
   store.servers[serverKey(serverUrl)] = { ...session, savedAt: new Date().toISOString() };
+  save(store);
+}
+
+/** All saved sessions, keyed by server URL. */
+export function listStoredSessions(): [string, StoredSession][] {
+  return Object.entries(load().servers);
+}
+
+/**
+ * Merge `patch` into a saved session (keeping savedAt unless the cookie
+ * changes). Re-reads the file first, so a concurrent `login --save` for
+ * another server is not lost.
+ */
+export function updateStoredSession(serverUrl: string, patch: Partial<StoredSession>): void {
+  const store = load();
+  const key = serverKey(serverUrl);
+  const current = store.servers[key];
+  if (!current) return;
+  const savedAt = patch.cookie && patch.cookie !== current.cookie ? new Date().toISOString() : current.savedAt;
+  const next: StoredSession = { ...current, ...patch, savedAt };
+  if (next.status === 'ok') delete next.error;
+  store.servers[key] = next;
   save(store);
 }
 
