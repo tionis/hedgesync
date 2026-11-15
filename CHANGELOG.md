@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Neovim plugin (`editors/nvim`): live, keystroke-level editing of a note in
+  a Neovim buffer, with collaborators' cursors shown inline. `:Hedge open
+  <url>` or `:e hedgedoc://host/id`.
+- `hedgesync bridge <url>`: the process behind the plugin. Exchanges edits,
+  cursors and status with an editor as newline-delimited JSON on stdio and
+  does all transformation itself (an editor-side OT link on top of
+  HedgeDoc's), so editor plugins stay simple. Edits made while disconnected
+  are kept and sent on reconnect. `HEDGESYNC_BRIDGE_LOG=<file>` traces the
+  protocol. The sync core is `EditorBridge` in `src/editor-bridge.ts`.
+- `hedgesync editor nvim install | status | path | uninstall`: the Neovim
+  plugin ships inside the CLI and installs into Neovim's package directory,
+  so plugin and bridge always match. Local edits to an installed copy are
+  never overwritten without `--force`.
+- The editor protocol is versioned (`hedgesync bridge --info`); the plugin
+  refuses a bridge with another version and says which side to update.
+- `:checkhealth hedgesync`: Neovim version, CLI and protocol, how the plugin
+  was installed, saved logins, open notes.
+
 ## 2.2.0 (2026-11-15)
 
 ### Added

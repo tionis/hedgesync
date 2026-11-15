@@ -659,3 +659,39 @@ describe('terminal', () => {
     }
   });
 });
+
+describe('editor nvim', () => {
+  test('install, status, path, uninstall', async () => {
+    const dir = join(tmp, 'nvim-plugin');
+    let r = await cli(['editor', 'nvim', 'status', '--dir', dir, '--json']);
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.stdout)).toMatchObject({ state: 'missing' });
+
+    r = await cli(['editor', 'nvim', 'install', '--dir', dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain('installed');
+    expect(r.stderr).toContain(`{ dir = "${dir}", name = "hedgesync.nvim", lazy = false, opts = {} }`);
+    expect(existsSync(join(dir, 'lua/hedgesync/init.lua'))).toBe(true);
+
+    r = await cli(['editor', 'nvim', 'status', '--dir', dir, '--json']);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ state: 'current', protocol: 1 });
+
+    writeFileSync(join(dir, 'plugin/hedgesync.lua'), '-- edited');
+    r = await cli(['editor', 'nvim', 'install', '--dir', dir]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('local changes');
+    expect((await cli(['editor', 'nvim', 'install', '--dir', dir, '--force'])).code).toBe(0);
+
+    r = await cli(['editor', 'nvim', 'path'], { env: { XDG_DATA_HOME: '/data' } });
+    expect(r.stdout.trim()).toBe('/data/nvim/site/pack/hedgesync/start/hedgesync.nvim');
+
+    expect((await cli(['editor', 'nvim', 'uninstall', '--dir', dir])).code).toBe(0);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  test('bridge --info reports the protocol', async () => {
+    const r = await cli(['bridge', '--info']);
+    expect(JSON.parse(r.stdout)).toMatchObject({ protocol: 1 });
+  });
+});

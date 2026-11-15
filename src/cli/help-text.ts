@@ -648,4 +648,45 @@ ${c('yellow', 'EXAMPLES:')}
 `,
 
 
+  bridge: () => `
+${c('bold', 'hedgesync bridge')} - Live-edit a note from an editor plugin
+
+${c('yellow', 'USAGE:')}
+  hedgesync bridge <url> [options]
+
+${c('yellow', 'DESCRIPTION:')}
+  Connects to the note and exchanges edits, cursors and status with an editor
+  plugin as newline-delimited JSON on stdin/stdout, keystroke by keystroke.
+  Started by the Neovim plugin in editors/nvim; not meant to be run by hand.
+  Exits (after flushing edits) when stdin closes. Status goes to stderr.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '--no-reconnect')} Do not reconnect a dropped session
+  ${c('cyan', '--info')}         Print the protocol version as JSON and exit (no URL)
+`,
+  editor: () => `
+${c('bold', 'hedgesync editor')} - Install the editor plugin bundled with this binary
+
+${c('yellow', 'USAGE:')}
+  hedgesync editor nvim install    [--dir <path>] [--force]
+  hedgesync editor nvim status     [--dir <path>]
+  hedgesync editor nvim path       [--dir <path>]
+  hedgesync editor nvim uninstall  [--dir <path>] [--force]
+
+${c('yellow', 'DESCRIPTION:')}
+  The Neovim plugin for live editing (:Hedge open <url>) ships inside this
+  binary, so the installed copy always matches the bridge it talks to. Run
+  install again after updating hedgesync. By default it goes into Neovim's
+  package directory, stdpath("data")/site/pack/hedgesync/start/hedgesync.nvim
+  (respects NVIM_APPNAME and XDG_DATA_HOME). lazy.nvim does not load that
+  directory; install prints the spec to add.
+
+  status exits with 1 unless the installed copy matches this binary. Files
+  you edited are never overwritten or removed without --force.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '--dir <path>')}   Install somewhere else
+  ${c('cyan', '--force')}        Overwrite or remove local changes
+  ${c('cyan', '--json')}         Machine-readable output
+`,
 };

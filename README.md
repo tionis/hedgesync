@@ -68,6 +68,10 @@ npm install -g hedgesync
 # bun (global)
 bun install -g hedgesync
 
+# or a standalone binary from the releases page (no runtime needed)
+curl -fL https://github.com/tionis/hedgesync/releases/latest/download/hedgesync-linux-x64 \
+  -o ~/.local/bin/hedgesync && chmod +x ~/.local/bin/hedgesync
+
 # Then use directly:
 hedgesync get https://md.example.com/abc123
 ```
@@ -970,6 +974,25 @@ warning.
 
 The same is available as a library, `new NoteTerminal(client, options)`
 (Node/Bun), with `command`, `done` and `refused` events.
+
+### Editing from Neovim
+
+`editors/nvim` is a Neovim plugin for live, keystroke-level editing of notes
+with collaborators' cursors shown inline:
+
+```sh
+hedgesync editor nvim install    # the plugin ships inside the CLI
+```
+
+```vim
+:Hedge open https://md.example.com/abc123
+:checkhealth hedgesync
+```
+
+It runs `hedgesync bridge <url>`, which speaks newline-delimited JSON on
+stdin/stdout and does all the operational transformation, so other editors
+can reuse it. See [editors/nvim/README.md](editors/nvim/README.md) and
+`src/editor-bridge.ts` for the protocol.
 
 ### CLI Macro Command
 
