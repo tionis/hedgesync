@@ -167,6 +167,29 @@ describe('Chromium', () => {
     expect(asked).toEqual(['chrome']); // keyring consulted once, only for v11
   });
 
+  test('finds native and Flatpak Brave profiles, asking the keyring for "brave"', async () => {
+    const home = fakeHome();
+    chromeProfile(join(home, '.config', 'BraveSoftware', 'Brave-Browser'), 'Default', 24, [
+      { host: 'md.example.com', name: 'connect.sid', enc: encrypt('s%3Anative', 'brave-key', 1, 'v11', 'md.example.com') },
+    ]);
+    chromeProfile(join(home, '.var', 'app', 'com.brave.Browser', 'config', 'BraveSoftware', 'Brave-Browser'), 'Default', 24, [
+      { host: 'md.example.com', name: 'connect.sid', enc: encrypt('s%3Aflatpak', 'peanuts', 1, 'v10', 'md.example.com') },
+    ]);
+    const asked: string[] = [];
+    const options = {
+      serverUrl: 'https://md.example.com', home, platform: 'linux' as const, env: {},
+      keyringPassword: (b: string) => { asked.push(b); return 'brave-key'; },
+    };
+    const candidates = await readBrowserCookies('brave', options);
+    expect(candidates.map(c => [c.profile, c.header]).sort()).toEqual([
+      ['Default (flatpak)', 'connect.sid=s%3Aflatpak'],
+      ['Default', 'connect.sid=s%3Anative'],
+    ]);
+    expect(asked).toEqual(['brave']);
+    const flatpakOnly = await readBrowserCookies('brave', { ...options, profile: 'Default (flatpak)' });
+    expect(flatpakOnly.map(c => c.header)).toEqual(['connect.sid=s%3Aflatpak']);
+  });
+
   test('macOS uses the Keychain password with 1003 iterations', () => {
     const enc = encrypt('mac-value', 'keychain-pw', 1003, 'v10');
     expect(decryptChromiumValue(enc, { platform: 'darwin', password: () => 'keychain-pw', hostKey: 'x', dbVersion: 0 })).toBe('mac-value');

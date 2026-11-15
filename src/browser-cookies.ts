@@ -341,13 +341,33 @@ async function readFirefox(browser: FirefoxBrowser, target: URL, options: Browse
 // Chromium
 // ---------------------------------------------------------------------------
 
-const CHROMIUM_INFO: Record<ChromiumBrowser, { linux: string; mac: string; keyringApp: string; safeStorage: string }> = {
-  chrome: { linux: 'google-chrome', mac: 'Google/Chrome', keyringApp: 'chrome', safeStorage: 'Chrome Safe Storage' },
-  chromium: { linux: 'chromium', mac: 'Chromium', keyringApp: 'chromium', safeStorage: 'Chromium Safe Storage' },
-  brave: { linux: 'BraveSoftware/Brave-Browser', mac: 'BraveSoftware/Brave-Browser', keyringApp: 'brave', safeStorage: 'Brave Safe Storage' },
-  vivaldi: { linux: 'vivaldi', mac: 'Vivaldi', keyringApp: 'vivaldi', safeStorage: 'Vivaldi Safe Storage' },
-  edge: { linux: 'microsoft-edge', mac: 'Microsoft Edge', keyringApp: 'chromium', safeStorage: 'Microsoft Edge Safe Storage' },
+interface ChromiumInfo {
+  /** Directory under ~/.config on Linux. */
+  linux: string;
+  /** Directory under ~/Library/Application Support on macOS. */
+  mac: string;
+  keyringApp: string;
+  safeStorage: string;
+  flatpak?: string;
+  snap?: string;
+}
+
+const CHROMIUM_INFO: Record<ChromiumBrowser, ChromiumInfo> = {
+  chrome: { linux: 'google-chrome', mac: 'Google/Chrome', keyringApp: 'chrome', safeStorage: 'Chrome Safe Storage', flatpak: 'com.google.Chrome' },
+  chromium: { linux: 'chromium', mac: 'Chromium', keyringApp: 'chromium', safeStorage: 'Chromium Safe Storage', flatpak: 'org.chromium.Chromium', snap: 'chromium' },
+  brave: { linux: 'BraveSoftware/Brave-Browser', mac: 'BraveSoftware/Brave-Browser', keyringApp: 'brave', safeStorage: 'Brave Safe Storage', flatpak: 'com.brave.Browser', snap: 'brave' },
+  vivaldi: { linux: 'vivaldi', mac: 'Vivaldi', keyringApp: 'vivaldi', safeStorage: 'Vivaldi Safe Storage', flatpak: 'com.vivaldi.Vivaldi' },
+  edge: { linux: 'microsoft-edge', mac: 'Microsoft Edge', keyringApp: 'chromium', safeStorage: 'Microsoft Edge Safe Storage', flatpak: 'com.microsoft.Edge' },
 };
+
+/** Where a browser keeps its profiles: native, Flatpak and Snap installs on Linux. */
+function chromiumRoots(info: ChromiumInfo, home: string, platform: NodeJS.Platform, env: Record<string, string | undefined>): { root: string; label?: string }[] {
+  if (platform === 'darwin') return [{ root: join(home, 'Library', 'Application Support', info.mac) }];
+  const roots: { root: string; label?: string }[] = [{ root: join(env.XDG_CONFIG_HOME ?? join(home, '.config'), info.linux) }];
+  if (info.flatpak) roots.push({ root: join(home, '.var', 'app', info.flatpak, 'config', info.linux), label: 'flatpak' });
+  if (info.snap) roots.push({ root: join(home, 'snap', info.snap, 'current', '.config', info.linux), label: 'snap' });
+  return roots;
+}
 
 interface ChromiumProfile {
   /** Directory name: Default, Profile 1, ... */
@@ -364,33 +384,35 @@ function chromiumProfiles(browser: ChromiumBrowser, home: string, platform: Node
       'Use Firefox, or copy the connect.sid cookie from the browser\'s developer tools.');
   }
   const info = CHROMIUM_INFO[browser];
-  const root = platform === 'darwin'
-    ? join(home, 'Library', 'Application Support', info.mac)
-    : join(env.XDG_CONFIG_HOME ?? join(home, '.config'), info.linux);
+  const roots = chromiumRoots(info, home, platform, env);
   const profiles: ChromiumProfile[] = [];
-  if (existsSync(root)) {
+  for (const { root, label } of roots) {
+    if (!existsSync(root)) continue;
+    // Human-readable profile names from Local State, so --profile "Work" works.
+    let names: Record<string, { name?: string }> = {};
+    try {
+      names = JSON.parse(readFileSync(join(root, 'Local State'), 'utf8')).profile?.info_cache ?? {};
+    } catch {
+      // Missing or malformed Local State.
+    }
     for (const entry of readdirSync(root)) {
       if (entry !== 'Default' && !/^Profile \d+$/.test(entry)) continue;
       for (const rel of [join('Network', 'Cookies'), 'Cookies']) {
         const file = join(root, entry, rel);
         if (existsSync(file)) {
-          profiles.push({ name: entry, dir: join(root, entry), cookies: file });
+          const display = names[entry]?.name;
+          profiles.push({
+            name: entry,
+            display: label ? `${display ?? entry} (${label})` : display,
+            dir: join(root, entry),
+            cookies: file,
+          });
           break;
         }
       }
     }
   }
-  // Human-readable profile names from Local State, so --profile "Work" works.
-  const localState = join(root, 'Local State');
-  if (existsSync(localState)) {
-    try {
-      const info = JSON.parse(readFileSync(localState, 'utf8')).profile?.info_cache ?? {};
-      for (const p of profiles) p.display = info[p.name]?.name;
-    } catch {
-      // Ignore a malformed Local State.
-    }
-  }
-  return { root, profiles };
+  return { root: roots.map(r => r.root).join(', '), profiles };
 }
 
 /** Default keyring lookup: secret-tool, kwallet-query (Linux) or security (macOS). */
@@ -461,7 +483,7 @@ async function readChromium(browser: ChromiumBrowser, target: URL, options: Brow
   const { root, profiles: all } = chromiumProfiles(browser, home, platform, env);
   if (all.length === 0) throw new BrowserCookieError(`No ${browser} profile found`, `Looked in: ${root}`);
   const profiles = options.profile
-    ? all.filter(p => p.name === options.profile || p.display === options.profile || p.dir === options.profile)
+    ? all.filter(p => p.name === options.profile || p.display === options.profile || p.display?.replace(/ \((flatpak|snap)\)$/, '') === options.profile || p.dir === options.profile)
     : all;
   if (profiles.length === 0) {
     throw new BrowserCookieError(`No ${browser} profile '${options.profile}'`,

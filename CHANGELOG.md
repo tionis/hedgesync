@@ -8,7 +8,8 @@
   reuses a browser's HedgeDoc session, so servers that only offer OIDC,
   OAuth2, GitHub or SAML login work from the CLI. Firefox, LibreWolf and Zen
   (including containers) and Chrome, Chromium, Brave, Vivaldi and Edge on
-  Linux and macOS are supported; the session is verified against `/me`.
+  Linux and macOS are supported (native, Flatpak and Snap installs); the
+  session is verified against `/me`.
 - Library: `sessionFromBrowser`, `readBrowserCookies`, `BrowserCookieError`,
   `SUPPORTED_BROWSERS`.
 - Saved sessions record where they came from (`source`).

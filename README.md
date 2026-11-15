@@ -206,9 +206,11 @@ Supported: `firefox`, `librewolf`, `zen`, `chrome`, `chromium`, `brave`,
 `vivaldi`, `edge`. hedgesync reads a copy of the browser's cookie database
 (the browser may stay open), tries every profile and Firefox container,
 freshest first, unless `--profile` names one, and keeps the first cookie set
-that the server's `/me` accepts. Chromium-based browsers on Linux may need
-the desktop keyring (`secret-tool` or `kwallet-query`); on macOS the Keychain
-asks for permission. Chromium cookies on Windows are not supported.
+that the server's `/me` accepts. Native, Flatpak and Snap installs are
+searched. Chromium-based browsers on Linux usually keep their cookie key in
+the desktop keyring: install `secret-tool` (Debian/Ubuntu: `libsecret-tools`)
+for GNOME Keyring, or `kwallet-query` for KDE. On macOS the Keychain asks for
+permission. Chromium cookies on Windows are not supported.
 
 HedgeDoc sessions expire after two weeks without use (by default); run the
 same command again to refresh the saved cookie.
