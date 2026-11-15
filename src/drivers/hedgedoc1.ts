@@ -48,6 +48,9 @@ export type SocketFactoryOptions = Partial<ManagerOptions & SocketOptions>;
 /** Creates the realtime socket. Defaults to socket.io-client's `io`. */
 export type SocketFactory = (url: string, options: SocketFactoryOptions) => SocketLike;
 
+/** Permission values HedgeDoc 1 accepts (lib/permissions.js). */
+export const HEDGEDOC1_PERMISSIONS = ['freely', 'editable', 'limited', 'locked', 'protected', 'private'] as const;
+
 export interface HedgeDoc1DriverOptions extends DriverOptions {
   /** Socket.IO transports. Default: polling with websocket upgrade, websocket-only in Bun. */
   socketTransports?: SocketTransport[];
@@ -100,6 +103,9 @@ export class HedgeDoc1Driver implements NoteDriver {
   private discardPendingOnNextDoc = false;
   /** Client id of the remote operation being applied, if known. */
   remoteOrigin: string | null = null;
+  private readonly permissionWaiters = new Set<(permission: string) => void>();
+  private readonly deleteWaiters = new Set<() => void>();
+  private readonly usersWaiters = new Set<() => void>();
 
   constructor(readonly host: DriverHost, private readonly options: HedgeDoc1DriverOptions) {
     this.serverUrl = options.serverUrl.replace(/\/$/, '');
@@ -372,6 +378,7 @@ export class HedgeDoc1Driver implements NoteDriver {
       this.users.clear();
       for (const user of data.users ?? []) this.users.set(user.id, user);
       host.emit('users', Array.from(this.users.values()));
+      for (const waiter of [...this.usersWaiters]) waiter();
     });
 
     on('user status', (user: UserInfo) => {
@@ -393,9 +400,11 @@ export class HedgeDoc1Driver implements NoteDriver {
     on('permission', (data: { permission: string }) => {
       this.noteInfo.permission = data.permission;
       host.emit('permission', data.permission);
+      for (const waiter of [...this.permissionWaiters]) waiter(data.permission);
     });
 
     on('delete', () => {
+      for (const waiter of [...this.deleteWaiters]) waiter();
       host.emit('delete');
       this.disconnect(true);
     });
@@ -504,6 +513,79 @@ export class HedgeDoc1Driver implements NoteDriver {
 
   requestVersion(): void {
     this.emitIfConnected('version');
+  }
+
+  // ------------------------------------------------------------------
+  // Owner actions. HedgeDoc ignores them silently unless the session's
+  // account owns the note, so check what we can first and then wait for
+  // the server's broadcast as confirmation.
+  // ------------------------------------------------------------------
+
+  /**
+   * Our account id comes from the online-user list, which may not have
+   * arrived yet right after connect(); ask for it and wait briefly.
+   */
+  private async knownSelfUserId(timeoutMs = 2000): Promise<string | null> {
+    const self = this.selfUserId();
+    if (self || !this.socket) return self;
+    await this.awaitConfirmation(this.usersWaiters, () => this.selfUserId() !== null,
+      () => this.socket?.emit('online users'), timeoutMs, '').catch(() => undefined);
+    return this.selfUserId();
+  }
+
+  private async assertOwner(action: string): Promise<SocketLike> {
+    if (!this.socket || !this.ready) throw new HedgeDocError('Client not ready. Wait for connection to complete.');
+    if (!this.isLoggedIn) throw new HedgeDocError(`Only the note's owner can ${action}; log in first`, 401);
+    const owner = this.noteInfo.owner;
+    if (!owner) throw new HedgeDocError(`This note has no owner (it was created anonymously), so nobody can ${action}`, 403);
+    const self = await this.knownSelfUserId();
+    if (self && self !== owner) throw new HedgeDocError(`Only the note's owner can ${action}`, 403);
+    if (!this.socket) throw new HedgeDocError('Disconnected');
+    return this.socket;
+  }
+
+  async setPermission(permission: string, timeoutMs: number): Promise<void> {
+    if (!(HEDGEDOC1_PERMISSIONS as readonly string[]).includes(permission)) {
+      throw new HedgeDocError(`Invalid permission '${permission}' (one of: ${HEDGEDOC1_PERMISSIONS.join(', ')})`, 400);
+    }
+    const socket = await this.assertOwner('change its permission');
+    if (this.noteInfo.permission === permission) return;
+    await this.awaitConfirmation(this.permissionWaiters, (p: string) => p === permission, () => socket.emit('permission', permission),
+      timeoutMs, `The server did not confirm the permission change within ${timeoutMs}ms. ` +
+      (permission === 'freely' ? 'This server may not allow anonymous editing. ' : '') +
+      'Only the owner can change permissions.');
+  }
+
+  async deleteNote(timeoutMs: number): Promise<void> {
+    const socket = await this.assertOwner('delete it');
+    await this.awaitConfirmation(this.deleteWaiters, () => true, () => socket.emit('delete'),
+      timeoutMs, `The server did not confirm the deletion within ${timeoutMs}ms. Only the owner can delete a note.`);
+  }
+
+  private awaitConfirmation<T extends unknown[]>(
+    waiters: Set<(...args: T) => void>,
+    matches: (...args: T) => boolean,
+    send: () => void,
+    timeoutMs: number,
+    timeoutMessage: string,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const waiter = (...args: T) => {
+        if (!matches(...args)) return;
+        cleanup();
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new HedgeDocError(timeoutMessage, 408));
+      }, timeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
+        waiters.delete(waiter);
+      };
+      waiters.add(waiter);
+      send();
+    });
   }
 }
 

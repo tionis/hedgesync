@@ -682,6 +682,26 @@ export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
   }
 
   // ============================================
+  // Owner actions
+  // ============================================
+
+  /**
+   * Change who may view and edit the note (owner only). HedgeDoc 1 values:
+   * freely, editable, limited, locked, protected, private. Resolves once the
+   * server confirms; rejects if it does not (e.g. not the owner).
+   */
+  setPermission(permission: string, timeoutMs: number = this._operationTimeoutMs): Promise<void> {
+    if (!this.driver.setPermission) return Promise.reject(new HedgeDocError(`${this.protocol} does not support changing permissions`, 501));
+    return this.driver.setPermission(permission, timeoutMs);
+  }
+
+  /** Delete the note (owner only). The client is disconnected afterwards. */
+  deleteNote(timeoutMs: number = this._operationTimeoutMs): Promise<void> {
+    if (!this.driver.deleteNote) return Promise.reject(new HedgeDocError(`${this.protocol} does not support deleting notes`, 501));
+    return this.driver.deleteNote(timeoutMs);
+  }
+
+  // ============================================
   // Reconnection Control
   // ============================================
 

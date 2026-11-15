@@ -123,6 +123,11 @@ export interface NoteDriver {
   refresh(): void;
   requestOnlineUsers(): void;
   requestVersion(): void;
+
+  /** Owner action: change who may view and edit the note. Resolves once the server confirms. */
+  setPermission?(permission: string, timeoutMs: number): Promise<void>;
+  /** Owner action: delete the note. Resolves once the server confirms. */
+  deleteNote?(timeoutMs: number): Promise<void>;
 }
 
 /** Builds a driver for a client. */

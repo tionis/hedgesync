@@ -15,6 +15,8 @@ import { CliError, c, eprint, printJson } from './ui.js';
 
 export interface Command {
   name: string;
+  /** Alternative names (e.g. `ls` for `list`). */
+  aliases?: string[];
   /** One line for the command overview. */
   summary: string;
   /** Command-specific options (global options are added automatically). */

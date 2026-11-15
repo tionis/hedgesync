@@ -1,13 +1,16 @@
 /**
  * End-to-end tests: run the real CLI against a socket.io HedgeDoc stand-in.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HedgeDocClient } from '../../src/hedgedoc-client.js';
 import { startTestServer, type TestServer } from './server.js';
+
+// Each test spawns CLI processes; startup alone can take a second on a busy machine.
+setDefaultTimeout(30_000);
 
 const CLI = join(import.meta.dir, '../../bin/hedgesync.ts');
 const tmp = mkdtempSync(join(tmpdir(), 'hedgesync-e2e-'));
@@ -77,7 +80,7 @@ describe('reading', () => {
     const r = await cli(['info', url, '--json', '-q']);
     const info = JSON.parse(r.stdout);
     expect(info).toMatchObject({ success: true, permission: 'freely', length: 3, canEdit: true });
-    expect(info.onlineUsers.length).toBeGreaterThanOrEqual(1);
+    expect(info.onlineUsers).toEqual([]); // the CLI's own connection is not listed
   });
 
   test('line reads a line', async () => {
@@ -308,6 +311,216 @@ describe('server detection', () => {
       expect(r.stderr).toContain('runs HedgeDoc 2.0.0-alpha.3, which hedgesync does not support yet');
     } finally {
       hd2.stop(true);
+    }
+  });
+});
+
+describe('note collection commands', () => {
+  const auth = ['--cookie', 'connect.sid=good'];
+  const day = 86_400_000;
+
+  test('list shows history, pinned first, with filters', async () => {
+    server.history.splice(0, server.history.length,
+      { id: 'old', text: 'Old notes', time: Date.now() - 30 * day, tags: ['archive'], pinned: false },
+      { id: 'fav', text: 'Favourite', time: Date.now() - 10 * day, tags: ['project'], pinned: true },
+      { id: 'new', text: 'Fresh idea', time: Date.now() - 60_000, tags: ['project', 'idea'], pinned: false },
+    );
+    const all = await cli(['ls', server.url, '--json', ...auth]);
+    expect(all.code).toBe(0);
+    expect(JSON.parse(all.stdout).notes.map((n: { id: string }) => n.id)).toEqual(['fav', 'new', 'old']);
+    expect(JSON.parse(all.stdout).notes[0].url).toBe(`${server.url}/fav`);
+
+    const tagged = await cli(['list', server.url, '-t', 'project', '-t', 'idea', '-q', ...auth]);
+    expect(tagged.stdout).toBe(`${server.url}/new\n`);
+    const searched = await cli(['list', server.url, '-s', 'old', '-q', ...auth]);
+    expect(searched.stdout).toBe(`${server.url}/old\n`);
+
+    const human = await cli(['list', server.url, ...auth]);
+    expect(human.stdout).toContain('★ Favourite');
+    expect(human.stdout).toContain('1 minute ago');
+    expect(human.stdout).toContain('#project #idea');
+
+    const anon = await cli(['list', server.url]);
+    expect(anon.code).toBe(1);
+    expect(anon.stderr).toContain('needs a session cookie');
+  });
+
+  test('search finds lines in history notes', async () => {
+    Object.assign(server.note('s1'), { document: '# Plans\n- TODO buy milk\n- done' });
+    Object.assign(server.note('s2'), { document: '# Other\nnothing here' });
+    server.history.splice(0, server.history.length,
+      { id: 's1', text: 'Plans', time: Date.now(), tags: [], pinned: false },
+      { id: 's2', text: 'Other', time: Date.now() - day, tags: [], pinned: false },
+    );
+    const r = await cli(['search', server.url, 'todo', '-i', ...auth]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`Plans  ${server.url}/s1`);
+    expect(r.stdout).toContain('   2: - TODO buy milk');
+    expect(r.stdout).not.toContain('Other');
+
+    const files = await cli(['search', server.url, 'n.th', '-r', '-l', '-q', ...auth]);
+    expect(files.stdout).toBe(`${server.url}/s2\n`);
+    const none = await cli(['search', server.url, 'absent', ...auth]);
+    expect(none.code).toBe(1);
+    expect(none.stdout).toBe('');
+  });
+
+  test('permission shows and changes, only for the owner', async () => {
+    Object.assign(server.note('mine'), { document: 'x', permission: 'editable', owner: 'u1' });
+    Object.assign(server.note('theirs'), { document: 'x', permission: 'editable', owner: 'someone-else' });
+    Object.assign(server.note('orphan'), { document: 'x', permission: 'freely', owner: null });
+
+    const show = await cli(['permission', `${server.url}/mine`]);
+    expect(show.stdout).toContain('editable  anyone can view, signed-in users can edit');
+
+    const set = await cli(['permission', `${server.url}/mine`, 'locked', ...auth]);
+    expect(set.code).toBe(0);
+    expect(set.stderr).toContain('Permission changed from editable to locked');
+    expect(server.note('mine').permission).toBe('locked');
+
+    const theirs = await cli(['permission', `${server.url}/theirs`, 'private', ...auth]);
+    expect(theirs.code).toBe(1);
+    expect(theirs.stderr).toContain("Only the note's owner can change its permission");
+    expect(server.note('theirs').permission).toBe('editable');
+
+    const orphan = await cli(['permission', `${server.url}/orphan`, 'private', ...auth]);
+    expect(orphan.stderr).toContain('has no owner');
+    const bad = await cli(['permission', `${server.url}/mine`, 'public']);
+    expect(bad.stderr).toContain("Invalid permission 'public'");
+  });
+
+  test('delete needs confirmation and ownership', async () => {
+    Object.assign(server.note('doomed'), { document: 'bye', owner: 'u1' });
+    const noYes = await cli(['delete', `${server.url}/doomed`, ...auth]);
+    expect(noYes.code).toBe(1);
+    expect(noYes.stderr).toContain('Pass --yes');
+    expect(server.notes.has('doomed')).toBe(true);
+
+    const r = await cli(['delete', `${server.url}/doomed`, '--yes', '--json', ...auth]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ action: 'delete', noteId: 'doomed' });
+    expect(server.notes.has('doomed')).toBe(false);
+  });
+
+  test('create --permission sets the permission of the new note', async () => {
+    const r = await cli(['create', server.url, '-p', 'private', '--json', ...auth], { stdin: '# Secret' });
+    expect(r.code).toBe(0);
+    const { noteId, permission } = JSON.parse(r.stdout);
+    expect(permission).toBe('private');
+    expect(server.note(noteId)).toMatchObject({ document: '# Secret', owner: 'u1', permission: 'private' });
+
+    const anon = await cli(['create', server.url, '-p', 'private'], { stdin: 'x' });
+    expect(anon.stderr).toContain('needs a session cookie');
+  });
+
+  test('upload sends a multipart image and prints Markdown', async () => {
+    const png = join(tmp, 'my [pic].png');
+    writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const r = await cli(['upload', server.url, png]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/^!\[my pic\]\(http:\/\/img\.test\/upload_\d+\.png\)\n$/);
+    const body = server.uploads.at(-1)!;
+    expect(body).toContain('filename="my [pic].png"');
+    expect(body).toContain('Content-Type: image/png');
+    expect(body).toContain('\x89PNG');
+  });
+});
+
+describe('sharing, settings, revisions, presence', () => {
+  test('publish prints the server-assigned published and slide URLs', async () => {
+    const { id, url } = newNote('# Shared');
+    expect((await cli(['publish', url])).stdout).toBe(`${server.url}/s/short-${id}\n`);
+    expect((await cli(['links', url, '--slide'])).stdout).toBe(`${server.url}/p/short-${id}\n`);
+    const all = JSON.parse((await cli(['publish', url, '--json'])).stdout);
+    expect(all).toMatchObject({ edit: url, view: `${url}?view`, download: `${url}/download` });
+    const missing = await cli(['publish', `${server.url}/does-not-exist`]);
+    expect(missing.code).toBe(1);
+    expect(server.notes.has('does-not-exist')).toBe(false);
+  });
+
+  test('meta shows and edits front matter with minimal edits', async () => {
+    const { id, url } = newNote('---\ntitle: Plan\ntags: [work]\n---\n# Body\n');
+    const shown = await cli(['meta', url]);
+    expect(shown.stdout).toContain('title: Plan');
+    expect(shown.stdout).toContain('tags:  work');
+    expect((await cli(['meta', url, 'title'])).stdout).toBe('Plan\n');
+
+    await cli(['meta', url, '--add-tag', 'idea', '--remove-tag', 'work', '-q']);
+    await cli(['meta', url, 'type', 'slide', '-q']);
+    await cli(['meta', url, '--unset', 'title', '-q']);
+    expect(server.note(id).document).toBe('---\ntags: [idea]\ntype: slide\n---\n# Body\n');
+
+    const plain = newNote('# No settings\n');
+    await cli(['meta', plain.url, 'tags', 'a, b', '-q']);
+    expect(server.note(plain.id).document).toBe('---\ntags: [a, b]\n---\n# No settings\n');
+    expect((await cli(['meta', url, 'nope'])).stderr).toContain("No setting 'nope'");
+  });
+
+  test('revisions: list, show, diff and restore', async () => {
+    const { id, url } = newNote('one\nTWO\nthree\nfour');
+    server.note(id).revisions.push(
+      { time: 1_700_000_000_000, content: 'one\ntwo' },
+      { time: 1_700_000_100_000, content: 'one\ntwo\nthree' },
+    );
+    const listed = await cli(['revisions', url]);
+    expect(listed.stdout).toMatch(/~0 +1700000100000 .* 13 chars {2}\+6/);
+    expect(listed.stdout).toMatch(/~1 +1700000000000 .* 7 chars/);
+
+    expect((await cli(['revisions', url, '~1'])).stdout).toBe('one\ntwo');
+    expect((await cli(['revisions', url, '1700000100000'])).stdout).toBe('one\ntwo\nthree');
+
+    const diff = await cli(['revisions', url, '~0', '--diff']);
+    expect(diff.stdout).toContain('--- ~0');
+    expect(diff.stdout).toContain('+++ current');
+    expect(diff.stdout).toContain('-two\n+TWO\n three\n+four');
+    const between = await cli(['revisions', url, '~1', '~0', '--diff', '--json']);
+    expect(JSON.parse(between.stdout)).toMatchObject({ added: 1, removed: 0 });
+
+    const restored = await cli(['revisions', url, '~1', '--restore']);
+    expect(restored.code).toBe(0);
+    expect(restored.stderr).toContain('+1 -3 lines');
+    expect(server.note(id).document).toBe('one\ntwo');
+    expect((await cli(['revisions', url, '~9'])).stderr).toContain('No revision ~9');
+  });
+
+  test('users lists other connections, not our own, and --watch reports joins', async () => {
+    const { id, url } = newNote('x');
+    const alone = await cli(['users', url, '--json']);
+    expect(JSON.parse(alone.stdout).users).toEqual([]);
+
+    const other = new HedgeDocClient({ serverUrl: server.url, noteId: id, reconnect: { enabled: false } });
+    await other.connect();
+    try {
+      const r = await cli(['users', url, '--json']);
+      const list = JSON.parse(r.stdout).users;
+      expect(list.length).toBe(1);
+      expect(list[0].id).toBe(other.socket!.id);
+
+      const proc = Bun.spawn(['bun', CLI, 'users', url, '--watch', '--json'], {
+        stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+      });
+      const reader = proc.stdout.getReader();
+      let out = '';
+      const readUntil = async (needle: string) => {
+        while (!out.includes(needle)) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          out += new TextDecoder().decode(value);
+        }
+      };
+      await readUntil('"present"');
+      const third = new HedgeDocClient({ serverUrl: server.url, noteId: id, reconnect: { enabled: false } });
+      await third.connect();
+      await readUntil('"join"');
+      third.disconnect();
+      await readUntil('"leave"');
+      proc.kill('SIGINT');
+      await proc.exited;
+      const events = out.trim().split('\n').map(l => JSON.parse(l));
+      expect(events.map(e => e.type)).toEqual(['present', 'join', 'leave']);
+      expect(events[1].user.id).toBe(events[2].user.id);
+    } finally {
+      other.disconnect();
     }
   });
 });

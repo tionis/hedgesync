@@ -512,18 +512,6 @@ ${c('yellow', 'EXAMPLES:')}
   hedgesync info https://md.example.com/abc123 --json
 `,
 
-  users: () => `
-${c('bold', 'hedgesync users')} - List online users
-
-${c('yellow', 'USAGE:')}
-  hedgesync users <url> [options]
-
-${c('yellow', 'OPTIONS:')}
-  ${c('cyan', '--json')}         Output in JSON format
-
-${c('yellow', 'EXAMPLES:')}
-  hedgesync users https://md.example.com/abc123
-`,
 
   download: () => `
 ${c('bold', 'hedgesync download')} - Download note content via HTTP API
@@ -549,6 +537,10 @@ ${c('yellow', 'USAGE:')}
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-n, --name')}     Custom alias/name for the note (requires FreeURL mode)
   ${c('cyan', '-f, --file')}     Initial content from file
+  ${c('cyan', '-p, --permission')} <value>
+                 Set the permission right away (requires login; one of freely,
+                 editable, limited, locked, protected, private; see
+                 hedgesync permission --help)
   ${c('cyan', '-q, --quiet')}    Only output the new note ID
   ${c('cyan', '--json')}         Output result in JSON format
 
@@ -562,31 +554,11 @@ ${c('yellow', 'EXAMPLES:')}
   # Create note with initial content
   echo "# Hello World" | hedgesync create https://md.example.com
   hedgesync create https://md.example.com -f document.md
+
+  # Private note, only visible to you
+  hedgesync create https://md.example.com -f secret.md -p private
 `,
 
-  revisions: () => `
-${c('bold', 'hedgesync revisions')} - List or fetch note revisions
-
-${c('yellow', 'USAGE:')}
-  hedgesync revisions <url> [revision-id] [options]
-
-${c('yellow', 'ARGUMENTS:')}
-  ${c('cyan', '[revision-id]')}  Specific revision timestamp to fetch (optional)
-
-${c('yellow', 'OPTIONS:')}
-  ${c('cyan', '--json')}         Output in JSON format
-  ${c('cyan', '-o, --output')}   Write revision content to file
-
-${c('yellow', 'EXAMPLES:')}
-  # List all revisions
-  hedgesync revisions https://md.example.com/abc123
-
-  # Get a specific revision
-  hedgesync revisions https://md.example.com/abc123 1570921051959
-
-  # Save revision to file
-  hedgesync revisions https://md.example.com/abc123 1570921051959 -o old-version.md
-`,
 
   me: () => `
 ${c('bold', 'hedgesync me')} - Show current user profile

@@ -110,11 +110,8 @@ export const watch: Command = {
         outputEvent('user:left', { clientId });
       });
     
-      client.on('users', (users: Map<string, UserInfo>) => {
-        const userList = Array.from(users.entries()).map(([id, user]) => ({
-          clientId: id,
-          ...user
-        }));
+      client.on('users', (users: UserInfo[]) => {
+        const userList = users.map(user => ({ clientId: user.id, ...user }));
         outputEvent('users', { count: userList.length, users: userList });
       });
     
@@ -169,8 +166,7 @@ export const watch: Command = {
         }
       });
     
-      client.on('users', (users: Map<string, UserInfo>) => {
-        const userList = Array.from(users.values());
+      client.on('users', (userList: UserInfo[]) => {
         if (json || ndjson) {
           print(JSON.stringify({
             type: 'users',

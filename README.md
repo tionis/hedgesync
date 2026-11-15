@@ -121,7 +121,8 @@ hedgesync get https://md.example.com/abc123 > note.md     # exact content, no ad
 hedgesync get https://md.example.com/abc123 --authors      # coloured by author
 hedgesync line https://md.example.com/abc123 0             # one line (0-based)
 hedgesync info https://md.example.com/abc123               # metadata, permission, online users
-hedgesync users https://md.example.com/abc123
+hedgesync users https://md.example.com/abc123                # who else is in the note
+hedgesync users https://md.example.com/abc123 --watch        # report joins and leaves live
 hedgesync authors https://md.example.com/abc123 -v
 hedgesync watch https://md.example.com/abc123 --ndjson
 
@@ -150,13 +151,37 @@ hedgesync mirror https://md.example.com/source https://md.example.com/target
 hedgesync mirror https://md.example.com/a https://md.example.com/b --bidirectional
 hedgesync mirror https://md.example.com/src https://md.example.com/dst --demote
 
+# Settings (HedgeDoc keeps them in the note's YAML front matter)
+hedgesync meta https://md.example.com/abc123                    # title, tags, type, ...
+hedgesync meta https://md.example.com/abc123 tags work planning
+hedgesync meta https://md.example.com/abc123 --add-tag done --remove-tag todo
+hedgesync meta https://md.example.com/abc123 type slide
+
+# Owner actions
+hedgesync permission https://md.example.com/abc123              # show who can view/edit
+hedgesync permission https://md.example.com/abc123 private      # change it (owner only)
+hedgesync delete https://md.example.com/abc123                  # asks you to type the id
+
 # Run your own script with a connected client (see `hedgesync help exec`)
 hedgesync exec stamp.ts https://md.example.com/abc123 -- extra args
+
+# Your notes (HedgeDoc 1 can only list your history: notes you have opened)
+hedgesync ls https://md.example.com                         # pinned first, then most recent
+hedgesync ls https://md.example.com -t project -s plan -n 10
+hedgesync search https://md.example.com TODO -i             # grep through their text
+hedgesync search https://md.example.com 'v\d+\.\d+' -r -l
 
 # HTTP API (no realtime session)
 hedgesync download https://md.example.com/abc123
 hedgesync create https://md.example.com -f note.md -n my-alias
+hedgesync create https://md.example.com -f secret.md -p private
+hedgesync upload https://md.example.com diagram.png        # prints ![diagram](link)
+hedgesync publish https://md.example.com/abc123            # published URL (/s/...), --slide, --all
+
+# Revisions (~0 is the newest, ~1 the one before, or a timestamp from the list)
 hedgesync revisions https://md.example.com/abc123
+hedgesync revisions https://md.example.com/abc123 ~1 --diff         # what changed since
+hedgesync revisions https://md.example.com/abc123 ~3 --restore      # bring it back (as a new edit)
 hedgesync me https://md.example.com
 hedgesync history https://md.example.com --pinned
 hedgesync pin https://md.example.com/abc123

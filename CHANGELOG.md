@@ -10,6 +10,20 @@
   (including containers) and Chrome, Chromium, Brave, Vivaldi and Edge on
   Linux and macOS are supported (native, Flatpak and Snap installs); the
   session is verified against `/me`.
+- New commands: `list`/`ls` (your notes from history, with tag/title
+  filters), `search` (grep through the text of those notes), `permission`
+  (show or change, owner only), `delete` (owner only, with confirmation),
+  `upload` (images, printed as Markdown links); `create --permission`.
+- `publish` (alias `links`) prints a note's published, slide and other URLs;
+  `meta` shows and edits front matter settings (title, tags, type, ...) as
+  minimal edits; `revisions` gained `--diff`, `--restore`, `~N` references
+  and a change column; `users --watch` reports people joining and leaving;
+  `info` shows the view count and published URL.
+- Library: `HedgeDocAPI.getNoteLinks()`, `readFrontMatter`/`getMeta`/
+  `getTags`/`setMeta`, `diffLines`/`unifiedDiff`/`diffStat`.
+- Library: `HedgeDocClient.setPermission()` and `deleteNote()` wait for the
+  server's confirmation (HedgeDoc ignores non-owners silently);
+  `HedgeDocAPI.uploadImage()`.
 - Library: `sessionFromBrowser`, `readBrowserCookies`, `BrowserCookieError`,
   `SUPPORTED_BROWSERS`.
 - Saved sessions record where they came from (`source`).
@@ -18,6 +32,11 @@
   clear "not supported yet" error instead of a timeout.
 
 ### Fixed
+
+- `users` and `info` no longer count the CLI's own connection as an online
+  user; `watch` reported user lists keyed by array index.
+- `NoteMetadata` (from `/{note}/info`) now matches what HedgeDoc returns:
+  `title`, `description`, `viewcount`, `createtime`, `updatetime`.
 
 - Without a cookie, the client fetched the note page to get an anonymous
   session, which on servers with free URLs created the note if it did not

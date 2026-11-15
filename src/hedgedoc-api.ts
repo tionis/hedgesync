@@ -23,27 +23,44 @@ import { buildNoteUrl, parseNoteUrl } from './url.js';
 // Types
 // ===========================================
 
-/** Note information returned by /{note}/info */
+/**
+ * Note information returned by /{note}/info (HedgeDoc 1: lib/web/note/actions.js).
+ * Tags and permission are not part of it: tags live in the front matter
+ * (see frontmatter.ts), the permission comes with the realtime connection.
+ */
 export interface NoteMetadata {
-  id: string;
-  alias?: string;
+  /** Front matter title, or the title derived from the first heading. */
   title: string;
-  description: string;
-  tags: string[];
+  /** Front matter description, or one generated from the text. */
+  description: string | null;
   viewcount: number;
   createtime: string;
   updatetime: string;
-  permission: NotePermission;
 }
 
 /** Note permission levels */
-export type NotePermission = 
-  | 'freely'      // Anyone can edit
-  | 'editable'    // Logged-in users can edit
-  | 'limited'     // Logged-in users can edit (limited)
-  | 'locked'      // Only owner can edit
-  | 'private'     // Only owner can view/edit
-  | 'protected';  // Only owner can edit, others can view
+export type NotePermission =
+  | 'freely'      // Anyone can view and edit
+  | 'editable'    // Anyone can view, signed-in users can edit
+  | 'limited'     // Signed-in users can view and edit
+  | 'locked'      // Anyone can view, only the owner can edit
+  | 'protected'   // Signed-in users can view, only the owner can edit
+  | 'private';    // Only the owner can view and edit
+
+/** Shareable links of a note. */
+export interface NoteLinks {
+  /** Editor (the note URL). */
+  edit: string;
+  /** Read-only view in the app (?view) and split view (?both). */
+  view: string;
+  both: string;
+  /** Published page (/s/<alias or shortid>). */
+  publish: string;
+  /** Slide mode (/p/<alias or shortid>). */
+  slide: string;
+  /** Raw Markdown. */
+  download: string;
+}
 
 /** User profile from /me */
 export interface UserProfile {
@@ -251,6 +268,36 @@ export class HedgeDocAPI {
     return match ? decodeURIComponent(match[1]) : null;
   }
 
+  /**
+   * Upload an image (POST /uploadimage) and return its URL. HedgeDoc accepts
+   * jpeg, png, gif, svg and similar types; whether anonymous uploads are
+   * allowed depends on the server configuration.
+   */
+  async uploadImage(data: ArrayBuffer | Uint8Array, filename: string, contentType = guessImageType(filename)): Promise<string> {
+    const boundary = `----hedgesync${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    const safeName = filename.replace(/["\r\n\\]/g, '_');
+    const head = new TextEncoder().encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${safeName}"\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`,
+    );
+    const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const body = new Uint8Array(head.length + bytes.length + tail.length);
+    body.set(head, 0);
+    body.set(bytes, head.length);
+    body.set(tail, head.length + bytes.length);
+
+    const result = await this.request<{ link?: string } | string>('/uploadimage', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body: body.buffer,
+    });
+    const parsed = typeof result === 'string' ? safeJson(result) : result;
+    const link = (parsed as { link?: string } | null)?.link;
+    if (!link) throw new HedgeDocAPIError('Upload failed: the server did not return a link', 500);
+    return link;
+  }
+
   /** The session's delete token (from /config), required by history deletes. */
   private async getDeleteToken(): Promise<string> {
     if (this.deleteToken) return this.deleteToken;
@@ -376,9 +423,29 @@ export class HedgeDocAPI {
   }
   
   /**
-   * Get the publish URL for a note
-   * @param noteId Note ID or alias
-   * @returns The published note URL
+   * The note's shareable links. The publish and slide URLs use the note's
+   * short id, which only the server knows, so they are read from the
+   * redirects of /{note}/publish and /{note}/slide (which never create notes).
+   */
+  async getNoteLinks(noteId: string): Promise<NoteLinks> {
+    const edit = buildNoteUrl(this.serverUrl, noteId);
+    const resolve = async (action: string): Promise<string> => {
+      const result = await this.request<{ redirect?: string } | string>(`/${encodeURIComponent(noteId)}/${action}`);
+      const redirect = typeof result === 'object' ? result.redirect : undefined;
+      if (!redirect) throw new HedgeDocAPIError(`No ${action} link for ${noteId} (does the note exist?)`, 404);
+      return new URL(redirect, this.serverUrl + '/').toString();
+    };
+    const [publish, slide] = await Promise.all([resolve('publish'), resolve('slide')]);
+    // A missing note redirects /publish back to the editor (HedgeDoc's default action).
+    if (!/\/s\/[^/]+\/?$/.test(new URL(publish).pathname)) {
+      throw new HedgeDocAPIError(`Note not found: ${noteId}`, 404);
+    }
+    return { edit, view: `${edit}?view`, both: `${edit}?both`, publish, slide, download: `${edit}/download` };
+  }
+
+  /**
+   * The /{note}/publish URL, which redirects to the published page.
+   * See getNoteLinks() for the final URL.
    */
   getPublishUrl(noteId: string): string {
     return `${this.serverUrl}/${encodeURIComponent(noteId)}/publish`;
@@ -589,4 +656,21 @@ export function parseConfigScript(script: string): ServerConfig {
     userToken: '',
     ...config,
   } as ServerConfig;
+}
+
+const IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', jfif: 'image/jpeg', jpe: 'image/jpeg',
+  gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+};
+
+function guessImageType(filename: string): string {
+  return IMAGE_TYPES[filename.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream';
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }

@@ -3,6 +3,7 @@
  */
 
 import { detectServer } from '../../server-detect.js';
+import { HEDGEDOC1_PERMISSIONS } from '../../drivers/hedgedoc1.js';
 import { buildNoteUrl } from '../../url.js';
 import { readFile, readStdin, type Command } from '../context.js';
 import { helpText } from '../help-text.js';
@@ -30,7 +31,11 @@ export const download: Command = {
 export const create: Command = {
   name: 'create',
   summary: 'Create a new note',
-  options: [{ name: 'file', short: 'f', type: 'value' }, { name: 'name', short: 'n', type: 'value', aliases: ['alias'] }],
+  options: [
+    { name: 'file', short: 'f', type: 'value' },
+    { name: 'name', short: 'n', type: 'value', aliases: ['alias'] },
+    { name: 'permission', short: 'p', type: 'value' },
+  ],
   help: helpText.create,
   async run(ctx) {
     const serverUrl = ctx.server(0, 'hedgesync create <server-url> [-f file] [-n alias]');
@@ -38,42 +43,26 @@ export const create: Command = {
     const content = file ? readFile(file) : process.stdin.isTTY ? '' : await readStdin();
     const alias = ctx.str('name');
     const api = ctx.api(serverUrl);
+    const permission = ctx.str('permission')?.toLowerCase();
+    if (permission && !(HEDGEDOC1_PERMISSIONS as readonly string[]).includes(permission)) {
+      throw new CliError(`Invalid permission '${permission}'`, `One of: ${HEDGEDOC1_PERMISSIONS.join(', ')}`);
+    }
+    if (permission) ctx.requireCookie(serverUrl); // only an owned (signed-in) note can have its permission set
     const noteId = alias ? await api.createNoteWithAlias(alias, content) : await api.createNote(content || undefined);
     const url = buildNoteUrl(serverUrl, noteId);
-    ctx.result({ action: 'create', noteId, alias: alias ?? null, url }, () => print(ctx.quiet ? noteId : url));
-  },
-};
-
-export const revisions: Command = {
-  name: 'revisions',
-  summary: 'List or fetch note revisions',
-  options: [outputOption],
-  help: helpText.revisions,
-  async run(ctx) {
-    const { serverUrl, noteId } = ctx.note(0, 'hedgesync revisions <url> [revision-id]');
-    const api = ctx.api(serverUrl);
-    const revisionId = ctx.positional[1];
-
-    if (revisionId) {
-      const revision = await api.getRevision(noteId, revisionId);
-      if (ctx.writeOutputFile(revision.content)) {
-        ctx.result({ action: 'get-revision', noteId, revisionId, file: ctx.str('output'), length: revision.content.length });
-      } else {
-        ctx.result({ action: 'get-revision', noteId, revisionId, revision }, () => process.stdout.write(revision.content));
+    if (permission) {
+      try {
+        const client = await ctx.connectTo(serverUrl, noteId);
+        try {
+          await client.setPermission(permission);
+        } finally {
+          client.disconnect();
+        }
+      } catch (err) {
+        throw new CliError(`Created ${url}, but could not set its permission: ${(err as Error).message}`);
       }
-      return;
     }
-
-    const list = (await api.listRevisions(noteId)).revision;
-    ctx.result({ action: 'list-revisions', noteId, count: list.length, revisions: list }, () => {
-      print(`${c('bold', 'Revisions for note:')} ${noteId}`);
-      print();
-      for (const rev of list) {
-        print(`  ${c('cyan', String(rev.time))}  ${new Date(rev.time).toLocaleString()}${rev.length ? ` (${rev.length} chars)` : ''}`);
-      }
-      print();
-      print(`Total: ${list.length} revision(s)`);
-    });
+    ctx.result({ action: 'create', noteId, alias: alias ?? null, url, permission: permission ?? null }, () => print(ctx.quiet ? noteId : url));
   },
 };
 
@@ -208,4 +197,4 @@ export const status: Command = {
   },
 };
 
-export const apiCommands = [download, create, revisions, me, exportNotes, history, pin, unpin, historyDelete, status];
+export const apiCommands = [download, create, me, exportNotes, history, pin, unpin, historyDelete, status];

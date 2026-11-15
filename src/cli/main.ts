@@ -11,14 +11,22 @@ import { transform } from './commands/transform.js';
 import { macro } from './commands/macro.js';
 import { mirror } from './commands/mirror.js';
 import { exec } from './commands/exec.js';
-import { apiCommands } from './commands/api.js';
+import { create, download, exportNotes, history, historyDelete, me, pin, status, unpin } from './commands/api.js';
+import { revisions } from './commands/revisions.js';
+import { meta, publish } from './commands/settings.js';
 import { login, logout } from './commands/login.js';
+import { deleteNote, list, permission, search, upload } from './commands/notes.js';
 import { CliError, c, eprint, print, printJson, setColor } from './ui.js';
 import { VERSION } from '../version.js';
 
-const realtimeCommands: Command[] = [...documentCommands, watch, info, users, authors, transform, macro, mirror, exec];
-const httpCommands: Command[] = [...apiCommands, login, logout];
-const commands = new Map<string, Command>([...realtimeCommands, ...httpCommands].map(cmd => [cmd.name, cmd]));
+const realtimeCommands: Command[] = [
+  ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec,
+];
+const httpCommands: Command[] = [
+  list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout,
+];
+const commands = new Map<string, Command>([...realtimeCommands, ...httpCommands]
+  .flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])].map(name => [name, cmd] as const)));
 
 function overview(): string {
   const row = (cmd: Command) => `  ${c('green', cmd.name.padEnd(15))} ${cmd.summary}`;

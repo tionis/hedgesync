@@ -52,6 +52,10 @@ export type {
 export { OTClient, OTDesyncError } from './ot-client.js';
 export type { Transformable, ReconnectOutcome } from './ot-client.js';
 export { diffToOperation } from './diff.js';
+export { diffLines, unifiedDiff, diffStat, hunks } from './line-diff.js';
+export type { DiffLine, Hunk } from './line-diff.js';
+export { readFrontMatter, getMeta, getTags, setMeta } from './frontmatter.js';
+export type { MetaEntry, MetaValue } from './frontmatter.js';
 export { VERSION } from './version.js';
 
 // HTTP API client
@@ -61,6 +65,7 @@ export type {
   CreatedNoteRef,
   NoteMetadata,
   NotePermission,
+  NoteLinks,
   UserProfile,
   HistoryEntry,
   RevisionInfo,

@@ -45,6 +45,7 @@ export type {
   CreatedNoteRef,
   NoteMetadata,
   NotePermission,
+  NoteLinks,
   UserProfile,
   HistoryEntry,
   RevisionInfo,

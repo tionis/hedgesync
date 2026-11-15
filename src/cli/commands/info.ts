@@ -5,9 +5,10 @@
 import type { HedgeDocClient, UserInfo } from '../../hedgedoc-client.js';
 import { connectionOptions, type Command } from '../context.js';
 import { helpText } from '../help-text.js';
-import { c, print } from '../ui.js';
+import { c, print, printJsonLine } from '../ui.js';
 
 /** Ask for the online user list and wait for the answer (or give up after `ms`). */
+/** Online users other than this CLI's own connection, after asking the server for a fresh list. */
 async function fetchOnlineUsers(client: HedgeDocClient, ms = 2000): Promise<UserInfo[]> {
   await new Promise<void>((resolve) => {
     const timer = setTimeout(done, ms);
@@ -19,8 +20,16 @@ async function fetchOnlineUsers(client: HedgeDocClient, ms = 2000): Promise<User
     client.on('users', done);
     client.requestOnlineUsers();
   });
-  return client.getOnlineUsers();
+  return othersOnline(client);
 }
+
+function othersOnline(client: HedgeDocClient): UserInfo[] {
+  const self = client.socket?.id;
+  return client.getOnlineUsers().filter(u => u.id !== self);
+}
+
+const signedIn = (u: UserInfo) => !!(u.login || u.userid);
+const describeUser = (u: UserInfo) => `${u.name || 'Guest'}${signedIn(u) ? '' : c('dim', ' (guest)')}`;
 
 export const info: Command = {
   name: 'info',
@@ -30,11 +39,20 @@ export const info: Command = {
   async run(ctx) {
     await ctx.withClient({}, async (client) => {
       const users = await fetchOnlineUsers(client);
+      // View count and published URL come from HTTP; leave them out if that fails.
+      const api = ctx.api(client.serverUrl);
+      const [details, links] = await Promise.all([
+        api.getNoteInfo(client.noteId).catch(() => null),
+        api.getNoteLinks(client.noteId).catch(() => null),
+      ]);
       const note = client.getNoteInfo();
       const revision = client.getRevision();
       const length = client.getDocument().length;
       const lines = client.getLineCount();
-      ctx.result({ action: 'info', ...note, revision, length, lines, canEdit: client.canEdit(), onlineUsers: users }, () => {
+      ctx.result({
+        action: 'info', ...note, revision, length, lines, canEdit: client.canEdit(), onlineUsers: users,
+        viewcount: details?.viewcount ?? null, description: details?.description ?? null, links,
+      }, () => {
         const date = (t: unknown) => (t ? new Date(t as string).toLocaleString() : 'unknown');
         print(`${c('bold', 'Title:')} ${note.title || '(untitled)'}`);
         print(`${c('bold', 'Permission:')} ${note.permission}${client.canEdit() ? '' : c('dim', ' (read-only for you)')}`);
@@ -43,8 +61,10 @@ export const info: Command = {
         print(`${c('bold', 'Updated:')} ${date(note.updatetime)}`);
         print(`${c('bold', 'Revision:')} ${revision}`);
         print(`${c('bold', 'Length:')} ${length} characters, ${lines} lines`);
+        if (details) print(`${c('bold', 'Views:')} ${details.viewcount}`);
+        if (links) print(`${c('bold', 'Published:')} ${links.publish}`);
         print(`${c('bold', 'Online:')} ${users.length === 0 ? c('dim', '(nobody else)') : users.length}`);
-        for (const user of users) print(`  ● ${user.name || user.id}`);
+        for (const user of users) print(`  ● ${describeUser(user)}`);
       });
     });
   },
@@ -52,19 +72,65 @@ export const info: Command = {
 
 export const users: Command = {
   name: 'users',
-  summary: 'List online users',
-  options: [...connectionOptions],
-  help: helpText.users,
+  summary: 'List who else is in the note (or --watch them come and go)',
+  options: [...connectionOptions, { name: 'watch', short: 'w', type: 'flag' }],
+  help: () => `
+${c('bold', 'hedgesync users')} - List who else has the note open
+
+${c('yellow', 'USAGE:')}
+  hedgesync users <url> [--watch]
+
+Lists the other connections to the note (this command's own connection is
+left out). Guests are anonymous visitors. The same account can appear more
+than once, once per open tab.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-w, --watch')}    Keep running and report people joining and leaving (Ctrl+C to stop)
+  ${c('cyan', '--json')}         JSON (with --watch: one JSON object per line)
+`,
   async run(ctx) {
-    const list = await ctx.withClient({}, client => fetchOnlineUsers(client));
-    ctx.result({ action: 'users', count: list.length, users: list }, () => {
-      if (list.length === 0) {
-        print(c('dim', 'No other users online'));
-        return;
-      }
-      print(c('bold', `Online users (${list.length}):`));
-      for (const user of list) print(`  - ${user.name || user.id}${user.color ? ` (${user.color})` : ''}`);
+    if (!ctx.flag('watch')) {
+      const list = await ctx.withClient({}, client => fetchOnlineUsers(client));
+      ctx.result({ action: 'users', count: list.length, users: list }, () => {
+        if (list.length === 0) {
+          print(c('dim', 'Nobody else is in this note'));
+          return;
+        }
+        for (const user of list) print(`  ● ${describeUser(user)}`);
+      });
+      return;
+    }
+
+    const client = await ctx.connect(0);
+    const known = new Map<string, UserInfo>();
+    const report = (type: 'join' | 'leave', user: UserInfo) => {
+      if (ctx.json) printJsonLine({ type, time: new Date().toISOString(), user });
+      else print(`${c('dim', new Date().toLocaleTimeString())} ${type === 'join' ? c('green', '→ joined') : c('red', '← left  ')} ${describeUser(user)}`);
+    };
+    const sync = () => {
+      const now = new Map(othersOnline(client).map(u => [u.id, u]));
+      for (const [id, user] of now) if (!known.has(id)) report('join', user);
+      for (const [id, user] of known) if (!now.has(id)) report('leave', user);
+      known.clear();
+      for (const [id, user] of now) known.set(id, user);
+    };
+    for (const user of await fetchOnlineUsers(client)) known.set(user.id, user);
+    if (!ctx.json) {
+      print(known.size ? c('bold', `In the note now (${known.size}):`) : c('dim', 'Nobody else is in the note yet'));
+      for (const user of known.values()) print(`  ● ${describeUser(user)}`);
+      ctx.info(c('dim', 'Watching for people joining and leaving (Ctrl+C to stop)...'));
+    } else {
+      for (const user of known.values()) printJsonLine({ type: 'present', time: new Date().toISOString(), user });
+    }
+    client.on('users', sync);
+    client.on('user:status', sync);
+    client.on('user:left', sync);
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', resolve);
+      process.once('SIGTERM', resolve);
+      client.on('delete', resolve);
     });
+    client.disconnect();
   },
 };
 
