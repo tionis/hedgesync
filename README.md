@@ -372,8 +372,12 @@ Both entrypoints (`hedgesync` and `hedgesync/obsidian`) support:
 - `runtime: 'auto' | 'node' | 'browser'` on `HedgeDocClient`
 - `request` transport injection on `HedgeDocClient` and `HedgeDocAPI`
 - `socketTransports` on `HedgeDocClient` for Socket.IO transport selection
+- `socketOptions` on `HedgeDocClient` for extra Socket.IO/engine.io settings (in Node, TLS options such as `ca`)
 
-This allows Obsidian plugins to use a custom HTTP layer (for example `requestUrl`) instead of direct `fetch`.
+This allows Obsidian plugins to use a custom HTTP layer instead of direct `fetch`.
+A custom `request` function must not follow redirects (`request.redirect` is
+`'manual'`): note creation reads the new note's id from the redirect. Obsidian's
+`requestUrl` always follows redirects, so it cannot create notes.
 Use `socketTransports: ['websocket']` in Obsidian or proxy environments where XHR polling is unavailable or unreliable.
 
 ### Authentication
@@ -497,6 +501,7 @@ const client = new HedgeDocClient({
     return defaultHedgeSyncRequest(req);
   },
   socketTransports: ['polling', 'websocket'],  // Optional: Socket.IO transports
+  socketOptions: { ca: myCaCertificates },     // Optional: extra Socket.IO options (Node: TLS settings)
   connectTimeout: 15000,                       // Optional: how long connect() waits for the document (ms)
   operationTimeout: 10000,                     // Optional: default flush() timeout (ms)
   

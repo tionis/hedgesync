@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Node runtimes with websocket-only transport sent no session cookie, so the
+  server answered "AUTH failed: No cookie transmitted". engine.io's cookie jar
+  replaced a `Cookie` header with its own empty `cookie`; the header key is
+  now lower-case.
+- `createNote()` returned the editor page's HTML as the note id when the HTTP
+  transport followed the redirect itself (for example Obsidian's `requestUrl`).
+  It now throws an error that explains the cause.
+- Connect errors explain the usual causes: a HedgeDoc 1.10.3 or older server
+  (Socket.IO 2, unsupported), a rejected session, or an untrusted TLS
+  certificate.
+
+### Added
+
+- `socketOptions` client option for extra Socket.IO/engine.io settings, such as
+  `ca` or `rejectUnauthorized` for servers behind a private certificate
+  authority.
+
 ## 2.0.0 (2026-11-15)
 
 A correctness and safety overhaul, plus browser login for OIDC servers, note

@@ -340,31 +340,31 @@ export class HedgeDocAPI {
    * @returns The new note's ID
    */
   async createNote(content?: string): Promise<string> {
-    if (content !== undefined) {
-      // POST with content
-      const result = await this.request<{ redirect: string } | string>('/new', {
+    const result = content !== undefined
+      ? await this.request<{ redirect: string } | string>('/new', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'text/markdown',
-        },
+        headers: { 'Content-Type': 'text/markdown' },
         body: content,
-      });
-      
-      // Extract note ID from redirect
-      if (typeof result === 'object' && 'redirect' in result) {
-        const noteId = this.extractNoteIdFromRedirect(result.redirect);
-        return noteId ?? result.redirect;
-      }
-      return String(result);
-    }
-    
-    // GET to create empty note
-    const result = await this.request<{ redirect: string }>('/new');
-    if (typeof result === 'object' && 'redirect' in result) {
+      })
+      : await this.request<{ redirect: string } | string>('/new');
+    return this.noteIdFromCreateResponse(result);
+  }
+
+  /**
+   * HedgeDoc answers note creation with a redirect to the new note. Anything
+   * else (typically the editor page, when the HTTP transport followed the
+   * redirect itself) does not tell us the note id.
+   */
+  private noteIdFromCreateResponse(result: { redirect: string } | string): string {
+    if (typeof result === 'object' && result && 'redirect' in result) {
       const noteId = this.extractNoteIdFromRedirect(result.redirect);
-      return noteId ?? result.redirect;
+      if (noteId) return noteId;
+      throw new HedgeDocAPIError(`Failed to create note: unexpected redirect to ${result.redirect}`);
     }
-    throw new HedgeDocAPIError('Failed to create note: no redirect received');
+    throw new HedgeDocAPIError(
+      'Failed to create note: the server did not answer with a redirect to the new note. '
+      + 'If you pass a custom request function, it must not follow redirects (request.redirect is "manual").',
+    );
   }
 
   /**

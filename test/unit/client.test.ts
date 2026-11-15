@@ -377,3 +377,60 @@ describe('anonymous session bootstrap', () => {
     expect(urls).toEqual(['https://md.example.com/hd/config']);
   });
 });
+
+describe('socket options', () => {
+  test('sends the cookie under a lower-case header key and passes extra socket options through', async () => {
+    const seen: any[] = [];
+    const client = new HedgeDocClient({
+      serverUrl: 'https://md.example.com',
+      noteId: 'n',
+      cookie: 's%3Abare',
+      runtime: 'node',
+      headers: { 'X-Proxy': '1', Cookie: 'lb=7' },
+      socketTransports: ['websocket'],
+      socketOptions: { ca: ['PEM'], rejectUnauthorized: true, path: '/ignored/' } as any,
+      socketFactory: (url, opts) => {
+        seen.push(opts);
+        throw new Error('stop');
+      },
+    });
+    await client.connect().catch(() => {});
+    const opts = seen[0];
+    expect(opts.extraHeaders).toEqual({ 'X-Proxy': '1', cookie: 'lb=7; connect.sid=s%3Abare' });
+    expect(opts.extraHeaders.Cookie).toBeUndefined();
+    expect(opts.ca).toEqual(['PEM']);
+    expect(opts.path).toBe('/socket.io/');
+    expect(opts.transports).toEqual(['websocket']);
+  });
+
+  test('explains connect errors from old servers and rejected sessions', async () => {
+    const { explainConnectError } = await import('../../src/drivers/hedgedoc1.js');
+    const old = explainConnectError(new Error('It seems you are trying to reach a Socket.IO server in v2.x with a v3.x client, but they are not compatible'), 'https://md.old');
+    expect(old.message).toContain('HedgeDoc 1.10.4 or newer');
+    expect(explainConnectError(new Error('AUTH failed: No cookie transmitted.'), 'x').message).toContain('Log in again');
+    const tls = Object.assign(new Error('websocket error'), { description: { error: Object.assign(new Error('unable to get local issuer certificate'), { code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' }) } });
+    expect(explainConnectError(tls, 'https://md.corp').message).toContain('TLS certificate of https://md.corp is not trusted');
+    const other = new Error('xhr poll error');
+    expect(explainConnectError(other, 'x')).toBe(other);
+  });
+});
+
+describe('createNote', () => {
+  const api = async (response: { status: number; headers: Record<string, string>; body?: string }) => {
+    const { HedgeDocAPI } = await import('../../src/hedgedoc-api.js');
+    return new HedgeDocAPI({
+      serverUrl: 'https://md.example.com',
+      request: async () => ({ status: response.status, headers: response.headers, text: async () => response.body ?? '', json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) }),
+    });
+  };
+
+  test('reads the note id from the redirect', async () => {
+    expect(await (await api({ status: 302, headers: { location: '/abc123' } })).createNote('# hi')).toBe('abc123');
+  });
+
+  test('refuses a followed redirect instead of returning the editor page as the id', async () => {
+    const client = await api({ status: 200, headers: { 'content-type': 'text/html' }, body: '<!DOCTYPE html><html>editor</html>' });
+    await expect(client.createNote('# hi')).rejects.toThrow('did not answer with a redirect');
+    await expect(client.createNoteRef()).rejects.toThrow('did not answer with a redirect');
+  });
+});

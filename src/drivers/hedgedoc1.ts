@@ -55,6 +55,12 @@ export interface HedgeDoc1DriverOptions extends DriverOptions {
   /** Socket.IO transports. Default: polling with websocket upgrade, websocket-only in Bun. */
   socketTransports?: SocketTransport[];
   socketFactory?: SocketFactory;
+  /**
+   * Extra Socket.IO / engine.io options, e.g. TLS settings for Node
+   * (`ca`, `rejectUnauthorized`, `agent`). The connection's own settings
+   * (path, query, transports, headers) take precedence.
+   */
+  socketOptions?: SocketFactoryOptions;
 }
 
 interface DocData {
@@ -237,6 +243,7 @@ export class HedgeDoc1Driver implements NoteDriver {
     }
 
     const socketOptions: SocketFactoryOptions = {
+      ...this.options.socketOptions,
       path: socketPath,
       query: { noteId: this.options.noteId },
       // Bun has issues with XHR polling, so use websocket-only in Bun.
@@ -246,8 +253,14 @@ export class HedgeDoc1Driver implements NoteDriver {
     };
 
     if (!isBrowser) {
-      const extraHeaders: Record<string, string> = { ...this.options.headers };
-      if (cookie) extraHeaders.Cookie = cookie;
+      // The key must be lower-case `cookie`: with withCredentials engine.io's
+      // Node websocket transport sets headers.cookie to its (empty) cookie
+      // jar, and ws would send that instead of a differently cased Cookie.
+      const extraHeaders: Record<string, string> = {};
+      for (const [name, value] of Object.entries(this.options.headers)) {
+        extraHeaders[name.toLowerCase() === 'cookie' ? 'cookie' : name] = value;
+      }
+      if (cookie) extraHeaders.cookie = extraHeaders.cookie ? `${extraHeaders.cookie}; ${cookie}` : cookie;
       socketOptions.extraHeaders = extraHeaders;
     } else if (Object.keys(this.options.headers).length > 0) {
       console.warn('HedgeDocClient: custom socket headers are not supported in browser runtimes.');
@@ -327,7 +340,8 @@ export class HedgeDoc1Driver implements NoteDriver {
       }
     });
 
-    on('connect_error', (error: Error) => {
+    on('connect_error', (raw: Error) => {
+      const error = explainConnectError(raw, this.serverUrl);
       host.emit('error', error);
       lifecycle.fail(error);
     });
@@ -631,4 +645,32 @@ class HedgeDoc1OTClient extends OTClient {
 
 export function createHedgeDoc1Driver(host: DriverHost, options: HedgeDoc1DriverOptions): HedgeDoc1Driver {
   return new HedgeDoc1Driver(host, options);
+}
+
+/**
+ * Turn socket.io-client's connect errors into actionable messages. The raw
+ * error stays available as `cause`.
+ */
+export function explainConnectError(error: Error, serverUrl: string): Error {
+  const message = error?.message ?? String(error);
+  let explained: string | null = null;
+  if (/Socket\.IO server in v2\.x/i.test(message)) {
+    explained = `${serverUrl} runs HedgeDoc 1.10.3 or older (Socket.IO 2), which hedgesync cannot talk to. HedgeDoc 1.10.4 or newer is required.`;
+  } else if (/AUTH failed/i.test(message)) {
+    explained = `The server did not accept the session (${message}). Log in again or check the session cookie.`;
+  } else if (/certificate|self[- ]signed|UNABLE_TO_VERIFY|CERT_/i.test(message + ' ' + describeCause(error))) {
+    explained = `TLS certificate of ${serverUrl} is not trusted (${describeCause(error) || message}).`;
+  }
+  if (!explained) return error;
+  const wrapped = new HedgeDocError(explained);
+  (wrapped as Error & { cause?: unknown }).cause = error;
+  return wrapped;
+}
+
+function describeCause(error: unknown): string {
+  // engine.io wraps transport errors: TransportError.description is the underlying error/event.
+  const description = (error as { description?: unknown })?.description;
+  const inner = (description as { error?: unknown })?.error ?? description;
+  if (inner instanceof Error) return `${(inner as Error & { code?: string }).code ?? ''} ${inner.message}`.trim();
+  return '';
 }

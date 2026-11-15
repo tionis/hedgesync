@@ -9,6 +9,7 @@ import {
   HedgeDoc1Driver,
   createHedgeDoc1Driver,
   type SocketFactory,
+  type SocketFactoryOptions,
   type SocketLike,
   type SocketTransport,
 } from './drivers/hedgedoc1.js';
@@ -53,6 +54,11 @@ export interface HedgeDocClientOptions {
   headers?: Record<string, string>;
   /** HedgeDoc 1: Socket.IO transports. Defaults to polling with websocket upgrade, or websocket-only in Bun. */
   socketTransports?: SocketTransport[];
+  /**
+   * HedgeDoc 1: extra Socket.IO / engine.io options, e.g. TLS settings in Node
+   * (`ca`, `rejectUnauthorized`, `agent`).
+   */
+  socketOptions?: SocketFactoryOptions;
   /** HedgeDoc 1: custom socket factory (mainly for tests). */
   socketFactory?: SocketFactory;
   /** How long connect() waits for the document (ms, default 15000). */
