@@ -409,29 +409,29 @@ export class TextOperation {
    * @returns The transformed position
    */
   static transformPosition(position: number, operation: TextOperation, insertBefore: boolean = false): number {
-    let pos = position;
+    // `index` walks the old document; `shift` collects how far `position` moves.
+    let shift = 0;
     let index = 0;
-    
+
     for (const op of operation.ops) {
       if (TextOperation.isRetain(op)) {
         index += op;
       } else if (TextOperation.isInsert(op)) {
-        // Insert at or before our position moves us forward
-        if (index < pos || (index === pos && insertBefore)) {
-          pos += op.length;
+        // Insert before our position (or at it, with insertBefore) moves us forward
+        if (index < position || (index === position && insertBefore)) {
+          shift += op.length;
         }
-        // Insert doesn't advance index (it's inserted at current position)
       } else if (TextOperation.isDelete(op)) {
         const deleteCount = -op;
-        if (index < pos) {
-          // Delete before our position moves us backward
-          pos -= Math.min(deleteCount, pos - index);
+        if (index < position) {
+          // Delete before our position moves us back; one spanning it clamps us to its start
+          shift -= Math.min(deleteCount, position - index);
         }
         index += deleteCount;
       }
     }
-    
-    return Math.max(0, pos);
+
+    return Math.max(0, position + shift);
   }
 
   /**

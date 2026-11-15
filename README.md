@@ -14,6 +14,7 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 - 📝 **Line operations** - manipulate documents by line number
 - 🔄 **Pandoc integration** - AST-based transformations
 - 🤖 **Macro system** - auto-expand triggers as you type
+- 🖥️ **Note terminal** - a shared shell session inside a note
 - ⏱️ **Rate limiting** - prevent overwhelming the server
 - 🔁 **Auto-reconnection** - exponential backoff with operation queuing
 - 📦 **Batch operations** - combine multiple edits into one
@@ -164,6 +165,9 @@ hedgesync delete https://md.example.com/abc123                  # asks you to ty
 
 # Run your own script with a connected client (see `hedgesync help exec`)
 hedgesync exec stamp.ts https://md.example.com/abc123 -- extra args
+
+# Shared shell: type commands into a ```terminal block in the note (see below)
+hedgesync terminal https://md.example.com/ops --cwd ~/project --timeout 300
 
 # Your notes (HedgeDoc 1 can only list your history: notes you have opened)
 hedgesync ls https://md.example.com                         # pinned first, then most recent
@@ -928,6 +932,44 @@ MacroEngine.builtins.counterMacro('::n', 1)  // 1, 2, 3, ...
 // Snippet macro
 MacroEngine.builtins.snippetMacro('::todo', '- [ ] ')
 ```
+
+### CLI Terminal Command
+
+`hedgesync terminal <url>` turns a code block in the note into a shell that
+everyone in the note can see. Type a command after the `$` prompt and press
+Enter; hedgesync runs it on the machine where it is running, streams the
+output into the note and adds a new prompt:
+
+````markdown
+```terminal
+$ cd ~/project && git log --oneline -2
+a4b5e57 Release 2.1.0
+f9d0028 Add cursor sharing
+$ 
+```
+````
+
+- The block is added at the end of the note if there is none (`--block` picks
+  another info string). One shell runs for the whole session, so `cd`,
+  variables and functions persist; `--shell` picks it (bash, else sh).
+- Input that spans several lines (heredocs, pasted scripts) runs once it ends
+  in an empty line.
+- Commands get no stdin and no TTY: editors, pagers and password prompts do
+  not work. `TERM=dumb`, `NO_COLOR=1` and `PAGER=cat` are set, colour codes
+  are stripped, and progress bars show their last state. Output is capped at
+  `--max-output` characters per command, and `--timeout` kills runaway
+  commands (restarting the shell).
+- Ctrl+C ends the session and marks the block `[terminal closed]`.
+
+**Security:** running commands means a shell on your machine, as you. By
+default only the account behind your session cookie may run commands, so you
+can drive it from your browser. Input that anyone else touched is refused, not
+run. `--allow-user <id>` names other accounts (ids are in `hedgesync users
+<url> --json`), and `--anyone` lets everyone who can edit the note in, after a
+warning.
+
+The same is available as a library, `new NoteTerminal(client, options)`
+(Node/Bun), with `command`, `done` and `refused` events.
 
 ### CLI Macro Command
 

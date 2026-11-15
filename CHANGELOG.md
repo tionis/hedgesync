@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hedgesync terminal <url>`: a shared shell session in a ` ```terminal `
+  block of the note. Commands typed after the `$` prompt run in one
+  persistent shell on the host and their output streams into the note. Only
+  the host's own account may run commands unless `--allow-user` or
+  `--anyone` says otherwise; input edited by anyone else is refused. Also
+  available as the `NoteTerminal` class (Node/Bun).
+
+### Fixed
+
+- `TextOperation.transformPosition` mixed old and new coordinates, so a
+  position inside a deleted range came out wrong when the same operation
+  also inserted text before it. This also affects macro range tracking.
+
 ## 2.1.0 (2026-11-15)
 
 ### Added

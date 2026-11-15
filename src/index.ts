@@ -159,6 +159,8 @@ export { MacroEngine } from './macro-engine.js';
 
 // Safe shell execution for macros (Node/Bun only)
 export { renderShellTemplate, runShell, spawnShell, killShell } from './shell.js';
+export { NoteTerminal, findTerminalBlock, sanitizeTerminalOutput } from './terminal.js';
+export type { NoteTerminalOptions, NoteTerminalClient, TerminalCommandEvent, TerminalDoneEvent, TerminalRefusedEvent } from './terminal.js';
 export type { ShellCommand, ShellResult } from './shell.js';
 export { expandReplacement } from './replace.js';
 export type {

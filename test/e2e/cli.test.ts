@@ -619,3 +619,43 @@ describe('sessions', () => {
     expect(server.logouts.slice(before)).toEqual(['connect.sid=shared']);
   });
 });
+
+describe('terminal', () => {
+  test('refuses to start without a signed-in account or --anyone', async () => {
+    const { url } = newNote('');
+    const r = await cli(['terminal', url]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain('--anyone');
+  });
+
+  test('runs commands typed into the note and closes the block on exit', async () => {
+    const { id, url } = newNote('# Ops\n');
+    const proc = Bun.spawn(['bun', CLI, 'terminal', url, '--anyone', '--shell', 'sh', '--json'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    const human = new HedgeDocClient({ serverUrl: server.url, noteId: id, reconnect: { enabled: false } });
+    await human.connect();
+    const until = async (cond: () => boolean) => {
+      const deadline = Date.now() + 15_000;
+      while (!cond()) {
+        if (Date.now() > deadline) throw new Error(`timed out; note: ${JSON.stringify(human.document)}`);
+        await Bun.sleep(20);
+      }
+    };
+    try {
+      await until(() => human.document.includes('$ \n```'));
+      human.insert(human.document.lastIndexOf('```') - 1, 'echo "hi from $HEDGESYNC_NOTE"\n');
+      await until(() => human.document.includes(`hi from ${url}\n$ \n`));
+      proc.kill('SIGINT');
+      expect(await proc.exited).toBe(0);
+      await until(() => human.document.includes('[terminal closed]'));
+      expect(human.document).toBe(`# Ops\n\n\`\`\`terminal\n$ echo "hi from $HEDGESYNC_NOTE"\nhi from ${url}\n[terminal closed]\n\`\`\`\n`);
+      const events = (await new Response(proc.stdout).text()).trim().split('\n').map(l => JSON.parse(l));
+      expect(events.map(e => e.event)).toEqual(['command', 'done']);
+      expect(events[1].code).toBe(0);
+    } finally {
+      human.disconnect();
+      proc.kill();
+    }
+  });
+});
