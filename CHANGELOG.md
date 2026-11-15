@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.1 (2026-11-15)
 
 ### Fixed
 
@@ -14,6 +14,11 @@
 - Connect errors explain the usual causes: a HedgeDoc 1.10.3 or older server
   (Socket.IO 2, unsupported), a rejected session, or an untrusted TLS
   certificate.
+
+### Changed
+
+- `package.json` `bin` path written as npm normalizes it (`dist/cli/bin.js`),
+  which silences a misleading warning on publish.
 
 ### Added
 
