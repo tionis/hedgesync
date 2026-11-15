@@ -3,6 +3,7 @@ import type { ReconnectOutcome } from './ot-client.js';
 import { diffToOperation } from './diff.js';
 import { expandReplacement } from './replace.js';
 import { normalizeCookie } from './cookie.js';
+import type { CursorPosition } from './cursor.js';
 import { SimpleEventEmitter } from './simple-event-emitter.js';
 import { HedgeSyncRuntime, HedgeSyncRequestFn, defaultHedgeSyncRequest } from './http.js';
 import {
@@ -685,6 +686,17 @@ export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
 
   requestVersion(): void {
     this.driver.requestVersion();
+  }
+
+  /**
+   * Show collaborators where this client's cursor is (zero-based line and
+   * column in the note), or pass null when the editor loses focus. Others'
+   * cursors arrive as `cursor:focus` / `cursor:activity` (a UserInfo with
+   * `.cursor`) and `cursor:blur` ({ id }), and are kept in `users`.
+   * Positions given by offset convert with cursorFromIndex().
+   */
+  setCursor(cursor: CursorPosition | null): void {
+    this.driver.setCursor?.(cursor);
   }
 
   // ============================================

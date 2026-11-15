@@ -17,6 +17,7 @@ import type { ManagerOptions, SocketOptions } from 'socket.io-client';
 import { TextOperation, type OperationJSON } from '../text-operation.js';
 import { OTClient, OTDesyncError } from '../ot-client.js';
 import { parseSetCookie } from '../cookie.js';
+import { isCursorPosition, type CursorPosition } from '../cursor.js';
 import { getHeader } from '../http.js';
 import { ReconnectPolicy } from './reconnect.js';
 import {
@@ -348,6 +349,7 @@ export class HedgeDoc1Driver implements NoteDriver {
 
     on('doc', (data: DocData) => {
       docLoaded = true;
+      this.cursorShared = false;
       this.handleDoc(data);
       socket.emit('refresh');
       lifecycle.onDocLoaded();
@@ -402,9 +404,21 @@ export class HedgeDoc1Driver implements NoteDriver {
       }
     });
 
-    on('cursor focus', (user: unknown) => host.emit('cursor:focus', user));
-    on('cursor activity', (user: unknown) => host.emit('cursor:activity', user));
-    on('cursor blur', (data: unknown) => host.emit('cursor:blur', data));
+    // Others' cursors: focus/activity carry the user (with .cursor), blur only { id }.
+    const onCursor = (event: 'cursor:focus' | 'cursor:activity') => (user: UserInfo) => {
+      if (!user?.id) return;
+      const merged: UserInfo = { ...this.users.get(user.id), ...user, cursor: isCursorPosition(user.cursor) ? user.cursor : null };
+      this.users.set(user.id, merged);
+      host.emit(event, merged);
+    };
+    on('cursor focus', onCursor('cursor:focus'));
+    on('cursor activity', onCursor('cursor:activity'));
+    on('cursor blur', (data: { id?: string }) => {
+      if (!data?.id) return;
+      const user = this.users.get(data.id);
+      if (user) this.users.set(data.id, { ...user, cursor: null });
+      host.emit('cursor:blur', { id: data.id });
+    });
 
     on('client_left', (clientId: string) => {
       this.users.delete(clientId);
@@ -528,6 +542,21 @@ export class HedgeDoc1Driver implements NoteDriver {
   requestVersion(): void {
     this.emitIfConnected('version');
   }
+  /** Whether the server currently knows a cursor of ours (focus was sent). */
+  private cursorShared = false;
+
+  setCursor(cursor: CursorPosition | null): void {
+    const socket = this.socket;
+    if (!socket || !this.ready) return;
+    if (cursor === null) {
+      if (this.cursorShared) socket.emit('cursor blur');
+      this.cursorShared = false;
+      return;
+    }
+    socket.emit(this.cursorShared ? 'cursor activity' : 'cursor focus', { line: cursor.line, ch: cursor.ch });
+    this.cursorShared = true;
+  }
+
 
   // ------------------------------------------------------------------
   // Owner actions. HedgeDoc ignores them silently unless the session's

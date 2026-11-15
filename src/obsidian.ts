@@ -78,3 +78,7 @@ export type {
 
 // Cookie helpers
 export { normalizeCookie, extractSessionId } from './cookie.js';
+
+// Cursor positions
+export { cursorFromIndex, indexFromCursor, isCursorPosition } from './cursor.js';
+export type { CursorPosition } from './cursor.js';

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 (unreleased)
+
+### Added
+
+- Cursors: `client.setCursor({line, ch} | null)` shows collaborators where
+  your cursor is (HedgeDoc's `cursor focus` / `cursor activity` /
+  `cursor blur`). Others' cursors are typed (`UserInfo.cursor` is a
+  `CursorPosition` or null), kept up to date on `getOnlineUsers()` entries and
+  cleared on blur; malformed positions from the server become null.
+- `cursorFromIndex(text, index)`, `indexFromCursor(text, cursor)` and
+  `isCursorPosition(value)`, exported from both entry points.
+
 ## 2.0.1 (2026-11-15)
 
 ### Fixed

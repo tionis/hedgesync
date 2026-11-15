@@ -8,6 +8,7 @@
  * permission model. Edits cross the seam as TextOperations in both directions.
  */
 
+import type { CursorPosition } from '../cursor.js';
 import type { TextOperation } from '../text-operation.js';
 import type { HedgeSyncRequestFn, HedgeSyncRuntime } from '../http.js';
 import type { ReconnectConfig, ReconnectPolicy } from './reconnect.js';
@@ -57,7 +58,9 @@ export interface UserInfo {
   name?: string;
   color?: string;
   photo?: string;
-  cursor?: unknown;
+  /** Where the user's cursor is, while their editor has focus. */
+  cursor?: CursorPosition | null;
+  idle?: boolean;
 }
 
 export function emptyNoteInfo(): NoteInfo {
@@ -123,6 +126,8 @@ export interface NoteDriver {
   refresh(): void;
   requestOnlineUsers(): void;
   requestVersion(): void;
+  /** Share this client's cursor (null: the editor lost focus). Optional per protocol. */
+  setCursor?(cursor: CursorPosition | null): void;
 
   /** Owner action: change who may view and edit the note. Resolves once the server confirms. */
   setPermission?(permission: string, timeoutMs: number): Promise<void>;

@@ -545,6 +545,7 @@ const client = new HedgeDocClient({
 | `applyOperation(op)` | Apply a raw `TextOperation`. |
 | `refresh()` | Request updated note metadata. |
 | `requestOnlineUsers()` | Request the online users list. |
+| `setCursor(position \| null)` | Show others where your cursor is (`{line, ch}`, zero-based), or `null` when your editor loses focus. Ignored while not connected; send it again after a reconnect. |
 | `replaceRegex(pattern, replacement)` | Replace all matches (`String.prototype.replace` semantics), sent as one operation. Returns the count. |
 | `replaceFirst(pattern, replacement)` | Replace the first match. |
 | `replaceLines(pattern, replacement)` | Replace matching lines, sent as one operation. |
@@ -632,9 +633,13 @@ client.on('users', (users) => { /* Online users list updated */ });
 client.on('user:status', (user) => { /* User status changed */ });
 client.on('user:left', (clientId) => { /* User disconnected */ });
 
-client.on('cursor:focus', (user) => { /* User focused their cursor */ });
+client.on('cursor:focus', (user) => { /* User focused their editor; user.cursor is {line, ch} */ });
 client.on('cursor:activity', (user) => { /* User moved their cursor */ });
-client.on('cursor:blur', (data) => { /* User unfocused their cursor */ });
+client.on('cursor:blur', ({ id }) => { /* User's editor lost focus */ });
+
+// Cursors are also kept on getOnlineUsers() entries (user.cursor, null after a blur).
+// Convert between {line, ch} and text offsets with cursorFromIndex(text, index)
+// and indexFromCursor(text, cursor). HedgeDoc shares only the cursor, not selections.
 
 // Reconnection events
 client.on('reconnect:scheduled', ({ attempt, maxAttempts, delay }) => { /* Reconnect scheduled */ });

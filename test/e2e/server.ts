@@ -174,6 +174,10 @@ export async function startTestServer(initial: Record<string, string | { documen
       io.to(room).emit('delete');
       setTimeout(() => io.in(room).disconnectSockets(true), 0);
     });
+    for (const event of ['cursor focus', 'cursor activity']) {
+      socket.on(event, (cursor: unknown) => socket.to(room).emit(event, { ...users().find(u => u.id === socket.id), cursor }));
+    }
+    socket.on('cursor blur', () => socket.to(room).emit('cursor blur', { id: socket.id }));
     socket.on('disconnect', () => io.to(room).emit('online users', { users: users() }));
   });
 

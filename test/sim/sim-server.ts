@@ -211,6 +211,20 @@ export class SimServer {
         conn.sendToClient('operations', head, ops);
         break;
       }
+      case 'cursor focus':
+      case 'cursor activity': {
+        // Upstream: the user's out-data with .cursor, to everyone else in the note.
+        const user = { id: conn.id, name: `sim-${conn.id}`, color: '#123456', cursor: msg.args[0] };
+        for (const other of this.openConnections) {
+          if (other !== conn && other.joined) other.sendToClient(msg.event, user);
+        }
+        break;
+      }
+      case 'cursor blur':
+        for (const other of this.openConnections) {
+          if (other !== conn && other.joined) other.sendToClient('cursor blur', { id: conn.id });
+        }
+        break;
       default:
         break;
     }
