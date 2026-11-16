@@ -41,5 +41,20 @@ test('password manager entries are recognised', async () => {
   const { isConcealed } = await import('../../src/system-clipboard.js');
   expect(isConcealed(['text/plain', 'x-kde-passwordManagerHint'])).toBe(true);
   expect(isConcealed(['org.nspasteboard.ConcealedType'])).toBe(true);
+  expect(isConcealed(['ExcludeClipboardContentFromMonitorProcessing', 'UnicodeText'])).toBe(true);
   expect(isConcealed(['text/plain', 'UTF8_STRING'])).toBe(false);
+  expect(isConcealed(['public.utf8-plain-text', 'NSStringPboardType'])).toBe(false);
+});
+
+// The real clipboard, where the platform has one without a display server (CI runs these).
+test.skipIf(!['darwin', 'win32'].includes(process.platform))('system clipboard round trip, with non-ASCII text', async () => {
+  const { systemClipboard, isConcealed } = await import('../../src/system-clipboard.js');
+  const board = systemClipboard({})!;
+  expect(board).not.toBeNull();
+  const text = 'héllo wörld ✓ 日本\nsecond line';
+  board.copy(text);
+  expect(board.paste()?.replace(/\r\n/g, '\n')).toBe(text);
+  const types = board.types();
+  expect(types?.length).toBeGreaterThan(0);
+  expect(isConcealed(types!)).toBe(false);
 });

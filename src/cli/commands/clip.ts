@@ -75,8 +75,7 @@ async function watch(ctx: Context): Promise<void> {
     throw new CliError('No clipboard tool found', 'Install wl-clipboard (Wayland) or xclip (X11), or set HEDGESYNC_CLIP_COPY_CMD / HEDGESYNC_CLIP_PASTE_CMD.');
   }
   if (fromClipboard && system.types() === null) {
-    throw new CliError(`--from-clipboard needs to see the clipboard's content types, which ${system.name} cannot list`,
-      'Without them password manager entries cannot be skipped. Use wl-clipboard or xclip, or set HEDGESYNC_CLIP_TYPES_CMD.');
+    ctx.warn(`${system.name} cannot list the clipboard's content types, so entries password managers mark as secret are not recognised and will be copied to the note too.`);
   }
   const client = await connect(ctx);
   if (fromClipboard) assertEditable(client);
@@ -112,7 +111,7 @@ async function watch(ctx: Context): Promise<void> {
       if (text === null || text === lastSystem) return;
       lastSystem = text;
       if (!text.trim() || text === lastNote) return;
-      if (isConcealed(system.types() ?? ['unknown'])) {
+      if (isConcealed(system.types() ?? [])) {
         log('skipped a secret (marked by a password manager)');
         return;
       }
@@ -171,10 +170,11 @@ the text below it), and paste it here.
 
 watch keeps the system clipboard current: --to-clipboard copies new
 entries to this machine's clipboard, --from-clipboard adds what you copy
-here to the note. The latter skips entries password managers mark as
-secret, and so only runs where the clipboard's content types can be read
-(wl-clipboard, xclip). Tools: wl-copy/wl-paste, xclip, xsel, pbcopy/pbpaste,
-PowerShell; HEDGESYNC_CLIP_COPY_CMD, HEDGESYNC_CLIP_PASTE_CMD and
+here to the note, skipping entries password managers mark as secret
+(KeePassXC, 1Password, Bitwarden and others set such a mark). Tools:
+wl-copy/wl-paste or xclip (Linux), pbcopy/pbpaste (macOS), PowerShell
+(Windows), xsel (which cannot see the mark, so nothing is skipped);
+HEDGESYNC_CLIP_COPY_CMD, HEDGESYNC_CLIP_PASTE_CMD and
 HEDGESYNC_CLIP_TYPES_CMD override them.
 
 The note is created private (only you, signed in, can read it); setup needs

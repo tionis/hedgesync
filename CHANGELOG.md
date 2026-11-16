@@ -21,8 +21,9 @@
   ways (three-way merges) until Ctrl+C.
 - `hedgesync clip`: a private note as a clipboard across devices. `copy`,
   `paste`, `list`, and `watch` to keep the system clipboard in sync
-  (wl-clipboard, xclip, xsel, pbcopy, PowerShell); copying into the note
-  from the system clipboard skips password manager entries.
+  on Linux (wl-clipboard, xclip, xsel), macOS and Windows; copying into
+  the note from the system clipboard skips entries password managers mark
+  as secret.
 - `hedgesync edit --new [<server>] <file>`: a new note from a file, edited
   with whoever opens its link, and written back to the file when the editor
   closes. As `GIT_EDITOR`, it lets two people write a commit message
