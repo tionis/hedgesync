@@ -241,7 +241,18 @@ local function on_reset(s, msg)
     vim.bo[buf].undolevels = -1 -- loading the note is not an undoable change
   end
   apply(s, function()
-    api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(msg.text, "\n", { plain = true }))
+    local text = vim.split(msg.text, "\n", { plain = true })
+    if first then
+      -- Like reading a file: do not shift marks and quickfix entries that
+      -- already point into the note (`:cfirst`, `+42`) by the inserted lines.
+      vim.g._hedgesync_load = text
+      api.nvim_buf_call(buf, function()
+        vim.cmd("lockmarks call nvim_buf_set_lines(0, 0, -1, v:false, g:_hedgesync_load)")
+      end)
+      vim.g._hedgesync_load = nil
+    else
+      api.nvim_buf_set_lines(buf, 0, -1, false, text)
+    end
   end)
   if first then
     vim.bo[buf].undolevels = undolevels
@@ -249,6 +260,12 @@ local function on_reset(s, msg)
   s.epoch, s.E, s.R, s.loaded = msg.epoch, 0, msg.seq, true
   if view and not first and api.nvim_get_current_buf() == buf then
     pcall(vim.fn.winrestview, view)
+  end
+  if first and s.goto_line then
+    for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+      pcall(api.nvim_win_set_cursor, win, { math.min(s.goto_line, api.nvim_buf_line_count(buf)), 0 })
+    end
+    s.goto_line = nil
   end
 end
 
@@ -414,33 +431,58 @@ end
 
 -- Public API ---------------------------------------------------------------
 
+--- hedgedoc://host/id -> https://host/id (http for localhost)
+function M.http_url(url)
+  url = vim.trim(url or "")
+  if url:match("^hedgedoc://") then
+    local rest = url:gsub("^hedgedoc://", "")
+    local scheme = (rest:match("^localhost") or rest:match("^127%.")) and "http://" or "https://"
+    return scheme .. rest
+  end
+  return url
+end
+
+--- The buffer name for a note: https://host/id -> hedgedoc://host/id
 local function buf_name(url)
   return "hedgedoc://" .. url:gsub("^https?://", "")
 end
+M.buf_name = buf_name
 
 --- Open a note for live editing in the current window. Returns the buffer.
-function M.open(url)
-  url = vim.trim(url or "")
+--- Open a note for live editing in a buffer.
+---@param url string note URL (https://... or hedgedoc://...)
+---@param opts? { line?: integer, buf?: integer, wait?: integer }
+---  line: put the cursor there once the note is loaded
+---  buf: load into this buffer in place (BufReadCmd); no window changes
+---  wait: block up to this many ms until the note is loaded, like reading a file
+function M.open(url, opts)
+  opts = opts or {}
+  url = M.http_url(url)
   if url == "" then
     notify("usage: :Hedge open <note url>", vim.log.levels.ERROR)
     return
   end
-  if url:match("^hedgedoc://") then
-    local rest = url:gsub("^hedgedoc://", "")
-    local scheme = (rest:match("^localhost") or rest:match("^127%.")) and "http://" or "https://"
-    url = scheme .. rest
-  end
   for buf, s in pairs(sessions) do
     if s.url == url and api.nvim_buf_is_valid(buf) then
       api.nvim_set_current_buf(buf)
+      if opts.line then
+        pcall(api.nvim_win_set_cursor, 0, { opts.line, 0 })
+      end
       return buf
     end
   end
 
   local prev = api.nvim_get_current_buf()
   local name = buf_name(url)
-  local buf = vim.fn.bufnr(name)
-  if buf == -1 or not api.nvim_buf_is_valid(buf) then
+  local buf = opts.buf
+  if not buf then
+    for _, b in ipairs(api.nvim_list_bufs()) do
+      if api.nvim_buf_get_name(b) == name then
+        buf = b
+      end
+    end
+  end
+  if not buf or not api.nvim_buf_is_valid(buf) then
     buf = api.nvim_create_buf(true, false)
     api.nvim_buf_set_name(buf, name)
   end
@@ -448,10 +490,13 @@ function M.open(url)
   vim.bo[buf].swapfile = false
   vim.bo[buf].modifiable = false
   vim.bo[buf].filetype = "markdown"
-  api.nvim_set_current_buf(buf)
+  if not opts.buf then
+    api.nvim_set_current_buf(buf)
+  end
   -- Replace the empty buffer Neovim starts with (`hedgesync edit`, a fresh :Hedge open).
   if
-    prev ~= buf
+    not opts.buf
+    and prev ~= buf
     and api.nvim_buf_get_name(prev) == ""
     and vim.bo[prev].buftype == ""
     and not vim.bo[prev].modified
@@ -471,6 +516,7 @@ function M.open(url)
     editable = false,
     state = "connecting",
     lines = {},
+    goto_line = opts.line,
   }
   sessions[buf] = s
   update_status(s, "connecting")
@@ -527,6 +573,11 @@ function M.open(url)
     return
   end
   s.proc = proc
+  if opts.wait then
+    vim.wait(opts.wait, function()
+      return s.loaded or s.closed
+    end, 10)
+  end
   return buf
 end
 

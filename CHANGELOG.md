@@ -8,6 +8,9 @@
 
 ### Changed
 
+- `:e hedgedoc://...` reads the note like a file (waits for its text), so
+  `nvim hedgedoc://host/id +42`, quickfix entries and jumps land on the
+  right line.
 - `--json` errors include the hint shown in the terminal.
 - CI: current action versions (no Node 20 deprecation warnings), pinned Bun
   and Neovim, the plugin's end-to-end tests run against a real Neovim, unit

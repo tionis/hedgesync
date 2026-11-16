@@ -38,7 +38,8 @@ end, {
   end,
 })
 
--- :e hedgedoc://md.example.com/abc123
+-- :e hedgedoc://md.example.com/abc123 (also `nvim hedgedoc://...`, quickfix
+-- entries, jumps)
 vim.api.nvim_create_autocmd("BufReadCmd", {
   pattern = "hedgedoc://*",
   callback = function(ev)
@@ -47,6 +48,12 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
       return
     end
     local name = vim.api.nvim_buf_get_name(ev.buf)
+    if name == hs.buf_name(hs.http_url(name)) then
+      -- Read it like a file: load into this buffer and wait for the text, so
+      -- `+42`, quickfix line numbers and marks land where they should.
+      hs.open(name, { buf = ev.buf, wait = 10000 })
+      return
+    end
     local buf = ev.buf
     vim.schedule(function()
       hs.open(name)
