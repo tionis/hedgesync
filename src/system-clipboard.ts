@@ -156,7 +156,8 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
     return {
       name: 'wl-clipboard',
       copy: (t) => { if (run('wl-copy', [], t) === null) fail('wl-copy', 'write'); },
-      paste: () => run('wl-paste', ['--no-newline']),
+      // --type text: without it, an image alone on the clipboard would come back as "text".
+      paste: () => run('wl-paste', ['--no-newline', '--type', 'text']),
       types: () => run('wl-paste', ['--list-types'])?.split('\n').filter(Boolean) ?? [],
       pasteImage: () => nonEmpty(runBytes('wl-paste', ['--type', 'image/png'])),
       copyImage: (png: Buffer) => { if (runBytes('wl-copy', ['--type', 'image/png'], png) === null) fail('wl-copy', 'write'); },
