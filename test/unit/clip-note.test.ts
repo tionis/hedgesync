@@ -32,6 +32,15 @@ describe('clipboard note', () => {
     expect(addClipEntry('# Mine\n', 'x', 'a')).toBe('# Mine\n\n## a\n\n```\nx\n```\n');
   });
 
+  test('image entries are not fenced, and are recognised', async () => {
+    const { clipImage } = await import('../../src/clip-note.js');
+    const doc = addClipEntry('', '![shot](https://md.example.com/uploads/a.png)', 'a', 50, { raw: true });
+    expect(doc).toContain('## a\n\n![shot](https://md.example.com/uploads/a.png)\n');
+    const [entry] = parseClipNote(doc);
+    expect(clipImage(entry.text)).toEqual({ name: 'shot', url: 'https://md.example.com/uploads/a.png' });
+    expect(clipImage('text with ![x](y) inside')).toBeUndefined();
+  });
+
   test('label', () => {
     expect(clipLabel('laptop', new Date(2026, 10, 16, 9, 5))).toBe('2026-11-16 09:05 · laptop');
   });

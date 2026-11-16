@@ -1,6 +1,6 @@
 # Exploration: a clipboard across devices
 
-Status: built (`hedgesync clip`, text only; images not yet), 2026-11-16.
+Status: built (`hedgesync clip`, text and images), 2026-11-16.
 
 A fixed note used as a clipboard between machines and phones. Copy on the
 laptop, open the note on the phone, and it is there. Type on the phone,

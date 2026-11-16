@@ -67,10 +67,10 @@ function fenceFor(text: string): string {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
-/** Add an entry at the top, keeping at most `keep` entries. */
-export function addClipEntry(doc: string, text: string, label: string, keep = 50): string {
+/** Add an entry at the top, keeping at most `keep` entries. `raw` text (an image) is not put in a fence, so it renders. */
+export function addClipEntry(doc: string, text: string, label: string, keep = 50, options: { raw?: boolean } = {}): string {
   const fence = fenceFor(text);
-  const entry = `## ${label}\n\n${fence}\n${text}\n${fence}\n\n`;
+  const entry = options.raw ? `## ${label}\n\n${text}\n\n` : `## ${label}\n\n${fence}\n${text}\n${fence}\n\n`;
   const entries = parseClipNote(doc);
   let base = doc;
   if (entries.length >= keep) base = doc.slice(0, entries[Math.max(0, keep - 1)].start).replace(/\n*$/, '\n\n');
@@ -84,4 +84,10 @@ export function addClipEntry(doc: string, text: string, label: string, keep = 50
 export function clipLabel(device: string, now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())} · ${device}`;
+}
+
+/** The image URL if an entry is just an image (`![name](url)`). */
+export function clipImage(text: string): { name: string; url: string } | undefined {
+  const m = /^!\[([^\]]*)\]\((\S+?)(?:\s+"[^"]*")?\)$/.exec(text.trim());
+  return m ? { name: m[1], url: m[2] } : undefined;
 }

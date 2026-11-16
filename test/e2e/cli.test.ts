@@ -361,6 +361,63 @@ describe('clip', () => {
     expect(JSON.parse(r.stdout).entries.map((e: { text: string }) => e.text)).toEqual(['from the phone', 'second one', 'first']);
   });
 
+  test('images: copy uploads and shows them, paste gives the bytes back', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 0, 255]);
+    const file = join(tmp, 'shot.png');
+    writeFileSync(file, png);
+    expect((await cli(['clip', 'copy', '--image', file], { env: env() })).code).toBe(0);
+    const list = JSON.parse((await cli(['clip', 'list', '--json'], { env: env() })).stdout).entries;
+    expect(list[0].text).toMatch(/^!\[shot\]\(http:\/\/127\.0\.0\.1:\d+\/uploads\/upload_\d+\.png\)$/);
+    const out = join(tmp, 'pasted.png');
+    expect((await cli(['clip', 'paste', '-o', out], { env: env() })).code).toBe(0);
+    expect(readFileSync(out).equals(png)).toBe(true);
+    // Piped: the bytes on stdout.
+    const proc = Bun.spawn(['bun', CLI, 'clip', 'paste'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', NO_COLOR: '1', ...env() } });
+    const piped = Buffer.from(await new Response(proc.stdout).arrayBuffer());
+    expect(await proc.exited).toBe(0);
+    expect(piped.equals(png)).toBe(true);
+  });
+
+  test.skipIf(process.platform === 'win32')('watch moves images both ways', async () => {
+    const board = join(tmp, 'img-board.png');
+    const text = join(tmp, 'img-text.txt');
+    writeFileSync(text, '');
+    const proc = Bun.spawn(['bun', CLI, 'clip', 'watch', '--to-clipboard', '--from-clipboard', '--interval', '250'], {
+      stdout: 'pipe', stderr: 'pipe',
+      env: {
+        PATH: process.env.PATH ?? '', NO_COLOR: '1', ...env(),
+        HEDGESYNC_CLIP_COPY_CMD: `cat > '${text}'`, HEDGESYNC_CLIP_PASTE_CMD: `cat '${text}'`, HEDGESYNC_CLIP_TYPES_CMD: `test -s '${board}' && echo image/png || echo text/plain`,
+        HEDGESYNC_CLIP_IMAGE_COPY_CMD: `cat > '${board}'`, HEDGESYNC_CLIP_IMAGE_PASTE_CMD: `cat '${board}' 2>/dev/null`,
+      },
+    });
+    const waitFor = async (cond: () => boolean) => {
+      for (let i = 0; i < 300 && !cond(); i++) await Bun.sleep(25);
+      expect(cond()).toBe(true);
+    };
+    const newest = async () => JSON.parse((await cli(['clip', 'list', '--json'], { env: env() })).stdout).entries[0]?.text as string;
+    try {
+      await Bun.sleep(1500);
+      // A screenshot on this machine goes to the note.
+      const shot = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 9, 9]);
+      writeFileSync(board, shot);
+      let entry = '';
+      for (let i = 0; i < 40 && !/^!\[/.test(entry); i++) { await Bun.sleep(250); entry = await newest(); }
+      expect(entry).toMatch(/^!\[clipboard-[^\]]*\]\(http:\/\/127\.0\.0\.1:\d+\/uploads\/upload_\d+\.png\)$/);
+      // An image copied elsewhere comes onto this clipboard.
+      const other = Buffer.from([0x89, 0x50, 0x4e, 0x47, 7, 7]);
+      const file = join(tmp, 'other.png');
+      writeFileSync(file, other);
+      expect((await cli(['clip', 'copy', '--image', file], { env: env() })).code).toBe(0);
+      await waitFor(() => readFileSync(board).equals(other));
+      // ... and is not sent back as a new entry.
+      await Bun.sleep(1200);
+      expect(await newest()).toMatch(/^!\[other\]/);
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+  });
+
   test.skipIf(process.platform === 'win32')('watch moves entries both ways and skips secrets', async () => {
     const board = join(tmp, 'clipboard.txt');
     const types = join(tmp, 'clipboard-types.txt');
@@ -742,7 +799,7 @@ describe('note collection commands', () => {
     writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const r = await cli(['upload', server.url, png]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toMatch(/^!\[my pic\]\(http:\/\/img\.test\/upload_\d+\.png\)\n$/);
+    expect(r.stdout).toMatch(/^!\[my pic\]\(http:\/\/127\.0\.0\.1:\d+\/uploads\/upload_\d+\.png\)\n$/);
     const body = server.uploads.at(-1)!;
     expect(body).toContain('filename="my [pic].png"');
     expect(body).toContain('Content-Type: image/png');

@@ -133,8 +133,19 @@ export async function startTestServer(initial: Record<string, string | { documen
       req.on('end', () => {
         if (!/name="image"; filename="[^"]+"/.test(body)) return send(400, 'no image');
         uploads.push(body);
-        send(200, JSON.stringify({ link: `http://img.test/upload_${uploads.length}.png` }), 'application/json');
+        send(200, JSON.stringify({ link: `http://${req.headers.host}/uploads/upload_${uploads.length}.png` }), 'application/json');
       });
+      return;
+    }
+    const upload = /^\/uploads\/upload_(\d+)\.png$/.exec(url.pathname);
+    if (upload && req.method === 'GET') {
+      // The file part of the multipart body, as uploaded (latin1 keeps the bytes).
+      const body = uploads[Number(upload[1]) - 1];
+      if (body === undefined) return send(404, 'no such upload');
+      const start = body.indexOf('\r\n\r\n') + 4;
+      const end = body.lastIndexOf('\r\n--');
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(Buffer.from(body.slice(start, end), 'latin1'));
       return;
     }
     if (url.pathname === '/config') {

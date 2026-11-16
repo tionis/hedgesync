@@ -9,6 +9,10 @@
   prompt on stdin, or any OpenAI-compatible API (`--api`, `--model`). The
   answer streams into a quote below the request, with the assistant's
   cursor; `--allow` limits who may ask.
+- `hedgesync clip` handles images: `copy --image <file>` uploads one and
+  shows it in the note, `paste -o <file>` (or piping) gets the bytes back,
+  and `watch` moves screenshots and images between the clipboard and the
+  note (wl-clipboard, xclip, macOS, Windows).
 - `hedgesync edit --new --wait`: no local editor; everyone writes in the
   browser, and the file is written once someone adds a `/done` line.
 - `hedgesync serve`: an HTTP endpoint for writing into notes from scripts

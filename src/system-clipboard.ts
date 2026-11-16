@@ -2,11 +2,13 @@
  * The system clipboard through the usual command line tools: wl-copy and
  * wl-paste (Wayland), xclip or xsel (X11), pbcopy and pbpaste (macOS),
  * PowerShell (Windows). HEDGESYNC_CLIP_COPY_CMD, HEDGESYNC_CLIP_PASTE_CMD and
- * HEDGESYNC_CLIP_TYPES_CMD override them (shell commands; copy reads stdin).
+ * HEDGESYNC_CLIP_TYPES_CMD override them (shell commands; copy reads stdin),
+ * and HEDGESYNC_CLIP_IMAGE_COPY_CMD / HEDGESYNC_CLIP_IMAGE_PASTE_CMD do the
+ * same for PNG images (bytes on stdin / stdout).
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,7 +21,34 @@ export interface SystemClipboard {
    * as secret; null where they cannot be listed.
    */
   types(): string[] | null;
+  /** The clipboard's image as PNG, if it holds one and the tool can read it. */
+  pasteImage?(): Buffer | null;
+  /** Put a PNG image on the clipboard. */
+  copyImage?(png: Buffer): void;
 }
+
+/** Whether the clipboard's types include an image. */
+export function hasImage(types: string[]): boolean {
+  return types.some(t => /^image\/png$|^public\.png$|^PNG$|^Bitmap$|^DeviceIndependentBitmap$|^System\.Drawing\.Bitmap$/i.test(t));
+}
+
+function runBytes(cmd: string, args: string[], input?: Buffer): Buffer | null {
+  const r = spawnSync(cmd, args, { input, timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout;
+}
+
+/** Run `fn` with a path in a fresh temporary directory, removed afterwards. */
+function withTempFile<T>(name: string, fn: (path: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), 'hedgesync-clip-'));
+  try {
+    return fn(join(dir, name));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const nonEmpty = (b: Buffer | null) => (b && b.length > 0 ? b : null);
 
 function run(cmd: string, args: string[], input?: string, env?: NodeJS.ProcessEnv): string | null {
   const r = spawnSync(cmd, args, { input, encoding: 'utf8', timeout: 5000, windowsHide: true, env: env ? { ...process.env, ...env } : undefined });
@@ -51,6 +80,19 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
       copy: (t) => { if (!copyCmd || sh(copyCmd, t) === null) fail('HEDGESYNC_CLIP_COPY_CMD', 'write'); },
       paste: () => (pasteCmd ? sh(pasteCmd) : null),
       types: () => (typesCmd ? (sh(typesCmd) ?? '').split('\n').filter(Boolean) : null),
+      ...(env.HEDGESYNC_CLIP_IMAGE_PASTE_CMD ? {
+        pasteImage: () => nonEmpty(process.platform === 'win32'
+          ? runBytes('cmd', ['/c', env.HEDGESYNC_CLIP_IMAGE_PASTE_CMD!])
+          : runBytes('sh', ['-c', env.HEDGESYNC_CLIP_IMAGE_PASTE_CMD!])),
+      } : {}),
+      ...(env.HEDGESYNC_CLIP_IMAGE_COPY_CMD ? {
+        copyImage: (png: Buffer) => {
+          const out = process.platform === 'win32'
+            ? runBytes('cmd', ['/c', env.HEDGESYNC_CLIP_IMAGE_COPY_CMD!], png)
+            : runBytes('sh', ['-c', env.HEDGESYNC_CLIP_IMAGE_COPY_CMD!], png);
+          if (out === null) fail('HEDGESYNC_CLIP_IMAGE_COPY_CMD', 'write');
+        },
+      } : {}),
     };
   }
   if (process.platform === 'darwin') {
@@ -64,6 +106,15 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
       copy: (t) => { if (run('pbcopy', [], t, utf8) === null) fail('pbcopy', 'write'); },
       paste: () => run('pbpaste', [], undefined, utf8),
       types: () => run('osascript', ['-l', 'JavaScript', '-e', typesScript])?.split('\n').map(t => t.trim()).filter(Boolean) ?? null,
+      pasteImage: () => withTempFile('clip.png', (file) => {
+        const ok = run('osascript', ['-e', `set f to open for access (POSIX file "${file}") with write permission`,
+          '-e', 'try', '-e', 'write (the clipboard as «class PNGf») to f', '-e', 'end try', '-e', 'close access f']);
+        return ok !== null && existsSync(file) ? nonEmpty(readFileSync(file)) : null;
+      }),
+      copyImage: (png: Buffer) => withTempFile('clip.png', (file) => {
+        writeFileSync(file, png);
+        if (run('osascript', ['-e', `set the clipboard to (read (POSIX file "${file}") as «class PNGf»)`]) === null) fail('osascript', 'write');
+      }),
     };
   }
   if (process.platform === 'win32') {
@@ -90,6 +141,15 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
       },
       types: () => ps('Add-Type -AssemblyName System.Windows.Forms; $d = [Windows.Forms.Clipboard]::GetDataObject(); if ($d) { $d.GetFormats() -join "`n" }')
         ?.split(/\r?\n/).map(t => t.trim()).filter(Boolean) ?? null,
+      pasteImage: () => withTempFile('clip.png', (file) => {
+        const ok = ps(`Add-Type -AssemblyName System.Windows.Forms, System.Drawing; $i = [Windows.Forms.Clipboard]::GetImage(); if ($i) { $i.Save('${file.replace(/'/g, "''")}', [Drawing.Imaging.ImageFormat]::Png) }`);
+        return ok !== null && existsSync(file) ? nonEmpty(readFileSync(file)) : null;
+      }),
+      copyImage: (png: Buffer) => withTempFile('clip.png', (file) => {
+        writeFileSync(file, png);
+        const ok = ps(`Add-Type -AssemblyName System.Windows.Forms, System.Drawing; $i = [Drawing.Image]::FromFile('${file.replace(/'/g, "''")}'); [Windows.Forms.Clipboard]::SetImage($i); $i.Dispose()`);
+        if (ok === null) fail('PowerShell', 'write');
+      }),
     };
   }
   if (env.WAYLAND_DISPLAY && has('wl-copy')) {
@@ -98,6 +158,8 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
       copy: (t) => { if (run('wl-copy', [], t) === null) fail('wl-copy', 'write'); },
       paste: () => run('wl-paste', ['--no-newline']),
       types: () => run('wl-paste', ['--list-types'])?.split('\n').filter(Boolean) ?? [],
+      pasteImage: () => nonEmpty(runBytes('wl-paste', ['--type', 'image/png'])),
+      copyImage: (png: Buffer) => { if (runBytes('wl-copy', ['--type', 'image/png'], png) === null) fail('wl-copy', 'write'); },
     };
   }
   if (env.DISPLAY && has('xclip')) {
@@ -106,6 +168,8 @@ export function systemClipboard(env: NodeJS.ProcessEnv = process.env): SystemCli
       copy: (t) => { if (run('xclip', ['-selection', 'clipboard', '-i'], t) === null) fail('xclip', 'write'); },
       paste: () => run('xclip', ['-selection', 'clipboard', '-o']),
       types: () => run('xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o'])?.split('\n').filter(Boolean) ?? [],
+      pasteImage: () => nonEmpty(runBytes('xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o'])),
+      copyImage: (png: Buffer) => { if (runBytes('xclip', ['-selection', 'clipboard', '-t', 'image/png', '-i'], png) === null) fail('xclip', 'write'); },
     };
   }
   if (env.DISPLAY && has('xsel')) {

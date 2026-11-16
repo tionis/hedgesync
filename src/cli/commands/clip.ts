@@ -10,12 +10,13 @@
  * a new entry. Entries are kept newest first (see src/clip-note.ts).
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, join } from 'node:path';
-import { addClipEntry, CLIP_TEMPLATE, clipLabel, parseClipNote } from '../../clip-note.js';
+import { basename, dirname, join } from 'node:path';
+import { addClipEntry, CLIP_TEMPLATE, clipImage, clipLabel, parseClipNote } from '../../clip-note.js';
 import type { HedgeDocClient } from '../../hedgedoc-client.js';
-import { isConcealed, systemClipboard } from '../../system-clipboard.js';
+import { hasImage, isConcealed, systemClipboard } from '../../system-clipboard.js';
 import { buildNoteUrl, parseNoteUrl } from '../../url.js';
 import { assertEditable, connectionOptions, readStdin, type Command, type Context } from '../context.js';
 import { cookieStorePath } from '../cookie-store.js';
@@ -46,17 +47,41 @@ async function connect(ctx: Context): Promise<HedgeDocClient> {
   return ctx.connectTo(serverUrl, noteId);
 }
 
+async function readStdinBytes(): Promise<Buffer> {
+  if (process.stdin.isTTY) throw new CliError('No image on stdin', 'Usage: hedgesync clip copy --image <file | ->');
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+}
+
 const device = () => hostname().split('.')[0] || 'this device';
 
 /** Strip one final newline, the one `echo` and most commands add. */
 const chomp = (s: string) => s.replace(/\r?\n$/, '');
 
-async function copy(ctx: Context, text: string): Promise<void> {
+const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+
+/** Upload an image to the clipboard note's server; returns the entry text. */
+async function uploadImage(ctx: Context, data: Buffer, name: string): Promise<string> {
+  const { serverUrl } = parseNoteUrl(clipNote());
+  const url = await ctx.api(serverUrl).uploadImage(data, name.endsWith('.png') || /\.\w+$/.test(name) ? name : `${name}.png`);
+  return `![${name.replace(/\.\w+$/, '').replace(/[[\]]/g, '')}](${url})`;
+}
+
+/** Fetch an image entry's bytes (relative links resolve against the server). */
+async function downloadImage(url: string): Promise<Buffer> {
+  const absolute = new URL(url, parseNoteUrl(clipNote()).serverUrl).toString();
+  const res = await fetch(absolute);
+  if (!res.ok) throw new CliError(`Could not download ${absolute}: HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function copy(ctx: Context, text: string, options: { raw?: boolean } = {}): Promise<void> {
   if (text === '') throw new CliError('Nothing to copy');
   const client = await connect(ctx);
   try {
     assertEditable(client);
-    client.updateContent(addClipEntry(client.getDocument(), text, clipLabel(device()), ctx.int('keep', 50)));
+    client.updateContent(addClipEntry(client.getDocument(), text, clipLabel(device()), ctx.int('keep', 50), options));
     await client.flush();
   } finally {
     client.disconnect();
@@ -83,6 +108,15 @@ async function watch(ctx: Context): Promise<void> {
   const newest = () => parseClipNote(client.getDocument())[0]?.text;
   let lastNote = newest();
   let lastSystem = system.paste();
+  // The image on the clipboard at start, so it is not uploaded right away.
+  const imageNow = () => (system.pasteImage && !system.paste()?.trim() && hasImage(system.types() ?? ['image/png']) ? system.pasteImage() : null);
+  let lastImage: string | undefined;
+  if (fromClipboard) {
+    const png = imageNow();
+    if (png) lastImage = sha(png);
+  }
+  let uploading = false;
+  let echoImage = false;
   const log = (msg: string) => ctx.info(`${c('dim', new Date().toLocaleTimeString())} ${msg}`);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -94,6 +128,17 @@ async function watch(ctx: Context): Promise<void> {
       if (text === undefined || text === lastNote) return;
       lastNote = text;
       if (!toClipboard || text === lastSystem) return;
+      const image = clipImage(text);
+      if (image && system.copyImage) {
+        void downloadImage(image.url).then((png) => {
+          system.copyImage!(png);
+          lastImage = sha(png);
+          // The clipboard may hand it back re-encoded: don't take that for a new image.
+          echoImage = true;
+          log(`note → clipboard (image, ${png.length} bytes)`);
+        }).catch((err: Error) => ctx.warn(err.message));
+        return;
+      }
       try {
         system.copy(text);
         lastSystem = text;
@@ -108,6 +153,25 @@ async function watch(ctx: Context): Promise<void> {
   const poll = fromClipboard
     ? setInterval(() => {
       const text = system.paste();
+      if (!text?.trim() && system.pasteImage && !uploading) {
+        // No text: maybe an image (a screenshot).
+        const png = imageNow();
+        if (png && sha(png) === lastImage) echoImage = false; // handed back unchanged
+        if (png && sha(png) !== lastImage) {
+          lastImage = sha(png);
+          if (echoImage) {
+            echoImage = false;
+            return;
+          }
+          if (isConcealed(system.types() ?? [])) return;
+          uploading = true;
+          void uploadImage(ctx, png, `clipboard-${clipLabel(device()).slice(0, 16).replace(/[ :]/g, '-')}.png`).then((entry) => {
+            lastNote = entry;
+            client.updateContent(addClipEntry(client.getDocument(), entry, clipLabel(device()), keep, { raw: true }));
+            log(`clipboard → note (image, ${png.length} bytes)`);
+          }).catch((err: Error) => ctx.warn(`Image upload failed: ${err.message}`)).finally(() => { uploading = false; });
+        }
+      }
       if (text === null || text === lastSystem) return;
       lastSystem = text;
       if (!text.trim() || text === lastNote) return;
@@ -149,6 +213,8 @@ export const clip: Command = {
     { name: 'interval', type: 'value' },
     { name: 'note', type: 'value' },
     { name: 'force', short: 'f', type: 'flag' },
+    { name: 'image', short: 'i', type: 'value' },
+    { name: 'output', short: 'o', type: 'value' },
   ],
   help: () => `
 ${c('bold', 'hedgesync clip')} - A private note as a clipboard across devices
@@ -157,7 +223,8 @@ ${c('yellow', 'USAGE:')}
   hedgesync clip setup [<server-url>]   Create the clipboard note (private) and remember it
   hedgesync clip setup --note <url>     Use an existing note instead
   hedgesync clip [copy] [text...]       Copy text (or stdin) into the note
-  hedgesync clip [paste] [n]            Print the newest entry (or the n-th)
+  hedgesync clip copy --image <file|->   Copy an image (uploaded to the server)
+  hedgesync clip [paste] [n] [-o <file>] Print the newest entry (or the n-th)
   hedgesync clip list                   List the entries
   hedgesync clip url                    Print the note's URL
   hedgesync clip watch --to-clipboard [--from-clipboard]
@@ -180,7 +247,16 @@ HEDGESYNC_CLIP_TYPES_CMD override them.
 The note is created private (only you, signed in, can read it); setup needs
 a saved login for that. HEDGESYNC_CLIP_NOTE overrides the remembered note.
 
+Images are uploaded to the HedgeDoc server and shown in the note. Pasting an
+image entry writes the image to -o <file>, or to stdout when it is piped
+(hedgesync clip > shot.png); on a terminal it prints the link. watch moves
+images too: a screenshot copied here goes to the note, an image entry from
+elsewhere onto this clipboard (where the tool supports images: wl-clipboard,
+xclip, macOS, Windows).
+
 ${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-i, --image <file|->')} copy: an image file (- for stdin) instead of text
+  ${c('cyan', '-o, --output <file>')}  paste: write the entry (an image's bytes) to a file
   ${c('cyan', '--keep <n>')}       Keep at most n entries (default 50)
   ${c('cyan', '--interval <ms>')}  How often watch --from-clipboard looks (default 1000)
   ${c('cyan', '--note <url>')}     setup: use this note
@@ -230,6 +306,13 @@ ${c('yellow', 'OPTIONS:')}
         ctx.result({ url: clipNote() }, () => print(clipNote()));
         return;
       case 'copy': {
+        const image = ctx.str('image');
+        if (image) {
+          const data = image === '-' ? await readStdinBytes() : readFileSync(image);
+          if (!data.length) throw new CliError('The image is empty');
+          await copy(ctx, await uploadImage(ctx, data, image === '-' ? 'image.png' : basename(image)), { raw: true });
+          return;
+        }
         const text = rest.length ? rest.join(' ') : chomp(await readStdin(`Usage: ${USAGE}`));
         await copy(ctx, text);
         return;
@@ -253,7 +336,23 @@ ${c('yellow', 'OPTIONS:')}
         if (!Number.isInteger(n) || n < 1) throw new CliError(`Not an entry number: ${rest[0]}`);
         const entry = entries[n - 1];
         if (!entry) throw new CliError(entries.length ? `There are only ${entries.length} entries` : 'The clipboard note is empty');
-        ctx.result({ label: entry.label, text: entry.text }, () => process.stdout.write(entry.text + (entry.text.endsWith('\n') ? '' : '\n')));
+        const image = clipImage(entry.text);
+        const output = ctx.str('output');
+        // An image goes to a file, or to stdout when that is not a terminal (hedgesync clip > shot.png).
+        if (image && (output || (!process.stdout.isTTY && !ctx.json))) {
+          const png = await downloadImage(image.url);
+          if (output) {
+            writeFileSync(output, png);
+            ctx.info(c('green', `✓ Saved ${output} (${png.length} bytes)`));
+          } else {
+            process.stdout.write(png);
+          }
+          return;
+        }
+        if (output) writeFileSync(output, entry.text.endsWith('\n') ? entry.text : entry.text + '\n');
+        ctx.result({ label: entry.label, text: entry.text, ...(image ? { image: image.url } : {}) }, () => {
+          if (!output) process.stdout.write(entry.text + (entry.text.endsWith('\n') ? '' : '\n'));
+        });
         return;
       }
       case 'watch':

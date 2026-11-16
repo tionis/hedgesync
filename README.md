@@ -1056,6 +1056,8 @@ echo "some text" | hedgesync clip              # copy
 hedgesync clip                                  # paste the newest entry
 hedgesync clip list                             # older entries (paste 3, ...)
 hedgesync clip watch --to-clipboard             # note → this clipboard, live
+hedgesync clip copy --image shot.png            # images too (uploaded, shown in the note)
+hedgesync clip > shot.png                       # an image entry, piped out
 ```
 
 `watch --from-clipboard` also adds what you copy on this machine to the
