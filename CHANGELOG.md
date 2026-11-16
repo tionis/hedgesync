@@ -4,6 +4,11 @@
 
 ### Added
 
+- `hedgesync assistant`: answers `@name` mentions in a note with an agent:
+  Claude Code (`--agent claude`), llm, Ollama, any command reading the
+  prompt on stdin, or any OpenAI-compatible API (`--api`, `--model`). The
+  answer streams into a quote below the request, with the assistant's
+  cursor; `--allow` limits who may ask.
 - `hedgesync serve`: an HTTP endpoint for writing into notes from scripts
   and webhooks. Append, prepend or replace a note or one of its sections
   (`?section=Timeline`), optionally with the time in front; only the notes

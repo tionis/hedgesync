@@ -1011,6 +1011,23 @@ stdin/stdout and does all the operational transformation, so other editors
 can reuse it. See [editors/nvim/README.md](editors/nvim/README.md) and
 `src/editor-bridge.ts` for the protocol.
 
+### An assistant in a note
+
+`hedgesync assistant` answers `@mentions` in a note with an agent of your
+choice. Write `@claude …` (or `@ai …`), pause, and the answer streams in
+below it as a quote, with the assistant's cursor visible. It sees the whole
+note, so follow-ups work, and it is usable from any editor or a phone.
+
+```sh
+hedgesync assistant https://md.example.com/abc --agent claude              # Claude Code (claude -p)
+hedgesync assistant https://md.example.com/abc --agent ollama:llama3.2     # a local model
+hedgesync assistant https://md.example.com/abc --agent ./my-agent.sh       # anything: prompt on stdin
+hedgesync assistant https://md.example.com/abc --api https://openrouter.ai/api/v1 \
+  --model anthropic/claude-sonnet-4.5 --api-key-env OPENROUTER_API_KEY     # any OpenAI-compatible API
+```
+
+Everyone who can edit the note can use it; `--allow <user>` limits that.
+
 ### Writing into notes over HTTP
 
 `hedgesync serve` is a small HTTP endpoint for scripts and webhooks (Home

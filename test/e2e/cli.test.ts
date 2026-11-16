@@ -417,6 +417,91 @@ describe('serve', () => {
   });
 });
 
+describe('assistant', () => {
+  const waitFor = async (cond: () => boolean, tries = 400) => {
+    for (let i = 0; i < tries && !cond(); i++) await Bun.sleep(25);
+    expect(cond()).toBe(true);
+  };
+
+  test.skipIf(process.platform === 'win32')('a command agent answers a mention, streaming, with the request in its environment', async () => {
+    const note = newNote('# Plan\n\nShip on Friday.\n\n@ai old question\n');
+    // Streams in two parts; echoes what it was given.
+    const agent = `sh -c 'grep -q "Ship on Friday" "$HEDGESYNC_NOTE_FILE" && printf "Four"; sleep 0.8; printf ", asked: %s" "$HEDGESYNC_REQUEST"'`;
+    const proc = Bun.spawn(['bun', CLI, 'assistant', note.url, '--agent', agent, '--settle', '0.3'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    try {
+      const person = new HedgeDocClient({ serverUrl: server.url, noteId: note.id });
+      await person.connect();
+      await Bun.sleep(1200); // the assistant is up; the old question stays unanswered
+      person.insert(person.getDocument().length, '\n@ai what is 2+2?\n');
+      await person.flush();
+      // The first part shows while the agent still works (the marker is there until it is done).
+      await waitFor(() => /> \*\*ai:\*\* <!-- hedgesync:\S+ --> Four$/m.test(server.note(note.id).document));
+      await waitFor(() => server.note(note.id).document.includes('asked: @ai what is 2+2?'));
+      await waitFor(() => !server.note(note.id).document.includes('<!-- hedgesync:'));
+      expect(server.note(note.id).document).toBe('# Plan\n\nShip on Friday.\n\n@ai old question\n\n@ai what is 2+2?\n\n> **ai:** Four, asked: @ai what is 2+2?\n');
+      person.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+  });
+
+  test.skipIf(process.platform === 'win32')('--allow: requests from others are left alone', async () => {
+    const note = newNote('');
+    const proc = Bun.spawn(['bun', CLI, 'assistant', note.url, '--agent', 'printf answered', '--allow', 'alice', '--settle', '0.3'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    try {
+      const person = new HedgeDocClient({ serverUrl: server.url, noteId: note.id }); // a guest, not alice
+      await person.connect();
+      await Bun.sleep(1200);
+      person.insert(0, '@ai hello\n');
+      await person.flush();
+      await Bun.sleep(1500);
+      expect(server.note(note.id).document).toBe('@ai hello\n');
+      person.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+    expect(await new Response(proc.stderr).text()).toContain('not in --allow');
+  });
+
+  test('an OpenAI-compatible API, streamed', async () => {
+    let body: any;
+    const api = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        body = await req.json();
+        const events = ['Hel', 'lo!'].map(t => `data: ${JSON.stringify({ choices: [{ delta: { content: t } }] })}\n\n`).join('') + 'data: [DONE]\n\n';
+        return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    const note = newNote('');
+    const proc = Bun.spawn(['bun', CLI, 'assistant', note.url, '--api', `http://127.0.0.1:${api.port}/v1`, '--model', 'm1', '--name', 'bot', '--settle', '0.3'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1', OPENAI_API_KEY: 'k' },
+    });
+    try {
+      const person = new HedgeDocClient({ serverUrl: server.url, noteId: note.id });
+      await person.connect();
+      await Bun.sleep(1200);
+      person.insert(0, 'Hi @bot\n');
+      await person.flush();
+      await waitFor(() => server.note(note.id).document === 'Hi @bot\n\n> **bot:** Hello!\n');
+      expect(body.model).toBe('m1');
+      expect(body.stream).toBe(true);
+      expect(body.messages[1].content).toContain('Hi @bot');
+      person.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+      api.stop(true);
+    }
+  });
+});
+
 describe('arguments and errors', () => {
   test('unknown options are rejected', async () => {
     const r = await cli(['get', 'http://x/y', '--frobnicate']);
