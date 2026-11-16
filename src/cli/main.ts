@@ -119,7 +119,7 @@ export async function main(argv: string[]): Promise<number> {
   } catch (err) {
     const error = toCliError(err);
     if (json) {
-      printJson({ success: false, error: error.message, ...error.details });
+      printJson({ success: false, error: error.message, ...(error.hint ? { hint: error.hint } : {}), ...error.details });
     } else {
       eprint(c('red', `Error: ${error.message}`));
       if (error.hint) eprint(c('dim', error.hint));

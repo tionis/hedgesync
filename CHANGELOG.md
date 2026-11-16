@@ -8,6 +8,7 @@
 
 ### Changed
 
+- `--json` errors include the hint shown in the terminal.
 - CI: current action versions (no Node 20 deprecation warnings), pinned Bun
   and Neovim, the plugin's end-to-end tests run against a real Neovim, unit
   tests also on macOS and Windows, the released binaries are the ones built
