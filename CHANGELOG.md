@@ -19,6 +19,9 @@
 - `hedgesync share <file> [<server-url> | <note-url>]`: share a local file
   live from any editor, or join a shared one; file and note are synced both
   ways (three-way merges) until Ctrl+C.
+- `hedgesync editor nvim install --lazy` also writes a lazy.nvim spec to
+  `lua/plugins/hedgesync.lua` in the Neovim config (or `--lazy-file`), kept
+  current by later installs and removed by `uninstall` unless edited.
 - `hedgesync mcp`: a Model Context Protocol server, so AI agents read,
   search, create and edit notes. Edits are live (merged with people's
   typing, the agent's cursor visible), and `wait_for_change` lets an agent

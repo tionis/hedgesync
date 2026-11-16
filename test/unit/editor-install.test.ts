@@ -4,9 +4,9 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { renderPluginModule, GENERATED } from '../../scripts/gen-nvim-plugin.js';
-import { defaultNvimDir, inspectInstall, installPlugin, MARKER, uninstallPlugin } from '../../src/cli/commands/editor.js';
+import { defaultLazySpecPath, defaultNvimDir, inspectInstall, installPlugin, lazySpecFile, MARKER, uninstallPlugin } from '../../src/cli/commands/editor.js';
 import { NVIM_PLUGIN_FILES } from '../../src/cli/nvim-plugin.generated.js';
 import { BRIDGE_PROTOCOL } from '../../src/editor-bridge.js';
 
@@ -25,6 +25,67 @@ test('plugin and bridge agree on the protocol version', () => {
   expect(Object.keys(NVIM_PLUGIN_FILES)).toEqual(expect.arrayContaining([
     'plugin/hedgesync.lua', 'lua/hedgesync/init.lua', 'lua/hedgesync/health.lua', 'README.md',
   ]));
+});
+
+describe('lazy.nvim spec', () => {
+  const content = (dir: string) => lazySpecFile(dir, false);
+
+  test('default path follows XDG_CONFIG_HOME, NVIM_APPNAME and Windows', () => {
+    expect(defaultLazySpecPath({ XDG_CONFIG_HOME: '/c', NVIM_APPNAME: 'lv' }, 'linux')).toBe(join('/c', 'lv', 'lua', 'plugins', 'hedgesync.lua'));
+    expect(defaultLazySpecPath({ LOCALAPPDATA: 'C:/L' }, 'win32')).toBe(join('C:/L', 'nvim', 'lua', 'plugins', 'hedgesync.lua'));
+  });
+
+  test('the default spec points at the package directory, a custom one at --dir', () => {
+    expect(lazySpecFile('/x', true)).toContain('local dir = vim.fn.stdpath "data" .. "/site/pack/hedgesync/start/hedgesync.nvim"');
+    expect(lazySpecFile('/x/y', false)).toContain('local dir = "/x/y"');
+  });
+
+  test('written with the plugin, kept current, removed on uninstall', () => {
+    const dir = fresh();
+    const spec = join(fresh(), 'lua', 'plugins', 'hedgesync.lua');
+    expect(installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir) }).lazySpec).toBe(spec);
+    expect(readFileSync(spec, 'utf8')).toBe(content(dir));
+    // A later plain install updates an unedited spec.
+    installPlugin(dir, { lazySpecContent: 'newer' });
+    expect(readFileSync(spec, 'utf8')).toBe('newer');
+    uninstallPlugin(dir);
+    expect(existsSync(spec)).toBe(false);
+  });
+
+  test('an edited spec is left alone, without blocking plugin updates', () => {
+    const dir = fresh();
+    const spec = join(fresh(), 'hedgesync.lua');
+    installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir) });
+    writeFileSync(spec, '-- mine');
+    expect(inspectInstall(dir)).toMatchObject({ state: 'current', lazySpec: spec, lazySpecEdited: true });
+    installPlugin(dir, { lazySpecContent: 'newer' });
+    expect(readFileSync(spec, 'utf8')).toBe('-- mine');
+    expect(() => installPlugin(dir, { lazySpecPath: spec, lazySpecContent: 'newer' })).toThrow(/exists with other content/);
+    uninstallPlugin(dir);
+    expect(readFileSync(spec, 'utf8')).toBe('-- mine');
+  });
+
+  test('an existing file is replaced only if identical or with --force', () => {
+    const dir = fresh();
+    const spec = join(fresh(), 'hedgesync.lua');
+    mkdirSync(dirname(spec), { recursive: true });
+    writeFileSync(spec, content(dir));
+    expect(installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir) }).lazySpecEdited).toBe(false);
+    writeFileSync(spec, '-- someone else');
+    expect(() => installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir) })).toThrow(/exists with other content/);
+    installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir), force: true });
+    expect(readFileSync(spec, 'utf8')).toBe(content(dir));
+  });
+
+  test('a deleted spec is no longer managed', () => {
+    const dir = fresh();
+    const spec = join(fresh(), 'hedgesync.lua');
+    installPlugin(dir, { lazySpecPath: spec, lazySpecContent: content(dir) });
+    rmSync(spec);
+    installPlugin(dir, { lazySpecContent: content(dir) });
+    expect(existsSync(spec)).toBe(false);
+    expect(inspectInstall(dir).lazySpec).toBeUndefined();
+  });
 });
 
 describe('defaultNvimDir', () => {

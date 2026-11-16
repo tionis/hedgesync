@@ -28,8 +28,18 @@ tells you whether you need to). Local edits to the installed plugin are never
 overwritten without `--force`. If the CLI and the plugin speak different
 protocol versions, the plugin refuses to start and tells you which to update.
 
-Neovim loads the package directory by itself. lazy.nvim does not, so add a
-spec pointing at it (`install` prints it):
+Neovim loads the package directory by itself. lazy.nvim does not; with
+lazy.nvim, install with `--lazy`:
+
+```sh
+hedgesync editor nvim install --lazy   # also writes ~/.config/nvim/lua/plugins/hedgesync.lua
+```
+
+That adds a spec for the installed copy where lazy.nvim's `{ import =
+"plugins" }` finds it (`--lazy-file <path>` puts it elsewhere). Later
+installs keep it current and `uninstall` removes it, unless you edited it;
+an existing file with other content is only replaced with `--force`. Or add
+the spec yourself:
 
 ```lua
 {

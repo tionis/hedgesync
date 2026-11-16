@@ -670,7 +670,7 @@ describe('editor nvim', () => {
     r = await cli(['editor', 'nvim', 'install', '--dir', dir]);
     expect(r.code).toBe(0);
     expect(r.stderr).toContain('installed');
-    expect(r.stderr).toContain(`{ dir = "${dir}", name = "hedgesync.nvim", lazy = false, opts = {} }`);
+    expect(r.stderr).toContain('run again with --lazy');
     expect(existsSync(join(dir, 'lua/hedgesync/init.lua'))).toBe(true);
 
     r = await cli(['editor', 'nvim', 'status', '--dir', dir, '--json']);
@@ -688,6 +688,27 @@ describe('editor nvim', () => {
 
     expect((await cli(['editor', 'nvim', 'uninstall', '--dir', dir])).code).toBe(0);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  test('--lazy writes a lazy.nvim spec, and uninstall removes it', async () => {
+    const dir = join(tmp, 'nvim-lazy', 'plugin');
+    const spec = join(tmp, 'nvim-lazy', 'config', 'lua', 'plugins', 'hedgesync.lua');
+    let r = await cli(['editor', 'nvim', 'install', '--dir', dir, '--lazy-file', spec, '--json']);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ action: 'installed', lazySpec: spec });
+    expect(readFileSync(spec, 'utf8')).toContain(`local dir = "${dir}"`);
+
+    r = await cli(['editor', 'nvim', 'status', '--dir', dir]);
+    expect(r.stdout).toContain(`lazy spec:   ${spec}`);
+
+    // With XDG_CONFIG_HOME, --lazy alone writes into that config.
+    r = await cli(['editor', 'nvim', 'install', '--dir', dir, '--lazy'], { env: { XDG_CONFIG_HOME: join(tmp, 'nvim-lazy', 'xdg') } });
+    expect(r.code).toBe(0);
+    expect(existsSync(join(tmp, 'nvim-lazy', 'xdg', 'nvim', 'lua', 'plugins', 'hedgesync.lua'))).toBe(true);
+
+    r = await cli(['editor', 'nvim', 'uninstall', '--dir', dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain('Removed the lazy.nvim spec');
   });
 
   test('bridge --info reports the protocol', async () => {

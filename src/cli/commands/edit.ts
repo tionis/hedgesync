@@ -20,7 +20,7 @@ import { assertEditable, connectionOptions, readOnlyReason, type Command, type C
 import { helpText } from '../help-text.js';
 import { NVIM_PLUGIN_FILES } from '../nvim-plugin.generated.js';
 import { CliError, c } from '../ui.js';
-import { defaultNvimDir, inspectInstall, installPlugin } from './editor.js';
+import { defaultNvimDir, inspectInstall, installPlugin, lazySpecFile } from './editor.js';
 
 /** The editor command line: --editor, $VISUAL, $EDITOR, else nvim. */
 export function chooseEditor(option: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
@@ -61,7 +61,7 @@ function pluginDirForSession(ctx: Context): string {
   const installed = inspectInstall(defaultNvimDir());
   if (installed.state === 'current') return installed.dir;
   if (installed.state === 'outdated' && !installed.edited.length && !installed.missing.length) {
-    installPlugin(installed.dir);
+    installPlugin(installed.dir, { lazySpecContent: lazySpecFile(installed.dir, true) });
     ctx.info(c('dim', `Updated the installed Neovim plugin to ${VERSION}`));
     return installed.dir;
   }

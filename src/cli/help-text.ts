@@ -668,7 +668,7 @@ ${c('yellow', 'OPTIONS:')}
 ${c('bold', 'hedgesync editor')} - Install the editor plugin bundled with this binary
 
 ${c('yellow', 'USAGE:')}
-  hedgesync editor nvim install    [--dir <path>] [--force]
+  hedgesync editor nvim install    [--dir <path>] [--lazy [--lazy-file <path>]] [--force]
   hedgesync editor nvim status     [--dir <path>]
   hedgesync editor nvim path       [--dir <path>]
   hedgesync editor nvim uninstall  [--dir <path>] [--force]
@@ -678,14 +678,21 @@ ${c('yellow', 'DESCRIPTION:')}
   binary, so the installed copy always matches the bridge it talks to. Run
   install again after updating hedgesync. By default it goes into Neovim's
   package directory, stdpath("data")/site/pack/hedgesync/start/hedgesync.nvim
-  (respects NVIM_APPNAME and XDG_DATA_HOME). lazy.nvim does not load that
-  directory; install prints the spec to add.
+  (respects NVIM_APPNAME and XDG_DATA_HOME).
+
+  lazy.nvim does not load that directory. --lazy also writes a lazy.nvim spec
+  for the plugin to stdpath("config")/lua/plugins/hedgesync.lua (or
+  --lazy-file), which lazy.nvim's { import = "plugins" } picks up. Later
+  installs keep it current, and uninstall removes it, unless you edited it.
+  An existing file with other content is only replaced with --force.
 
   status exits with 1 unless the installed copy matches this binary. Files
   you edited are never overwritten or removed without --force.
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '--dir <path>')}   Install somewhere else
+  ${c('cyan', '--lazy')}         Also write a lazy.nvim spec into the Neovim config
+  ${c('cyan', '--lazy-file <path>')} Write the spec there instead (implies --lazy)
   ${c('cyan', '--force')}        Overwrite or remove local changes
   ${c('cyan', '--json')}         Machine-readable output
 `,
