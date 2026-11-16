@@ -56,9 +56,14 @@ jobs:
       - name: Feature tests
         run: bun run test/test-all-features.ts
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24 # node:sqlite, for reading browser cookies
+
       - name: Build the npm package and smoke-test the Node CLI
         run: |
           bun run build
+          node test/node/browser-cookies.mjs
           node dist/cli/bin.js help > /dev/null
           node dist/cli/bin.js bridge --info
           node dist/cli/bin.js editor nvim install --dir "$RUNNER_TEMP/nvim-plugin" -q

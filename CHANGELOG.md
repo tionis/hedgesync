@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `login --from-browser` with Chrome, Brave, Chromium, Edge or Vivaldi
+  failed on Node.js ("Value is too large to be represented as a JavaScript
+  number"): Chromium's cookie timestamps exceed what node:sqlite returns as
+  numbers. They are now converted in SQL. A test runs this on Node in CI.
+
 ## 2.4.0 (2026-11-16)
 
 ### Added

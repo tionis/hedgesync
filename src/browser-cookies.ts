@@ -311,7 +311,8 @@ async function readFirefox(browser: FirefoxBrowser, target: URL, options: Browse
   const candidates: CookieCandidate[] = [];
   for (const profile of profiles) {
     const rows = await withDatabaseCopy(join(profile.dir, 'cookies.sqlite'), db =>
-      db.all('SELECT name, value, host, path, isSecure, lastAccessed, originAttributes FROM moz_cookies'));
+      // Times are divided in SQL: node:sqlite refuses integers above 2^53.
+      db.all('SELECT name, value, host, path, isSecure, lastAccessed / 1000 AS lastAccessedMs, originAttributes FROM moz_cookies'));
     // Group by container / partition (originAttributes), since each is a separate cookie jar.
     const jars = new Map<string, BrowserCookie[]>();
     for (const row of rows) {
@@ -326,7 +327,7 @@ async function readFirefox(browser: FirefoxBrowser, target: URL, options: Browse
         host,
         path,
         secure: Number(row.isSecure) === 1,
-        lastAccessed: Number(row.lastAccessed) / 1000, // microseconds -> ms
+        lastAccessed: Number(row.lastAccessedMs), // stored in microseconds
       });
     }
     for (const [jar, cookies] of jars) {
@@ -507,7 +508,8 @@ async function readChromium(browser: ChromiumBrowser, target: URL, options: Brow
       }
       return {
         dbVersion: version,
-        rows: db.all('SELECT host_key, name, value, encrypted_value, path, is_secure, last_access_utc FROM cookies'),
+        // Microseconds since 1601 (about 1.3e16) are too large for node:sqlite: divide in SQL.
+        rows: db.all('SELECT host_key, name, value, encrypted_value, path, is_secure, last_access_utc / 1000 AS last_access_ms FROM cookies'),
       };
     });
     const cookies: BrowserCookie[] = [];
@@ -527,7 +529,7 @@ async function readChromium(browser: ChromiumBrowser, target: URL, options: Brow
         path,
         secure: Number(row.is_secure) === 1,
         // Chromium time: microseconds since 1601-01-01.
-        lastAccessed: Number(row.last_access_utc) / 1000 - 11644473600000,
+        lastAccessed: Number(row.last_access_ms) - 11644473600000, // 1601 -> 1970
       });
     }
     const candidate = toCandidate(browser, profile.display ?? profile.name, cookies);
