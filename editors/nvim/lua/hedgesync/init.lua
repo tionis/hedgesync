@@ -625,6 +625,11 @@ function M.close_all(timeout)
 end
 
 --- Session for a buffer (for statuslines and tests).
+--- Every open note session, by buffer.
+function M.sessions()
+  return sessions
+end
+
 function M.session(buf)
   return sessions[(buf == nil or buf == 0) and api.nvim_get_current_buf() or buf]
 end

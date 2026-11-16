@@ -51,17 +51,46 @@ and run the CLI from the same checkout (`cmd = { "bun", "<checkout>/bin/hedgesyn
 
 ## Use
 
-From the shell, `hedgesync edit <url>` starts Neovim on the note (this works
-even before the plugin is installed: it loads the matching copy for that
-session). Inside Neovim:
+From the shell, `hedgesync edit <url>` starts Neovim on the note, and
+`hedgesync edit` alone opens your notes to pick from (both work even before
+the plugin is installed: they load the matching copy for that session).
+Inside Neovim:
 
 ```vim
 :Hedge open https://md.example.com/abc123
-:e hedgedoc://md.example.com/abc123      " same thing
-:Hedge users                              " who has a cursor in the note
+:e hedgedoc://md.example.com/abc123       " same thing; also `nvim hedgedoc://... +42`
+:Hedge browse [server]                     " your notes (see below)
+:Hedge find [server]                       " pick a note with vim.ui.select / your fuzzy finder
+:Hedge new [title]                         " create a note and open it
+:'<,'>Hedge new                            " ... with the selected lines as its content
+:Hedge search <text>                       " search your notes' text into the quickfix list
+:Hedge revisions                           " this note's revisions: view, diff, restore
+:Hedge url [publish|slide]                 " copy the note's (published, slide) URL
+:Hedge users                               " who else is in the note
 :Hedge status
-:Hedge close                              " stop syncing this buffer
+:Hedge close                               " stop syncing this buffer
 ```
+
+`:Hedge browse` lists the notes in your HedgeDoc history, pinned first,
+with tags and when you last opened them. The server is the one given, the
+current note's, the last one used, or your saved login's (you are asked if
+there are several). Keys (`?` shows them):
+
+| Key | | Key | |
+|---|---|---|---|
+| `<CR>` | open | `<C-v>` / `<C-x>` | open in a vertical / horizontal split |
+| `n` | new note | `p` | pin / unpin |
+| `r` | revisions | `y` | copy the URL |
+| `D` | remove from history (the note stays) | `s` | search text (quickfix) |
+| `R` | reload | `q` | close |
+
+In `:Hedge revisions`, `<CR>` shows a revision, `d` diffs it against the
+live note side by side, and `R` restores it. Restoring is an edit in the
+live buffer, synced like typing, so `u` takes it back.
+
+Search results open the note live at the matching line (`:cnext` and
+friends work as usual). Notes appear in your history once opened while
+signed in, which includes opening them with this plugin.
 
 There is nothing to save: every change is sent as you make it, and `:w`
 just confirms the connection state. If the connection drops, keep typing;
@@ -105,4 +134,5 @@ is reset from the note rather than drifting.
   Neovim has one undo history per buffer and cannot skip remote changes.
 - A note is shown with lines joined by `\n`; `\r\n` line endings from
   Windows clients show as `^M`.
-- Browsing notes (history picker) is not there yet; open notes by URL.
+- HedgeDoc 1 has no "all my notes" listing: browse and search see the notes
+  in your history (`hedgesync export` gets everything you own).

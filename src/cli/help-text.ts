@@ -694,6 +694,7 @@ ${c('bold', 'hedgesync edit')} - Open a note in your editor
 
 ${c('yellow', 'USAGE:')}
   hedgesync edit <url> [--editor <cmd>] [--no-live]
+  hedgesync edit [<server-url>]        Browse your notes (Neovim)
 
 ${c('yellow', 'DESCRIPTION:')}
   Opens the note in --editor, $VISUAL or $EDITOR (default: nvim).
@@ -707,6 +708,10 @@ ${c('yellow', 'DESCRIPTION:')}
   note, keeping edits others made meanwhile, and once more when the editor
   exits. Changes others make are not shown in the file.
 
+  Without a note, Neovim opens :Hedge browse: the notes in your history on
+  that server (or your saved login's), to open, pin, create or search, with
+  revisions to view, diff and restore.
+
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-e, --editor <cmd>')} Editor command line (may include arguments)
   ${c('cyan', '--no-live')}          Use the temp-file mode even with Neovim
@@ -715,5 +720,6 @@ ${c('yellow', 'OPTIONS:')}
 ${c('yellow', 'EXAMPLES:')}
   hedgesync edit https://md.example.com/abc123
   hedgesync edit https://md.example.com/abc123 -e "code --wait"
+  hedgesync edit                        # browse your notes in Neovim
 `,
 };

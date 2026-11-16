@@ -4,6 +4,15 @@
 
 ### Added
 
+- Neovim: `:Hedge browse` lists your notes (history: pinned, tags, last
+  opened) to open, pin, create, remove or search; `:Hedge find` picks one
+  with `vim.ui.select`; `:Hedge new [title]` creates a note and opens it
+  (`:'<,'>Hedge new` from the selected lines); `:Hedge search` puts matches
+  in the quickfix list; `:Hedge revisions` views a revision, diffs it
+  against the live note or restores it as an undoable edit; `:Hedge url
+  [publish|slide]` copies a link.
+- `hedgesync edit` without a note opens `:Hedge browse` (on the given server
+  or your saved login's).
 - Release binaries for linux-arm64 and linux-x64-musl (Alpine).
 
 ### Changed

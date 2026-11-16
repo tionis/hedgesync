@@ -3,9 +3,35 @@ if vim.g.loaded_hedgesync then
 end
 vim.g.loaded_hedgesync = true
 
+local function ui()
+  return require("hedgesync.ui")
+end
+
 local subcommands = {
   open = function(args)
     require("hedgesync").open(args)
+  end,
+  browse = function(args)
+    ui().browse(args)
+  end,
+  find = function(args)
+    ui().find(args)
+  end,
+  new = function(args, opts)
+    local lines
+    if opts.range > 0 then
+      lines = vim.api.nvim_buf_get_lines(0, opts.line1 - 1, opts.line2, false)
+    end
+    ui().new({ title = args ~= "" and args or nil, lines = lines })
+  end,
+  search = function(args)
+    ui().search(args)
+  end,
+  revisions = function()
+    ui().revisions()
+  end,
+  url = function(args)
+    ui().url(args)
   end,
   close = function()
     require("hedgesync").close(0)
@@ -18,21 +44,41 @@ local subcommands = {
   end,
 }
 
+local usage = table.concat({
+  "usage: :Hedge <command>",
+  "  open <url>        edit a note live (or :e hedgedoc://host/id)",
+  "  browse [server]   your notes: open, pin, create, revisions",
+  "  find [server]     pick a note with vim.ui.select",
+  "  new [title]       create a note and open it (with a range: from those lines)",
+  "  search <text>     search your notes' text into the quickfix list",
+  "  revisions         this note's revisions: view, diff, restore",
+  "  url [publish|slide]  copy this note's URL",
+  "  users | status | close",
+}, "\n")
+
 vim.api.nvim_create_user_command("Hedge", function(opts)
   local sub, rest = opts.args:match("^(%S+)%s*(.*)$")
   local fn = subcommands[sub or ""]
   if not fn then
-    vim.notify("usage: :Hedge open <url> | close | users | status", vim.log.levels.ERROR)
+    vim.notify(usage, sub and vim.log.levels.ERROR or vim.log.levels.INFO)
     return
   end
-  fn(rest)
+  fn(rest, opts)
 end, {
   nargs = "*",
+  range = true,
   complete = function(arglead, line)
     if line:match("^%S+%s+%S*$") then
+      local names = vim.tbl_keys(subcommands)
+      table.sort(names)
       return vim.tbl_filter(function(name)
         return name:find(arglead, 1, true) == 1
-      end, vim.tbl_keys(subcommands))
+      end, names)
+    end
+    if line:match("^%S+%s+url%s+%S*$") then
+      return vim.tbl_filter(function(name)
+        return name:find(arglead, 1, true) == 1
+      end, { "edit", "publish", "slide" })
     end
     return {}
   end,

@@ -86,20 +86,39 @@ function runEditor(editor: string, args: string[], env: NodeJS.ProcessEnv): Prom
   });
 }
 
-async function editLive(ctx: Context, editor: string, url: string): Promise<number> {
-  // Fail here, with the CLI's error messages, rather than in an empty editor.
-  const probe = await ctx.connect(0);
-  const readOnly = probe.canEdit() ? undefined : readOnlyReason(probe.getNoteInfo().permission, probe.serverUrl);
-  probe.disconnect();
-  if (readOnly) ctx.warn(`Read-only: ${readOnly}`);
+/**
+ * Neovim with the plugin: `:Hedge open <url>`, or with no note `:Hedge browse
+ * [server]`.
+ */
+async function editLive(ctx: Context, editor: string, target: { url: string } | { browse: string }): Promise<number> {
+  if ('url' in target) {
+    // Fail here, with the CLI's error messages, rather than in an empty editor.
+    const probe = await ctx.connect(0);
+    const readOnly = probe.canEdit() ? undefined : readOnlyReason(probe.getNoteInfo().permission, probe.serverUrl);
+    probe.disconnect();
+    if (readOnly) ctx.warn(`Read-only: ${readOnly}`);
+  }
   const dir = pluginDirForSession(ctx);
   // After the user's config: load the plugin unless it already did (lazy.nvim
   // resets the runtimepath, so --cmd would be too early).
   const load = `lua if vim.fn.exists(':Hedge') ~= 2 then vim.opt.rtp:prepend(${luaString(dir)}); vim.cmd('runtime plugin/hedgesync.lua') end`;
   const env = { ...process.env, HEDGESYNC_CMD: JSON.stringify(selfCommand()) };
-  const code = await runEditor(editor, ['-c', load, '-c', `Hedge open ${url}`], env);
+  const hedge = 'url' in target ? `Hedge open ${target.url}` : `Hedge browse ${target.browse}`.trim();
+  const code = await runEditor(editor, ['-c', load, '-c', hedge], env);
   if (code === 127) throw new CliError(`Editor not found: ${editor}`, 'Set $EDITOR or pass --editor.');
   return code;
+}
+
+/** The server URL if `arg` is one with no note path (https://md.example.com), else undefined. */
+export function serverOnly(arg: string): string | undefined {
+  try {
+    const u = new URL(arg);
+    return (u.protocol === 'https:' || u.protocol === 'http:') && (u.pathname === '/' || u.pathname === '') && !u.search
+      ? u.origin
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function luaString(s: string): string {
@@ -173,11 +192,20 @@ export const edit: Command = {
   options: [...connectionOptions, { name: 'editor', short: 'e', type: 'value' }, { name: 'no-live', type: 'flag' }],
   help: helpText.edit,
   async run(ctx) {
-    const { url } = ctx.note(0, 'hedgesync edit <url> [--editor <cmd>]');
+    const usage = 'hedgesync edit [<note-url> | <server-url>] [--editor <cmd>]';
     const editor = chooseEditor(ctx.str('editor'));
-    const code = isNeovim(editor) && !ctx.flag('no-live')
-      ? await editLive(ctx, editor, url)
-      : await editFile(ctx, editor);
+    const live = isNeovim(editor) && !ctx.flag('no-live');
+    const arg = ctx.positional[0];
+    // No note: browse your notes (on that server, or the saved login's).
+    const server = arg === undefined ? '' : serverOnly(arg);
+    if (server !== undefined) {
+      if (!live) throw new CliError('Which note?', `Browsing notes needs Neovim (the plugin). Usage: ${usage}`);
+      const code = await editLive(ctx, editor, { browse: server });
+      if (code !== 0) process.exitCode = code;
+      return;
+    }
+    const { url } = ctx.note(0, usage);
+    const code = live ? await editLive(ctx, editor, { url }) : await editFile(ctx, editor);
     if (code !== 0) process.exitCode = code;
   },
 };

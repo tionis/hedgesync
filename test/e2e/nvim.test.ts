@@ -125,7 +125,7 @@ describe.skipIf(!NVIM)('neovim plugin', () => {
 });
 
 /** Run headless nvim with the plugin from `rtp`, a setup() cmd, and a Lua snippet; returns what it wrote to $OUT. */
-async function nvimWith(rtp: string, cmd: string[], lua: string): Promise<string> {
+async function nvimWith(rtp: string, cmd: string[], lua: string, env: Record<string, string> = {}): Promise<string> {
   const dir = mkdtempSync(join(tmp, 'misc-'));
   const out = join(dir, 'out');
   const script = join(dir, 'script.lua');
@@ -145,7 +145,7 @@ ${lua}
   const proc = Bun.spawn([NVIM!, '--headless', '--clean', '-n', '-l', script], {
     stdout: 'pipe',
     stderr: 'pipe',
-    env: { PATH: process.env.PATH ?? '', HOME: dir, RTP: rtp, CMD: JSON.stringify(cmd), OUT: out, HEDGESYNC_COOKIE_FILE: join(dir, 'cookies.json') },
+    env: { PATH: process.env.PATH ?? '', HOME: dir, RTP: rtp, CMD: JSON.stringify(cmd), OUT: out, HEDGESYNC_COOKIE_FILE: join(dir, 'cookies.json'), ...env },
   });
   await proc.exited;
   if (!existsSync(out)) throw new Error(`nvim wrote nothing:\n${await new Response(proc.stderr).text()}`);
@@ -184,5 +184,105 @@ finish(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\\n"))
     expect(report).toMatch(/Plugin in \S+ matches the CLI/);
     expect(report).toContain('No saved logins');
     expect(report).not.toMatch(/ERROR/);
+  });
+});
+
+describe.skipIf(!NVIM)('neovim plugin: browse, new, search, revisions', () => {
+  const signedIn = { HEDGEDOC_COOKIE: 'connect.sid=good' };
+  // Polls until cond() holds; fails the script (and so the test) otherwise.
+  const PRELUDE = `
+vim.fn.confirm = function() return 1 end
+local ui = require("hedgesync.ui")
+local function until_(what, cond)
+  if not vim.wait(15000, cond, 20) then finish("timed out waiting for " .. what .. "\\n" .. table.concat(notes, "\\n")) end
+end
+local function lines(buf) return table.concat(vim.api.nvim_buf_get_lines(buf or 0, 0, -1, false), "\\n") end
+local function press(keys) vim.api.nvim_feedkeys(vim.keycode(keys), "x", false) end
+`;
+
+  test(':Hedge browse lists the history; <CR> opens the note, p pins it', async () => {
+    server.history.splice(0, server.history.length,
+      { id: 'b-one', text: 'First note', time: Date.now() - 60_000, tags: ['work'], pinned: true },
+      { id: 'b-two', text: 'Second note', time: Date.now() - 7_200_000, tags: [], pinned: false });
+    server.note('b-two').document = '# Second note\n\nbody\n';
+    const out = await nvimWith(PLUGIN, ['bun', CLI], PRELUDE + `
+ui.browse("${server.url}")
+until_("the list", function() return lines():find("Second note") end)
+local listing = lines()
+vim.cmd("normal! 4G")
+press("p")
+until_("the pin", function() return lines():find("★ Second") end)
+vim.cmd("normal! 4G")
+press("<CR>")
+until_("the note", function() local s = hs.session(0); return s and s.loaded end)
+finish(listing .. "\\n---\\n" .. lines())
+`, signedIn);
+    const [listing, note] = out.split('\n---\n');
+    expect(listing).toContain(`${server.url} · 2 notes`);
+    expect(listing).toMatch(/★ First note +1 min ago +#work/);
+    expect(listing).toMatch(/  Second note +2 h ago/);
+    expect(note).toBe('# Second note\n\nbody\n');
+    expect(server.history.find(h => h.id === 'b-two')?.pinned).toBe(true);
+  });
+
+  test(':Hedge new creates a note (from a title or a range) and opens it live', async () => {
+    const out = await nvimWith(PLUGIN, ['bun', CLI], PRELUDE + `
+ui.last_server = "${server.url}"
+vim.cmd("Hedge new Groceries")
+until_("the titled note", function() local s = hs.session(0); return s and s.loaded end)
+local titled = vim.api.nvim_buf_get_name(0) .. " @" .. vim.api.nvim_win_get_cursor(0)[1]
+vim.api.nvim_buf_set_lines(0, 2, 3, false, { "* milk" })
+vim.cmd("enew")
+vim.api.nvim_buf_set_lines(0, 0, -1, false, { "alpha", "beta", "gamma" })
+vim.cmd("2,3Hedge new")
+until_("the range note", function() local s = hs.session(0); return s and s.loaded and s.url ~= nil end)
+vim.wait(800)
+finish(titled .. "\\n" .. vim.api.nvim_buf_get_name(0))
+`, signedIn);
+    const [titled, ranged] = out.split('\n');
+    const id1 = /\/(created\d+) @3$/.exec(titled)?.[1];
+    const id2 = /\/(created\d+)$/.exec(ranged)?.[1];
+    expect(id1).toBeTruthy();
+    // The buffer's last line is the empty one after the note's final newline.
+    expect(server.note(id1!).document).toBe('# Groceries\n\n* milk');
+    expect(server.note(id2!).document).toBe('beta\ngamma\n');
+  });
+
+  test(':Hedge search fills the quickfix list; jumping opens the note at the line', async () => {
+    server.history.splice(0, server.history.length, { id: 's-one', text: 'Searchable', time: Date.now(), tags: [], pinned: false });
+    server.note('s-one').document = 'one\ntwo\nthe needle is here\nfour\n';
+    const out = await nvimWith(PLUGIN, ['bun', CLI], PRELUDE + `
+ui.search("needle", "${server.url}")
+until_("results", function() return #vim.fn.getqflist() > 0 end)
+vim.cmd("cfirst")
+until_("the note", function() local s = hs.session(0); return s and s.loaded end)
+finish(vim.fn.getqflist()[1].text .. "\\n" .. vim.api.nvim_get_current_line())
+`, signedIn);
+    expect(out).toBe('Searchable │ the needle is here\nthe needle is here');
+  });
+
+  test(':Hedge revisions restores a revision as an undoable edit; d diffs it', async () => {
+    const id = 'r-note';
+    Object.assign(server.note(id), { document: 'now\n', permission: 'freely' });
+    server.note(id).revisions.push({ time: Date.now() - 3_600_000, content: 'then\n' });
+    const out = await nvimWith(PLUGIN, ['bun', CLI], PRELUDE + `
+local buf = hs.open("${server.url}/${id}")
+until_("the note", function() return hs.session(buf).loaded end)
+ui.revisions()
+until_("the list", function() return lines():find("~0") end)
+local listing = lines()
+press("d")
+until_("the diff", function() return #vim.tbl_filter(function(w) return vim.wo[w].diff end, vim.api.nvim_list_wins()) == 2 end)
+vim.cmd("wincmd b")
+press("R")
+until_("the restore", function() return lines(buf) == "then\\n" end)
+vim.wait(800)
+vim.api.nvim_buf_call(buf, function() vim.cmd("undo") end)
+vim.wait(800)
+finish(listing)
+`, signedIn);
+    expect(out).toMatch(/Revisions of r-note/);
+    expect(out).toMatch(/~0 +\d{4}-\d\d-\d\d \d\d:\d\d  1 h ago +5 chars/);
+    expect(server.note(id).document).toBe('now\n'); // restored, then undone
   });
 });

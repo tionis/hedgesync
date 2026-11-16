@@ -1,5 +1,5 @@
-import { expect, test } from 'bun:test';
-import { chooseEditor, isNeovim, selfCommand } from '../../src/cli/commands/edit.js';
+import { describe, expect, test } from 'bun:test';
+import { chooseEditor, isNeovim, selfCommand, serverOnly } from '../../src/cli/commands/edit.js';
 
 test('editor choice: --editor, then $VISUAL, then $EDITOR, then nvim', () => {
   expect(chooseEditor('hx', { VISUAL: 'vim', EDITOR: 'nano' })).toBe('hx');
@@ -22,4 +22,18 @@ test('selfCommand: compiled binary alone, script with its runtime', () => {
   expect(selfCommand(['C:\\hs.exe', 'B:\\~BUN\\root\\hs.exe'], 'C:\\hs.exe')).toEqual(['C:\\hs.exe']);
   expect(selfCommand(['/bin/bun', '/repo/bin/hedgesync.ts', 'edit'], '/bin/bun')).toEqual(['/bin/bun', '/repo/bin/hedgesync.ts']);
   expect(selfCommand(['/bin/node', '/lib/dist/cli/bin.js'], '/bin/node')).toEqual(['/bin/node', '/lib/dist/cli/bin.js']);
+});
+
+describe('serverOnly (hedgesync edit <server> browses)', () => {
+  test('a bare server URL is a server', () => {
+    expect(serverOnly('https://md.example.com')).toBe('https://md.example.com');
+    expect(serverOnly('https://md.example.com/')).toBe('https://md.example.com');
+    expect(serverOnly('http://localhost:3000')).toBe('http://localhost:3000');
+  });
+  test('a note URL or anything else is not', () => {
+    expect(serverOnly('https://md.example.com/abc123')).toBeUndefined();
+    expect(serverOnly('https://md.example.com/?both')).toBeUndefined();
+    expect(serverOnly('abc123')).toBeUndefined();
+    expect(serverOnly('hedgedoc://md.example.com')).toBeUndefined();
+  });
 });

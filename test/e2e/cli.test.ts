@@ -738,6 +738,12 @@ sed -i 's/three/THREE/' "$f"
     expect(server.note(locked.id).document).toBe('x');
   });
 
+  test('without a note it browses, which needs Neovim', async () => {
+    const r = await cli(['edit', '--editor', 'vi']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('Browsing notes needs Neovim');
+  });
+
   test('fails before starting Neovim when the note cannot be reached', async () => {
     const marker = join(tmp, 'editor-started');
     const r = await cli(['edit', 'http://127.0.0.1:1/nothing', '--editor', `nvim-would-start; touch ${marker}`]);

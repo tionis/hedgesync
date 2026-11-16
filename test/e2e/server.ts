@@ -97,6 +97,24 @@ export async function startTestServer(initial: Record<string, string | { documen
       if (!userOf(req.headers.cookie)) return send(403, 'Forbidden');
       return send(200, JSON.stringify({ history }), 'application/json');
     }
+    const entry = /^\/history\/([^/]+)$/.exec(url.pathname);
+    if (entry) {
+      if (!userOf(req.headers.cookie)) return send(403, 'Forbidden');
+      const i = history.findIndex(h => h.id === decodeURIComponent(entry[1]));
+      if (i < 0) return send(404, 'Not Found');
+      if (req.method === 'DELETE') {
+        if (url.searchParams.get('token') !== 'tok') return send(403, 'Forbidden');
+        history.splice(i, 1);
+        return send(200, '');
+      }
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        history[i].pinned = new URLSearchParams(body).get('pinned') === 'true';
+        send(200, '');
+      });
+      return;
+    }
     if (url.pathname === '/new' && (req.method === 'POST' || req.method === 'GET')) {
       const id = `created${++created}`;
       let body = '';
@@ -136,6 +154,13 @@ export async function startTestServer(initial: Record<string, string | { documen
     socket.join(room);
     const userId = userOf(socket.handshake.headers.cookie);
     (socket.data as { userId: string | null }).userId = userId;
+    // Like HedgeDoc 1, a signed-in connection puts the note into the history.
+    if (userId) {
+      const title = /^#\s+(.*)$/m.exec(n.document)?.[1] ?? id;
+      const existing = history.find(h => h.id === id);
+      if (existing) Object.assign(existing, { text: title, time: Date.now() });
+      else history.unshift({ id, text: title, time: Date.now(), tags: [], pinned: false });
+    }
     const info = () => ({ title: id, permission: n.permission, owner: n.owner, authors: {}, authorship: [] });
     const users = () => [...io.sockets.adapter.rooms.get(room) ?? []].map(sid => ({
       id: sid,
