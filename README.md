@@ -1009,6 +1009,22 @@ stdin/stdout and does all the operational transformation, so other editors
 can reuse it. See [editors/nvim/README.md](editors/nvim/README.md) and
 `src/editor-bridge.ts` for the protocol.
 
+### Clipboard across devices
+
+A private note as a clipboard: copy on one machine, paste on another, or
+open the note in a phone's browser.
+
+```sh
+hedgesync clip setup https://md.example.com   # once: creates a private note
+echo "some text" | hedgesync clip              # copy
+hedgesync clip                                  # paste the newest entry
+hedgesync clip list                             # older entries (paste 3, ...)
+hedgesync clip watch --to-clipboard             # note → this clipboard, live
+```
+
+`watch --from-clipboard` also adds what you copy on this machine to the
+note, skipping entries password managers mark as secret.
+
 ### Notes for AI agents (MCP)
 
 `hedgesync mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)

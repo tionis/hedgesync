@@ -295,6 +295,70 @@ describe('edit --new', () => {
   });
 });
 
+describe('clip', () => {
+  const home = () => join(tmp, 'clip-home');
+  const env = () => ({ HOME: home(), HEDGESYNC_COOKIE_FILE: join(home(), 'cookies.json'), HEDGEDOC_COOKIE: 'connect.sid=good' });
+
+  test('setup, copy, paste, list, and an entry written in the browser', async () => {
+    let r = await cli(['clip', 'setup', server.url], { env: env() });
+    expect(r.code).toBe(0);
+    const url = r.stdout.trim();
+    const id = url.slice(url.lastIndexOf('/') + 1);
+    expect(server.note(id).permission).toBe('private');
+    expect((await cli(['clip', 'setup', server.url], { env: env() })).stderr).toContain('Already set up');
+
+    expect((await cli(['clip'], { env: env(), stdin: 'first\n' })).code).toBe(0);
+    expect((await cli(['clip', 'copy', 'second', 'one'], { env: env() })).code).toBe(0);
+    expect((await cli(['clip', 'paste'], { env: env() })).stdout).toBe('second one\n');
+    expect((await cli(['clip', 'paste', '2'], { env: env() })).stdout).toBe('first\n');
+
+    // On the phone: a new entry typed at the top.
+    const doc = server.note(id).document;
+    const at = doc.indexOf('\n## ') + 1;
+    server.note(id).document = doc.slice(0, at) + '## phone\n\nfrom the phone\n\n' + doc.slice(at);
+    r = await cli(['clip', 'list', '--json'], { env: env() });
+    expect(JSON.parse(r.stdout).entries.map((e: { text: string }) => e.text)).toEqual(['from the phone', 'second one', 'first']);
+  });
+
+  test.skipIf(process.platform === 'win32')('watch moves entries both ways and skips secrets', async () => {
+    const board = join(tmp, 'clipboard.txt');
+    const types = join(tmp, 'clipboard-types.txt');
+    writeFileSync(board, 'before');
+    writeFileSync(types, 'text/plain\n');
+    const proc = Bun.spawn(['bun', CLI, 'clip', 'watch', '--to-clipboard', '--from-clipboard', '--interval', '250'], {
+      stdout: 'pipe', stderr: 'pipe',
+      env: {
+        PATH: process.env.PATH ?? '', NO_COLOR: '1', ...env(),
+        HEDGESYNC_CLIP_COPY_CMD: `cat > '${board}'`, HEDGESYNC_CLIP_PASTE_CMD: `cat '${board}'`, HEDGESYNC_CLIP_TYPES_CMD: `cat '${types}'`,
+      },
+    });
+    const waitFor = async (cond: () => boolean) => {
+      for (let i = 0; i < 200 && !cond(); i++) await Bun.sleep(25);
+      expect(cond()).toBe(true);
+    };
+    try {
+      await Bun.sleep(1500);
+      // Copied on this machine: into the note.
+      writeFileSync(board, 'copied here');
+      await waitFor(() => /copied here/.test([...server.notes.values()].find(n => n.document.includes('# Clipboard'))?.document ?? ''));
+      // A password manager's entry: not.
+      writeFileSync(types, 'text/plain\nx-kde-passwordManagerHint\n');
+      writeFileSync(board, 'hunter2');
+      await Bun.sleep(800);
+      // Copied elsewhere: into this clipboard.
+      writeFileSync(types, 'text/plain\n');
+      expect((await cli(['clip', 'copy', 'from elsewhere'], { env: env() })).code).toBe(0);
+      await waitFor(() => readFileSync(board, 'utf8') === 'from elsewhere');
+      const list = JSON.parse((await cli(['clip', 'list', '--json'], { env: env() })).stdout).entries.map((e: { text: string }) => e.text);
+      expect(list).not.toContain('hunter2');
+      expect(list.slice(0, 2)).toEqual(['from elsewhere', 'copied here']);
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+  });
+});
+
 describe('arguments and errors', () => {
   test('unknown options are rejected', async () => {
     const r = await cli(['get', 'http://x/y', '--frobnicate']);

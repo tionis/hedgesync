@@ -16,6 +16,7 @@ import { bridge } from './commands/bridge.js';
 import { editor } from './commands/editor.js';
 import { edit } from './commands/edit.js';
 import { share } from './commands/share.js';
+import { clip } from './commands/clip.js';
 import { mcp } from './commands/mcp.js';
 import { create, download, exportNotes, history, historyDelete, me, pin, status, unpin } from './commands/api.js';
 import { revisions } from './commands/revisions.js';
@@ -27,7 +28,7 @@ import { CliError, c, eprint, print, printJson, setColor } from './ui.js';
 import { VERSION } from '../version.js';
 
 const realtimeCommands: Command[] = [
-  edit, share, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, bridge, mcp,
+  edit, share, clip, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, bridge, mcp,
 ];
 const httpCommands: Command[] = [
   list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout, sessions,
