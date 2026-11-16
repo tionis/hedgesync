@@ -68,7 +68,8 @@ npm install -g hedgesync
 # bun (global)
 bun install -g hedgesync
 
-# or a standalone binary from the releases page (no runtime needed)
+# or a standalone binary from the releases page (no runtime needed):
+# linux-x64, linux-arm64, linux-x64-musl, darwin-x64, darwin-arm64, windows-x64.exe
 curl -fL https://github.com/tionis/hedgesync/releases/latest/download/hedgesync-linux-x64 \
   -o ~/.local/bin/hedgesync && chmod +x ~/.local/bin/hedgesync
 
@@ -98,14 +99,9 @@ bun install
 # Build for current platform
 bun run build:cli
 
-# Build for specific platforms
-bun run build:linux       # Linux x64
-bun run build:macos       # macOS x64 (Intel)
-bun run build:macos-arm   # macOS ARM64 (Apple Silicon)
-bun run build:windows     # Windows x64
-
-# Build for all platforms
+# Build every release binary into dist/release/, or only some targets
 bun run build:all
+bun run build:all linux-arm64 darwin-arm64
 ```
 
 Compiled binaries are placed in the `dist/` directory.

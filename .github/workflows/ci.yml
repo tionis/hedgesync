@@ -2,88 +2,144 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches: [main, master]
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch or PR supersedes a running check; tag runs
+# (releases) always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  # Pinned so release binaries are reproducible; bump deliberately.
+  BUN_VERSION: 1.3.13
+  NVIM_VERSION: v0.12.6
 
 jobs:
   test:
+    name: Test (Linux, with Neovim)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Install dependencies
-        run: bun install
+      - name: Install Neovim (the plugin's end-to-end tests need it)
+        run: |
+          curl -fsSL "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      - name: Run tests
-        run: bun run test
+      - run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Build npm package and smoke-test the Node CLI
+      - name: Embedded Neovim plugin is up to date
+        run: |
+          bun run gen:nvim
+          git diff --exit-code -- src/cli/nvim-plugin.generated.ts \
+            || { echo "::error::Run 'bun run gen:nvim' and commit the result"; exit 1; }
+
+      - name: Unit and end-to-end tests
+        run: bun test test/unit test/e2e
+
+      - name: Feature tests
+        run: bun run test/test-all-features.ts
+
+      - name: Build the npm package and smoke-test the Node CLI
         run: |
           bun run build
           node dist/cli/bin.js help > /dev/null
-          node dist/cli/bin.js help get > /dev/null
+          node dist/cli/bin.js bridge --info
+          node dist/cli/bin.js editor nvim install --dir "$RUNNER_TEMP/nvim-plugin" -q
+          node dist/cli/bin.js editor nvim status --dir "$RUNNER_TEMP/nvim-plugin"
+
+      - name: Check the tag, package version and changelog agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          grep -q "^## $version " CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no '## $version (date)' section"; exit 1; }
+
+  test-other-os:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun test test/unit
 
   build:
+    name: Build binaries
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Install dependencies
-        run: bun install
+      - run: bun install --frozen-lockfile
 
-      - name: Build for Linux x64
-        run: bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
+      - name: Compile every target
+        run: bun run build:all
 
-      - name: Build for macOS x64
-        run: bun build bin/hedgesync.ts --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
+      - name: Smoke-test the Linux binary
+        run: |
+          bin=dist/release/hedgesync-linux-x64
+          version=$(node -p "require('./package.json').version")
+          [ "$($bin --version)" = "$version" ] || { echo "::error::--version is not $version"; exit 1; }
+          $bin bridge --info
+          $bin editor nvim install --dir "$RUNNER_TEMP/nvim-plugin" -q
+          $bin editor nvim status --dir "$RUNNER_TEMP/nvim-plugin"
 
-      - name: Build for macOS ARM64
-        run: bun build bin/hedgesync.ts --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
+      - name: Checksums
+        run: cd dist/release && sha256sum hedgesync-* > checksums.txt && cat checksums.txt
 
-      - name: Build for Windows x64
-        run: bun build bin/hedgesync.ts --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hedgesync-binaries
-          path: dist/
+          path: dist/release/
           retention-days: 30
 
   publish-npm:
+    name: Publish to npm
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, test-other-os, build]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC), also adds provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -91,18 +147,9 @@ jobs:
       - name: Update npm (trusted publishing needs 11.5.1 or later)
         run: npm install -g npm@latest
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
 
-      - name: Check that the tag matches the package version
-        run: |
-          version=$(node -p "require('./package.json').version")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
-            exit 1
-          fi
-
-      - name: Publish to npm
+      - name: Publish
         run: |
           # Prereleases (1.2.3-beta.1) go to the "next" dist-tag, not "latest".
           case "$GITHUB_REF_NAME" in
@@ -111,42 +158,38 @@ jobs:
           esac
 
   release:
+    name: GitHub release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, publish-npm]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      # The binaries the build job compiled and smoke-tested, not a rebuild.
+      - uses: actions/download-artifact@v8
         with:
-          bun-version: latest
+          name: hedgesync-binaries
+          path: dist/release
 
-      - name: Install dependencies
-        run: bun install
-
-      - name: Build all platforms
+      - name: Release notes from CHANGELOG.md
         run: |
-          mkdir -p dist
-          bun build bin/hedgesync.ts --compile --target=bun-linux-x64 --outfile dist/hedgesync-linux-x64
-          bun build bin/hedgesync.ts --compile --target=bun-darwin-x64 --outfile dist/hedgesync-darwin-x64
-          bun build bin/hedgesync.ts --compile --target=bun-darwin-arm64 --outfile dist/hedgesync-darwin-arm64
-          bun build bin/hedgesync.ts --compile --target=bun-windows-x64 --outfile dist/hedgesync-windows-x64.exe
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " v " " { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          {
+            echo
+            echo "**Install:** \`npm i -g hedgesync@$version\`, or download the binary for your platform below"
+            echo "(check it against \`checksums.txt\`). Then \`hedgesync editor nvim install\` for the Neovim plugin."
+          } >> release-notes.md
+          cat release-notes.md
 
-      - name: Create checksums
-        run: |
-          cd dist
-          sha256sum * > checksums.txt
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - uses: softprops/action-gh-release@v3
         with:
-          files: |
-            dist/hedgesync-linux-x64
-            dist/hedgesync-darwin-x64
-            dist/hedgesync-darwin-arm64
-            dist/hedgesync-windows-x64.exe
-            dist/checksums.txt
-          generate_release_notes: true
+          body_path: release-notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/release/*

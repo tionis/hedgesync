@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Release binaries for linux-arm64 and linux-x64-musl (Alpine).
+
+### Changed
+
+- CI: current action versions (no Node 20 deprecation warnings), pinned Bun
+  and Neovim, the plugin's end-to-end tests run against a real Neovim, unit
+  tests also on macOS and Windows, the released binaries are the ones built
+  and smoke-tested (not a rebuild), and release notes come from this file.
+
 ## 2.3.0 (2026-11-16)
 
 ### Added
