@@ -1011,6 +1011,23 @@ stdin/stdout and does all the operational transformation, so other editors
 can reuse it. See [editors/nvim/README.md](editors/nvim/README.md) and
 `src/editor-bridge.ts` for the protocol.
 
+### Writing into notes over HTTP
+
+`hedgesync serve` is a small HTTP endpoint for scripts and webhooks (Home
+Assistant, CI, monitoring, a phone shortcut). Only the notes you list are
+reachable, and edits merge live with what people are typing:
+
+```sh
+hedgesync serve --note ops=https://md.example.com/abc --host 0.0.0.0 --token "$TOKEN"
+
+curl -H "Authorization: Bearer $TOKEN" --data-binary "- deploy finished" \
+  "http://box:8787/notes/ops/append?section=Timeline&stamp=1"
+```
+
+`POST /notes/<name>/append` and `/prepend`, `PUT /notes/<name>` and
+`GET /notes/<name>`; `section=<heading>` targets a section, `stamp=1` adds
+the time. See `hedgesync help serve`.
+
 ### Clipboard across devices
 
 A private note as a clipboard: copy on one machine, paste on another, or

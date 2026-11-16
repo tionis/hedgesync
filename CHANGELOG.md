@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hedgesync serve`: an HTTP endpoint for writing into notes from scripts
+  and webhooks. Append, prepend or replace a note or one of its sections
+  (`?section=Timeline`), optionally with the time in front; only the notes
+  listed with `--note` are reachable, and a token is required unless it
+  listens on localhost only. Edits merge live with people's typing.
+
 ## 2.4.1 (2026-11-16)
 
 ### Fixed

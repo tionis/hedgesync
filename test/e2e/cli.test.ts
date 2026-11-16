@@ -359,6 +359,64 @@ describe('clip', () => {
   });
 });
 
+describe('serve', () => {
+  async function startServe(args: string[]) {
+    const proc = Bun.spawn(['bun', CLI, 'serve', '--port', '0', ...args], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    const reader = proc.stderr.getReader();
+    let err = '';
+    while (!/Serving (http:\/\/\S+)/.test(err)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`serve exited: ${err}`);
+      err += new TextDecoder().decode(value);
+    }
+    return { proc, base: /Serving (http:\/\/\S+)/.exec(err)![1] };
+  }
+
+  test('append, sections, stamps and replace over HTTP, next to a person typing', async () => {
+    const note = newNote('# Ops\n\n## Timeline\n\n- 14:00 start\n\n## Notes\n');
+    const { proc, base } = await startServe(['--note', `ops=${note.url}`, '--token', 'sekrit']);
+    const auth = { authorization: 'Bearer sekrit' };
+    try {
+      expect((await fetch(`${base}/notes/ops`)).status).toBe(401);
+      expect((await fetch(`${base}/notes/other`, { headers: auth })).status).toBe(404);
+      expect(await (await fetch(`${base}/`, { headers: auth })).json()).toEqual({ ok: true, notes: ['ops'] });
+
+      const person = new HedgeDocClient({ serverUrl: server.url, noteId: note.id });
+      await person.connect();
+      person.insert(person.getDocument().length, 'typed by a person\n');
+      await person.flush();
+
+      let r = await fetch(`${base}/notes/ops/append?section=Timeline&stamp=1`, { method: 'POST', headers: auth, body: '- deploy done' });
+      expect(r.status).toBe(200);
+      expect(server.note(note.id).document).toMatch(/- 14:00 start\n- \d\d:\d\d deploy done\n\n## Notes\ntyped by a person\n$/);
+
+      r = await fetch(`${base}/notes/ops/append?token=sekrit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'from JSON' }) });
+      expect(r.status).toBe(200);
+      expect(server.note(note.id).document.endsWith('typed by a person\nfrom JSON\n')).toBe(true);
+
+      r = await fetch(`${base}/notes/ops?section=Notes`, { method: 'PUT', headers: auth, body: 'replaced' });
+      expect(server.note(note.id).document.endsWith('## Notes\n\nreplaced\n')).toBe(true);
+      expect(await (await fetch(`${base}/notes/ops`, { headers: auth })).text()).toBe(server.note(note.id).document);
+
+      r = await fetch(`${base}/notes/ops/append?section=Missing`, { method: 'POST', headers: auth, body: 'x' });
+      expect(r.status).toBe(404);
+      person.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+  });
+
+  test('another address needs a token', async () => {
+    const note = newNote('');
+    const r = await cli(['serve', '--note', `x=${note.url}`, '--host', '0.0.0.0', '--port', '0']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('needs a token');
+  });
+});
+
 describe('arguments and errors', () => {
   test('unknown options are rejected', async () => {
     const r = await cli(['get', 'http://x/y', '--frobnicate']);

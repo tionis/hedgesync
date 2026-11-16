@@ -17,6 +17,7 @@ import { editor } from './commands/editor.js';
 import { edit } from './commands/edit.js';
 import { share } from './commands/share.js';
 import { clip } from './commands/clip.js';
+import { serve } from './commands/serve.js';
 import { mcp } from './commands/mcp.js';
 import { create, download, exportNotes, history, historyDelete, me, pin, status, unpin } from './commands/api.js';
 import { revisions } from './commands/revisions.js';
@@ -31,7 +32,7 @@ const realtimeCommands: Command[] = [
   edit, share, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, bridge,
 ];
 /** Long-running helpers that take no note URL. */
-const toolCommands: Command[] = [clip, mcp];
+const toolCommands: Command[] = [clip, serve, mcp];
 const httpCommands: Command[] = [
   list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout, sessions,
 ];
