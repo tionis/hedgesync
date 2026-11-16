@@ -191,9 +191,18 @@ local function map(buf, lhs, fn, desc)
   vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, silent = true, desc = "hedgesync: " .. desc })
 end
 
-local function copy(text)
-  pcall(vim.fn.setreg, "+", text)
+--- Put text in the clipboard (if Neovim has one) and the unnamed register.
+local function set_clipboard(text)
+  -- Without a provider, setting "+ prints an error that, stacked with our
+  -- message, raises a hit-enter prompt, which holds up remote edits.
+  if vim.fn.has("clipboard") == 1 then
+    pcall(vim.fn.setreg, "+", text)
+  end
   vim.fn.setreg('"', text)
+end
+
+local function copy(text)
+  set_clipboard(text)
   notify("copied " .. text)
 end
 
