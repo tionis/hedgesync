@@ -4,6 +4,7 @@
 
 import type { HedgeDocClient } from '../../hedgedoc-client.js';
 import { NoteMirror, createMirrorTransform } from '../../mirror.js';
+import { createFilter } from '../../note-filter.js';
 import { parseNoteUrl } from '../../url.js';
 import { assertEditable, connectionOptions, type Command, type Context } from '../context.js';
 import { helpText } from '../help-text.js';
@@ -24,6 +25,11 @@ export const mirror: Command = {
     { name: 'append', type: 'value' },
     { name: 'wrap-prefix', type: 'value' },
     { name: 'wrap-suffix', type: 'value' },
+    { name: 'strip', type: 'multi' },
+    { name: 'only', type: 'multi' },
+    { name: 'strip-heading', type: 'multi' },
+    { name: 'replace', type: 'multi' },
+    { name: 'filter', type: 'multi' },
   ],
   help: helpText.mirror,
   async run(ctx) {
@@ -42,8 +48,22 @@ export const mirror: Command = {
       wrapPrefix: ctx.str('wrap-prefix'),
       wrapSuffix: ctx.str('wrap-suffix'),
     });
-    if (transform && bidirectional) {
-      throw new CliError('Transforms only work one-way; drop --bidirectional or the transform options');
+    let filter: ((text: string) => string) | undefined;
+    try {
+      filter = createFilter({
+        strip: ctx.list('strip'),
+        only: ctx.list('only'),
+        stripHeading: ctx.list('strip-heading'),
+        replace: ctx.list('replace'),
+        filter: ctx.list('filter'),
+      });
+    } catch (err) {
+      throw new CliError((err as Error).message);
+    }
+    // Filters first (they look for markers and headings as written), then the layout transforms.
+    const transformAll = filter && transform ? (t: string) => transform(filter(t)) : filter ?? transform;
+    if (transformAll && bidirectional) {
+      throw new CliError('Transforms and filters only work one-way; drop --bidirectional or those options');
     }
 
     const log = (event: string, data: Record<string, unknown> = {}) => {
@@ -57,7 +77,7 @@ export const mirror: Command = {
 
     ctx.info(`${c('cyan', 'Source:')} ${sourceUrl}`);
     ctx.info(`${c('cyan', 'Target:')} ${targetUrl}`);
-    ctx.info(`${c('cyan', 'Mode:')} ${bidirectional ? 'bidirectional' : 'one-way (source → target)'}${transform ? ', with transform' : ''}`);
+    ctx.info(`${c('cyan', 'Mode:')} ${bidirectional ? 'bidirectional' : 'one-way (source → target)'}${filter ? ', filtered' : ''}${transform ? ', with transform' : ''}`);
 
     const sourceClient = await connectWithCookie(ctx, source, ctx.str('source-cookie'));
     let targetClient: HedgeDocClient;
@@ -77,7 +97,12 @@ export const mirror: Command = {
       throw err;
     }
 
-    const noteMirror = new NoteMirror(sourceClient, targetClient, { bidirectional, transform });
+    if (filter) {
+      const warning = audienceWarning(sourceClient.getNoteInfo().permission, targetClient.getNoteInfo().permission);
+      if (warning) ctx.warn(warning);
+    }
+    // With a filter, wait for typing to pause: a marker half typed is not yet a marker.
+    const noteMirror = new NoteMirror(sourceClient, targetClient, { bidirectional, transform: transformAll, debounceMs: filter ? 1000 : undefined });
     noteMirror.on('sync', e => log(e.merged ? 'merge' : 'sync', { direction: e.direction, length: e.length }));
     noteMirror.on('error', (err: Error) => log('error', { message: err.message }));
     for (const [name, client] of [['source', sourceClient], ['target', targetClient]] as const) {
@@ -121,4 +146,18 @@ function parseUrl(url: string, which: string) {
 
 function connectWithCookie(ctx: Context, note: { serverUrl: string; noteId: string }, cookie: string | undefined) {
   return ctx.connectTo(note.serverUrl, note.noteId, cookie ? { cookie } : {});
+}
+
+/** Who can read a note: 0 owner only, 1 signed-in users, 2 anyone with the link. */
+function readers(permission: string | undefined): number {
+  if (permission === 'private') return 0;
+  if (permission === 'limited' || permission === 'protected') return 1;
+  return 2;
+}
+
+/** Filtering hides nothing if the source is readable by the target's audience anyway. */
+export function audienceWarning(source: string | undefined, target: string | undefined): string | undefined {
+  if (readers(source) === 0 || readers(source) < readers(target)) return undefined;
+  return `The source note (${source || 'unknown permission'}) is readable by everyone who can read the target (${target || 'unknown'}): `
+    + 'filtering hides nothing from them. Restrict the source (hedgesync permission <url> private).';
 }

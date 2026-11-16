@@ -220,6 +220,42 @@ describe('mirror', () => {
   });
 });
 
+describe('mirror --strip', () => {
+  test('the target never shows marked parts, even while they are typed', async () => {
+    const source = newNote('Public intro.\n'); // freely: the GM edits as a guest here
+    const target = newNote('', 'freely');
+    const proc = Bun.spawn(['bun', CLI, 'mirror', source.url, target.url, '--strip', 'gm'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    const waitFor = async (cond: () => boolean) => {
+      for (let i = 0; i < 200 && !cond(); i++) await Bun.sleep(25);
+      expect(cond()).toBe(true);
+    };
+    try {
+      await waitFor(() => server.note(target.id).document === 'Public intro.\n');
+      const gm = new HedgeDocClient({ serverUrl: server.url, noteId: source.id });
+      await gm.connect();
+      const seen: string[] = [];
+      const watcher = new HedgeDocClient({ serverUrl: server.url, noteId: target.id });
+      await watcher.connect();
+      watcher.on('change', () => seen.push(watcher.getDocument()));
+      // Typed piece by piece, the secret before the closing marker.
+      for (const piece of ['<!-- g', 'm -->\n', 'The miller', ' is the cult leader.\n', '<!-- /gm -->\n', 'The door is locked.\n']) {
+        gm.insert(gm.getDocument().length, piece);
+        await gm.flush();
+        await Bun.sleep(150);
+      }
+      await waitFor(() => server.note(target.id).document === 'Public intro.\nThe door is locked.\n');
+      expect(seen.some(t => t.includes('miller') || t.includes('<!--'))).toBe(false);
+      gm.disconnect();
+      watcher.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+  });
+});
+
 describe('arguments and errors', () => {
   test('unknown options are rejected', async () => {
     const r = await cli(['get', 'http://x/y', '--frobnicate']);

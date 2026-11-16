@@ -160,6 +160,8 @@ hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 hedgesync mirror https://md.example.com/source https://md.example.com/target
 hedgesync mirror https://md.example.com/a https://md.example.com/b --bidirectional
 hedgesync mirror https://md.example.com/src https://md.example.com/dst --demote
+# A player handout from the GM's note: <!-- gm -->...<!-- /gm --> and ::gm ...:: removed
+hedgesync mirror https://md.example.com/gm https://md.example.com/players --strip gm
 
 # Settings (HedgeDoc keeps them in the note's YAML front matter)
 hedgesync meta https://md.example.com/abc123                    # title, tags, type, ...

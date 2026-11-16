@@ -1,6 +1,6 @@
 # Exploration: mirror with a filter
 
-Status: idea, not built. 2026-11-16.
+Status: built (`hedgesync mirror --strip/--only/--strip-heading/--replace/--filter`), 2026-11-16.
 
 `hedgesync mirror` copies a note to another live, with a few transforms
 (header shifting, prepend, append). A filter that removes or rewrites

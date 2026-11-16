@@ -19,6 +19,10 @@
 - `hedgesync share <file> [<server-url> | <note-url>]`: share a local file
   live from any editor, or join a shared one; file and note are synced both
   ways (three-way merges) until Ctrl+C.
+- `hedgesync mirror` filters: `--strip <name>` removes `<!-- name -->`
+  blocks and `::name ...::` spans (a GM's secrets, internal remarks),
+  `--only`, `--strip-heading`, `--replace` and `--filter <cmd>`. They fail
+  closed: an unclosed block or a comment still being typed hides the rest.
 - `hedgesync editor nvim install --lazy` also writes a lazy.nvim spec to
   `lua/plugins/hedgesync.lua` in the Neovim config (or `--lazy-file`), kept
   current by later installs and removed by `uninstall` unless edited.

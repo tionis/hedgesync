@@ -361,6 +361,21 @@ ${c('yellow', 'TRANSFORM OPTIONS:')}
   ${c('cyan', '--wrap-prefix <p>')} Wrap each paragraph with prefix
   ${c('cyan', '--wrap-suffix <s>')} Wrap each paragraph with suffix
 
+${c('yellow', 'FILTER OPTIONS:')} (repeatable; one-way only)
+  ${c('cyan', '--strip <name>')}  Remove <!-- name --> ... <!-- /name --> blocks and
+                    ::name ...:: inline spans
+  ${c('cyan', '--only <name>')}   Keep only the content of those blocks and spans
+  ${c('cyan', '--strip-heading <regex>')} Remove sections whose heading matches
+                    (with their subsections)
+  ${c('cyan', '--replace /re/flags=text')} Rewrite matches ($1, $& work)
+  ${c('cyan', '--filter <cmd>')}  Pipe the text through a shell command
+
+  Filters fail closed, to keep secrets secret: a block that is not closed
+  hides everything after it, as does a comment still being typed
+  (<!-- g...), and when --filter fails the target is not updated. The
+  target is updated after a 1 s pause in typing. The source should be
+  readable by fewer people than the target; mirror warns if it is not.
+
 ${c('yellow', 'BIDIRECTIONAL MODE:')}
   Edits on either side are copied to the other. When both notes change at
   once, both sets of edits are kept: each side's changes since the last sync
@@ -379,6 +394,9 @@ ${c('yellow', 'EXAMPLES:')}
 
   ${c('dim', '# Mirror with header demotion (for embedding as subsection)')}
   hedgesync mirror https://md.example.com/src https://md.example.com/dest --demote
+
+  ${c('dim', '# A player handout from the GM\'s notes, without the secrets')}
+  hedgesync mirror https://md.example.com/gm https://md.example.com/players --strip gm
 
   ${c('dim', '# Cross-server mirroring with different cookies')}
   hedgesync mirror https://md1.example.com/abc https://md2.example.com/xyz \\
