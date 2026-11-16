@@ -16,6 +16,9 @@
 - Neovim: `:Hedge share [permission]` shares the file buffer you are in
   live: a new note gets its text and the buffer stays the file (`:w` saves
   it) while syncing; the copied link carries the filetype for Neovim guests.
+- `hedgesync share <file> [<server-url> | <note-url>]`: share a local file
+  live from any editor, or join a shared one; file and note are synced both
+  ways (three-way merges) until Ctrl+C.
 - `hedgesync edit` without a note opens `:Hedge browse` (on the given server
   or your saved login's).
 - Release binaries for linux-arm64 and linux-x64-musl (Alpine).

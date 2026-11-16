@@ -130,6 +130,11 @@ hedgesync watch https://md.example.com/abc123 --ndjson
 # Open in your editor (live in Neovim; other editors sync on save)
 hedgesync edit https://md.example.com/abc123
 hedgesync edit https://md.example.com/abc123 -e "code --wait"
+hedgesync edit                                                 # browse your notes (Neovim)
+
+# Share a local file live (any editor): a new note, synced both ways
+hedgesync share main.go                                        # prints the link to give out
+hedgesync share main.go https://md.example.com/abc123          # join a shared file
 
 # Edit (text from an argument, -f/--file, or piped stdin)
 hedgesync set https://md.example.com/abc123 -f note.md
@@ -988,6 +993,9 @@ hedgesync editor nvim install
 
 ```vim
 :Hedge open https://md.example.com/abc123
+:Hedge browse                 " your notes: open, pin, create, search, revisions
+:Hedge share                  " share the file you are editing, live
+:Hedge follow                 " follow someone's cursor
 :checkhealth hedgesync
 ```
 

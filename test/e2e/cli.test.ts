@@ -696,6 +696,65 @@ describe('editor nvim', () => {
   });
 });
 
+describe('share', () => {
+  async function readLine(stream: ReadableStream<Uint8Array>): Promise<string> {
+    const reader = stream.getReader();
+    let text = '';
+    while (!text.includes('\n')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += new TextDecoder().decode(value);
+    }
+    reader.releaseLock();
+    return text.trim();
+  }
+  const until = async (what: string, cond: () => boolean) => {
+    for (let i = 0; i < 300 && !cond(); i++) await Bun.sleep(20);
+    if (!cond()) throw new Error(`timed out: ${what}`);
+  };
+
+  test('shares a file as a note and keeps both in sync until Ctrl+C', async () => {
+    const file = join(tmp, 'shared.py');
+    writeFileSync(file, 'print("hi")\n');
+    const proc = Bun.spawn(['bun', CLI, 'share', file, server.url], {
+      stdout: 'pipe', stderr: 'pipe',
+      env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1', HEDGESYNC_COOKIE_FILE: join(tmp, 'cookies.json') },
+    });
+    try {
+      const link = await readLine(proc.stdout);
+      expect(link).toMatch(/\/created\d+\?edit$/);
+      const id = /\/(created\d+)\?/.exec(link)![1];
+      expect(server.note(id).document).toBe('print("hi")');
+
+      writeFileSync(file, 'print("hi")\nprint("saved")\n');
+      await until('the save reaching the note', () => server.note(id).document.includes('saved'));
+
+      const other = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+      await other.connect();
+      other.insert(0, '# remote\n');
+      await other.flush();
+      other.disconnect();
+      await until('the remote edit reaching the file', () => readFileSync(file, 'utf8').startsWith('# remote'));
+      expect(readFileSync(file, 'utf8')).toBe('# remote\nprint("hi")\nprint("saved")\n');
+
+      proc.kill('SIGINT');
+      expect(await proc.exited).toBe(0);
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test('joining a note writes it into the file; an existing other file needs --force', async () => {
+    const { url } = newNote('fn main() {}');
+    const file = join(tmp, 'joined.rs');
+    writeFileSync(file, 'something else\n');
+    const refused = await cli(['share', file, url]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('exists with other content');
+    expect(readFileSync(file, 'utf8')).toBe('something else\n');
+  });
+});
+
 describe('edit', () => {
   const waitFor = async (check: () => boolean, timeout = 10_000) => {
     const start = Date.now();
