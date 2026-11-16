@@ -19,6 +19,10 @@
 - `hedgesync share <file> [<server-url> | <note-url>]`: share a local file
   live from any editor, or join a shared one; file and note are synced both
   ways (three-way merges) until Ctrl+C.
+- `hedgesync mcp`: a Model Context Protocol server, so AI agents read,
+  search, create and edit notes. Edits are live (merged with people's
+  typing, the agent's cursor visible), and `wait_for_change` lets an agent
+  react to what people write in a note.
 - `hedgesync edit` without a note opens `:Hedge browse` (on the given server
   or your saved login's).
 - Release binaries for linux-arm64 and linux-x64-musl (Alpine).

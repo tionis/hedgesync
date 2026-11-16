@@ -1004,6 +1004,23 @@ stdin/stdout and does all the operational transformation, so other editors
 can reuse it. See [editors/nvim/README.md](editors/nvim/README.md) and
 `src/editor-bridge.ts` for the protocol.
 
+### Notes for AI agents (MCP)
+
+`hedgesync mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio, so agents can work in notes next to people:
+
+```sh
+claude mcp add hedgesync -- hedgesync mcp --server https://md.example.com
+```
+
+Tools: `list_notes`, `search_notes`, `read_note`, `edit_note`,
+`append_to_note`, `write_note`, `create_note` and `wait_for_change`. Edits go
+through live sessions, like typing: they merge with what people write at the
+same moment, show up in their editors at once, and the agent's cursor marks
+where it worked. `wait_for_change` returns what people changed since the
+agent last looked (optionally once some text such as `@claude` appears), so
+an agent can take requests written into a note. Logins are the CLI's.
+
 ### CLI Macro Command
 
 The `macro` command provides command-line access to the macro system:
