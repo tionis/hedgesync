@@ -4,6 +4,11 @@
 
 ### Added
 
+- `hedgesync self-update` (alias `upgrade`): updates to the latest
+  release. A release binary replaces itself, after checking the download
+  against the release's checksums and running it once; npm and bun
+  installs run their package manager. `--check` only looks, `--to`
+  picks a version.
 - `hedgesync assistant`: answers `@name` mentions in a note with an agent:
   Claude Code (`--agent claude`), llm, Ollama, any command reading the
   prompt on stdin, or any OpenAI-compatible API (`--api`, `--model`). The

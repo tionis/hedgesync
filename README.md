@@ -75,6 +75,9 @@ curl -fL https://github.com/tionis/hedgesync/releases/latest/download/hedgesync-
 
 # Then use directly:
 hedgesync get https://md.example.com/abc123
+
+# Later: update to the latest release, however it was installed
+hedgesync self-update          # --check only looks
 ```
 
 ### Runtime Compatibility

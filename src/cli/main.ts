@@ -20,6 +20,8 @@ import { clip } from './commands/clip.js';
 import { serve } from './commands/serve.js';
 import { assistant } from './commands/assistant.js';
 import { mcp } from './commands/mcp.js';
+import { selfUpdate } from './commands/self-update.js';
+import { cleanUpAfterUpdate } from '../self-update.js';
 import { create, download, exportNotes, history, historyDelete, me, pin, status, unpin } from './commands/api.js';
 import { revisions } from './commands/revisions.js';
 import { meta, publish } from './commands/settings.js';
@@ -37,7 +39,7 @@ const toolCommands: Command[] = [clip, serve, mcp];
 const httpCommands: Command[] = [
   list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout, sessions,
 ];
-const setupCommands: Command[] = [editor];
+const setupCommands: Command[] = [editor, selfUpdate];
 /** Every command, in overview order. */
 export const allCommands: Command[] = [...realtimeCommands, ...httpCommands, ...toolCommands, ...setupCommands];
 const commands = new Map<string, Command>(allCommands
@@ -92,6 +94,7 @@ ${c('yellow', 'EXAMPLES:')}
 export async function main(argv: string[]): Promise<number> {
   if (argv.includes('--no-color')) setColor(false);
   const { command: name, rest } = splitCommand(argv, globalOptions);
+  cleanUpAfterUpdate();
 
   if (name === 'version' || (!name && (argv.includes('--version') || argv.includes('-V')))) {
     print(VERSION);
