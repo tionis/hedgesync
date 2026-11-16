@@ -51,6 +51,10 @@ and run the CLI from the same checkout (`cmd = { "bun", "<checkout>/bin/hedgesyn
 
 ## Use
 
+From the shell, `hedgesync edit <url>` starts Neovim on the note (this works
+even before the plugin is installed: it loads the matching copy for that
+session). Inside Neovim:
+
 ```vim
 :Hedge open https://md.example.com/abc123
 :e hedgedoc://md.example.com/abc123      " same thing

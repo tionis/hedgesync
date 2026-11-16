@@ -131,6 +131,10 @@ hedgesync users https://md.example.com/abc123 --watch        # report joins and 
 hedgesync authors https://md.example.com/abc123 -v
 hedgesync watch https://md.example.com/abc123 --ndjson
 
+# Open in your editor (live in Neovim; other editors sync on save)
+hedgesync edit https://md.example.com/abc123
+hedgesync edit https://md.example.com/abc123 -e "code --wait"
+
 # Edit (text from an argument, -f/--file, or piped stdin)
 hedgesync set https://md.example.com/abc123 -f note.md
 echo "- $(date): done" | hedgesync append https://md.example.com/abc123
@@ -977,11 +981,13 @@ The same is available as a library, `new NoteTerminal(client, options)`
 
 ### Editing from Neovim
 
-`editors/nvim` is a Neovim plugin for live, keystroke-level editing of notes
-with collaborators' cursors shown inline:
+`hedgesync edit <url>` opens a note in Neovim for live, keystroke-level
+editing, with collaborators' cursors shown inline. It uses the plugin in
+`editors/nvim`, which ships inside the CLI; `edit` loads it for the session
+if your config does not. To have `:Hedge` in every Neovim, install it:
 
 ```sh
-hedgesync editor nvim install    # the plugin ships inside the CLI
+hedgesync editor nvim install
 ```
 
 ```vim

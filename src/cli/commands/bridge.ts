@@ -42,7 +42,11 @@ export const bridge: Command = {
       throw err;
     }
 
-    const noteState = () => ({ title: client.getNoteInfo().title || '', editable: client.canEdit() });
+    const noteState = () => {
+      const { title, permission } = client.getNoteInfo();
+      const editable = client.canEdit();
+      return { title: title || '', editable, reason: editable ? undefined : shortReadOnlyReason(permission, client.serverUrl) };
+    };
     out({ t: 'ready', protocol: BRIDGE_PROTOCOL, version: VERSION, url, noteId: client.noteId, ...noteState() });
 
     const editor = new EditorBridge(client, out, {
@@ -102,3 +106,10 @@ export const bridge: Command = {
     process.stdin.destroy();
   },
 };
+
+/** Why the note is read-only, short enough for one editor message line. */
+function shortReadOnlyReason(permission: string | undefined, serverUrl: string): string | undefined {
+  if (permission === 'editable' || permission === 'limited') return `log in: hedgesync login ${serverUrl} --save`;
+  if (permission === 'locked' || permission === 'private' || permission === 'protected') return 'only the owner can edit';
+  return undefined;
+}

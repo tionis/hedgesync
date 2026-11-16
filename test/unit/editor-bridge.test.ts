@@ -266,11 +266,12 @@ describe('EditorBridge convergence', () => {
     bridge.stop();
   });
 
-  test("other people's cursors are sent, this connection's own is not", async () => {
+  test("everyone else online is sent (placed if they have a cursor), this connection is not", async () => {
     const client = new FakeClient('ab\ncdé');
     (client as any).socket = { id: 'me' };
     client.users.set('me', { id: 'me', name: 'Me', color: '#123', cursor: { line: 0, ch: 1 } });
     client.users.set('other', { id: 'other', name: 'Ann', color: '#f00', cursor: { line: 1, ch: 3 } });
+    client.users.set('idle', { id: 'idle', name: 'Bob', color: '#0f0', cursor: null });
     const sent: BridgeMessage[] = [];
     const bridge = new EditorBridge(client as any, m => sent.push(m));
     bridge.start();
@@ -279,6 +280,10 @@ describe('EditorBridge convergence', () => {
     bridge.stop();
     const cursors = sent.find(m => m.t === 'cursors');
     // Byte column: "cdé" is 4 bytes.
-    expect(cursors).toEqual({ t: 'cursors', cursors: [{ id: 'other', name: 'Ann', color: '#f00', row: 1, col: 4 }] });
+    // Bob is online without a cursor in the note: listed, not placed.
+    expect(cursors).toEqual({ t: 'cursors', cursors: [
+      { id: 'other', name: 'Ann', color: '#f00', row: 1, col: 4 },
+      { id: 'idle', name: 'Bob', color: '#0f0' },
+    ] });
   });
 });

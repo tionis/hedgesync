@@ -244,15 +244,25 @@ export async function readStdin(hint?: string): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
+/**
+ * Why a session cannot edit a note with this permission, and what to do;
+ * undefined when the permission does not explain it.
+ */
+export function readOnlyReason(permission: string | undefined, serverUrl: string): string | undefined {
+  if (permission === 'editable' || permission === 'limited') {
+    return `This note needs a login: run hedgesync login ${serverUrl} --save (or pass a session cookie)`;
+  }
+  if (permission === 'locked' || permission === 'private' || permission === 'protected') {
+    return `Only the owner can edit this note (permission: ${permission})`;
+  }
+  return undefined;
+}
+
 export function assertEditable(client: HedgeDocClient): void {
   if (client.canEdit()) return;
   const permission = client.getNoteInfo().permission;
-  const hint = permission === 'editable' || permission === 'limited'
-    ? 'This note requires a logged-in user; pass a session cookie.'
-    : permission === 'locked' || permission === 'private' || permission === 'protected'
-      ? 'Only the owner can edit this note.'
-      : undefined;
-  throw new CliError(`No edit permission for this note (permission: ${permission || 'unknown'})`, hint, { permission });
+  throw new CliError(`No edit permission for this note (permission: ${permission || 'unknown'})`,
+    readOnlyReason(permission, client.serverUrl), { permission });
 }
 
 /**

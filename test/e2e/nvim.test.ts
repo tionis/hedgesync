@@ -181,7 +181,7 @@ vim.cmd("checkhealth hedgesync")
 finish(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\\n"))
 `);
     expect(report).toContain('editor protocol 1');
-    expect(report).toMatch(/Plugin installed by hedgesync \S+ in /);
+    expect(report).toMatch(/Plugin in \S+ matches the CLI/);
     expect(report).toContain('No saved logins');
     expect(report).not.toMatch(/ERROR/);
   });

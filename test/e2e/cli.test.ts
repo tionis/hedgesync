@@ -695,3 +695,74 @@ describe('editor nvim', () => {
     expect(JSON.parse(r.stdout)).toMatchObject({ protocol: 1 });
   });
 });
+
+describe('edit', () => {
+  const waitFor = async (check: () => boolean, timeout = 10_000) => {
+    const start = Date.now();
+    while (!check()) {
+      if (Date.now() - start > timeout) throw new Error('timed out');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  test('a non-Neovim editor: saves are merged into the note, keeping concurrent edits', async () => {
+    const { id, url } = newNote('one\ntwo\nthree\n');
+    // An "editor" that saves twice: the first save must reach the note before it exits.
+    const script = join(tmp, 'fake-editor.sh');
+    writeFileSync(script, `#!/bin/sh
+f="$1"
+sed -i 's/one/ONE/' "$f"
+sleep 1.5
+sed -i 's/three/THREE/' "$f"
+`);
+    const run = cli(['edit', url, '--editor', `sh ${script}`]);
+    await waitFor(() => server.note(id).document.startsWith('ONE'));
+    const other = new HedgeDocClient({ serverUrl: server.url, noteId: id, reconnect: { enabled: false } });
+    await other.connect();
+    other.insert(other.getDocument().indexOf('two'), 'remote ');
+    await other.flush();
+    other.disconnect();
+    const r = await run;
+    expect(r.code).toBe(0);
+    expect(server.note(id).document).toBe('ONE\nremote two\nTHREE\n');
+  });
+
+  test('a note without a final newline keeps it that way; read-only notes say why', async () => {
+    const { id, url } = newNote('alpha\nbeta');
+    const r = await cli(['edit', url, '--editor', 'sed -i s/alpha/ALPHA/']);
+    expect(r.code).toBe(0);
+    expect(server.note(id).document).toBe('ALPHA\nbeta');
+
+    const locked = newNote('x', 'locked');
+    const ro = await cli(['edit', locked.url, '--editor', 'sed -i s/x/y/']);
+    expect(ro.stderr).toContain('Read-only, changes will not be saved: Only the owner can edit this note (permission: locked)');
+    expect(server.note(locked.id).document).toBe('x');
+  });
+
+  test('fails before starting Neovim when the note cannot be reached', async () => {
+    const marker = join(tmp, 'editor-started');
+    const r = await cli(['edit', 'http://127.0.0.1:1/nothing', '--editor', `nvim-would-start; touch ${marker}`]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('Could not connect');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test.skipIf(!Bun.which('nvim'))('Neovim edits live through the plugin, even when the config does not load it', async () => {
+    const { id, url } = newNote('from the server\n');
+    const lua = join(tmp, 'edit-live.lua');
+    writeFileSync(lua, `
+local function poll()
+  local hs = package.loaded["hedgesync"]
+  local s = hs and hs.session(0)
+  if not (s and s.loaded) then return vim.defer_fn(poll, 50) end
+  vim.api.nvim_buf_set_lines(0, -1, -1, false, { "typed in nvim" })
+  vim.defer_fn(function() vim.cmd("qa!") end, 800)
+end
+vim.defer_fn(poll, 50)
+`);
+    const r = await cli(['edit', url, '--editor', `nvim --headless --clean -n -c "luafile ${lua}"`], {
+      env: { XDG_CACHE_HOME: join(tmp, 'cache'), XDG_DATA_HOME: join(tmp, 'data') },
+    });
+    expect(r.code).toBe(0);
+    expect(server.note(id).document).toBe('from the server\n\ntyped in nvim');
+  });
+});

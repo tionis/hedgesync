@@ -94,4 +94,13 @@ describe('install / status / uninstall', () => {
     uninstallPlugin(clean);
     expect(existsSync(clean)).toBe(false);
   });
+
+  test('uninstall from the default layout removes the empty pack/hedgesync folders', () => {
+    const site = join(fresh(), 'site');
+    const dir = join(site, 'pack', 'hedgesync', 'start', 'hedgesync.nvim');
+    installPlugin(dir);
+    uninstallPlugin(dir);
+    expect(existsSync(join(site, 'pack', 'hedgesync'))).toBe(false);
+    expect(existsSync(join(site, 'pack'))).toBe(true);
+  });
 });

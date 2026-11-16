@@ -689,4 +689,31 @@ ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '--force')}        Overwrite or remove local changes
   ${c('cyan', '--json')}         Machine-readable output
 `,
+  edit: () => `
+${c('bold', 'hedgesync edit')} - Open a note in your editor
+
+${c('yellow', 'USAGE:')}
+  hedgesync edit <url> [--editor <cmd>] [--no-live]
+
+${c('yellow', 'DESCRIPTION:')}
+  Opens the note in --editor, $VISUAL or $EDITOR (default: nvim).
+
+  Neovim edits live: every keystroke is sent as you type, and others' edits
+  and cursors appear in your buffer. Uses the bundled plugin; if your config
+  does not load it, the copy matching this binary is loaded for the session
+  (an unedited installed copy from another version is updated).
+
+  Other editors get the note in a temp file. Each save is merged into the
+  note, keeping edits others made meanwhile, and once more when the editor
+  exits. Changes others make are not shown in the file.
+
+${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-e, --editor <cmd>')} Editor command line (may include arguments)
+  ${c('cyan', '--no-live')}          Use the temp-file mode even with Neovim
+  ${c('cyan', '--no-reconnect')}     Do not reconnect a dropped session
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync edit https://md.example.com/abc123
+  hedgesync edit https://md.example.com/abc123 -e "code --wait"
+`,
 };

@@ -4,6 +4,11 @@
 
 ### Added
 
+- `hedgesync edit <url>`: open a note in `$VISUAL`/`$EDITOR` (or `-e`).
+  Neovim edits live through the bundled plugin, loaded for the session if
+  your config does not load it; the bridge is the binary you ran. Other
+  editors get a temp file whose saves are merged into the note (three-way, so
+  concurrent edits survive), and once more on exit.
 - Neovim plugin (`editors/nvim`): live, keystroke-level editing of a note in
   a Neovim buffer, with collaborators' cursors shown inline. `:Hedge open
   <url>` or `:e hedgedoc://host/id`.

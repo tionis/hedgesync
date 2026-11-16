@@ -15,9 +15,19 @@ M.protocol = 1
 --- `hedgesync editor nvim install`).
 M.root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
 
+--- The CLI to run: $HEDGESYNC_CMD (a JSON list, set by `hedgesync edit` so the
+--- bridge is the binary that started Neovim), else hedgesync on PATH.
+local function default_cmd()
+  local ok, cmd = pcall(vim.json.decode, vim.env.HEDGESYNC_CMD or "")
+  if ok and type(cmd) == "table" and type(cmd[1]) == "string" then
+    return cmd
+  end
+  return { "hedgesync" }
+end
+
 M.config = {
   -- Command that runs the hedgesync CLI.
-  cmd = { "hedgesync" },
+  cmd = default_cmd(),
   -- Extra arguments for `hedgesync bridge` (e.g. { "--cookie", "..." }).
   args = {},
   -- Show other people's cursors.
@@ -139,11 +149,12 @@ end
 --- Apply text without reporting it back to the bridge.
 local function apply(s, fn)
   local buf = s.buf
-  local modifiable = vim.bo[buf].modifiable
+  local modifiable, readonly = vim.bo[buf].modifiable, vim.bo[buf].readonly
   s.applying = true
-  vim.bo[buf].modifiable = true
+  -- Lift both, or Neovim warns "W10: Changing a readonly file" about our own write.
+  vim.bo[buf].modifiable, vim.bo[buf].readonly = true, false
   local ok, err = pcall(fn)
-  vim.bo[buf].modifiable = modifiable
+  vim.bo[buf].modifiable, vim.bo[buf].readonly = modifiable, readonly
   s.applying = false
   vim.bo[buf].modified = false
   s.lines = api.nvim_buf_get_lines(buf, 0, -1, false)
@@ -195,7 +206,7 @@ local function draw_cursors(s, cursors)
   end
   local line_count = api.nvim_buf_line_count(buf)
   for _, c in ipairs(cursors) do
-    if c.row < line_count then
+    if c.row and c.row < line_count then
       local line = api.nvim_buf_get_lines(buf, c.row, c.row + 1, false)[1] or ""
       local col = math.min(c.col, #line)
       local hl = cursor_hl(c.color or "#888888")
@@ -285,7 +296,7 @@ local handlers = {
     set_modifiable(s)
     update_status(s, "connected")
     if not msg.editable then
-      notify("note is read-only for you", vim.log.levels.WARN)
+      notify("read-only, " .. (msg.reason or "you cannot edit this note"), vim.log.levels.WARN)
     end
   end,
   note = function(s, msg)
@@ -294,7 +305,10 @@ local handlers = {
     if msg.editable ~= s.editable then
       s.editable = msg.editable
       set_modifiable(s)
-      notify(msg.editable and "note is editable again" or "note is now read-only for you", vim.log.levels.WARN)
+      notify(
+        msg.editable and "note is editable again" or ("now read-only, " .. (msg.reason or "you cannot edit this note")),
+        vim.log.levels.WARN
+      )
     end
   end,
   reset = on_reset,
@@ -308,7 +322,7 @@ local handlers = {
       notify(msg.message or "buffer resynchronised", vim.log.levels.WARN)
     else
       if msg.state == "disconnected" then
-        notify("disconnected; edits are kept and sent on reconnect", vim.log.levels.WARN)
+        notify("offline; edits sync when reconnected", vim.log.levels.WARN)
       elseif msg.state == "connected" and s.state ~= "connected" then
         notify("reconnected")
       end
@@ -423,6 +437,7 @@ function M.open(url)
     end
   end
 
+  local prev = api.nvim_get_current_buf()
   local name = buf_name(url)
   local buf = vim.fn.bufnr(name)
   if buf == -1 or not api.nvim_buf_is_valid(buf) then
@@ -434,6 +449,17 @@ function M.open(url)
   vim.bo[buf].modifiable = false
   vim.bo[buf].filetype = "markdown"
   api.nvim_set_current_buf(buf)
+  -- Replace the empty buffer Neovim starts with (`hedgesync edit`, a fresh :Hedge open).
+  if
+    prev ~= buf
+    and api.nvim_buf_get_name(prev) == ""
+    and vim.bo[prev].buftype == ""
+    and not vim.bo[prev].modified
+    and api.nvim_buf_line_count(prev) == 1
+    and api.nvim_buf_get_lines(prev, 0, 1, false)[1] == ""
+  then
+    pcall(api.nvim_buf_delete, prev, {})
+  end
 
   local s = {
     buf = buf,
@@ -571,9 +597,9 @@ function M.users(buf)
   end
   local names = {}
   for _, c in ipairs(s.cursors or {}) do
-    table.insert(names, ("%s (line %d)"):format(c.name, c.row + 1))
+    table.insert(names, c.row and ("%s (line %d)"):format(c.name, c.row + 1) or c.name)
   end
-  notify(#names > 0 and ("editing here: " .. table.concat(names, ", ")) or "nobody else has a cursor in this note")
+  notify(#names > 0 and ("also here: " .. table.concat(names, ", ")) or "nobody else is in this note")
 end
 
 function M.setup(opts)

@@ -13,16 +13,6 @@ local function run(cmd, args)
   return result.stdout
 end
 
-local function read_json(path)
-  local f = io.open(path, "r")
-  if not f then
-    return nil
-  end
-  local ok, data = pcall(vim.json.decode, f:read("*a"))
-  f:close()
-  return ok and data or nil
-end
-
 function M.check()
   local h = vim.health
   local hs = require("hedgesync")
@@ -55,15 +45,31 @@ function M.check()
     h.error(hs._protocol_problem(info.protocol, info.version))
   end
 
-  local marker = read_json(hs.root .. "/.hedgesync-install.json")
-  if not marker then
+  -- The CLI compares the installed files with the copy it bundles. `status`
+  -- exits 1 unless they match, so read its JSON whatever the exit code.
+  local ran, proc = pcall(vim.system, vim.list_extend(vim.deepcopy(cmd), { "editor", "nvim", "status", "--json", "--dir", hs.root }), { text = true })
+  local ok_status, status = false, nil
+  if ran then
+    ok_status, status = pcall(vim.json.decode, proc:wait(15000).stdout or "")
+  end
+  if not ok_status or type(status) ~= "table" then
+    h.warn("Could not check the plugin install (`hedgesync editor nvim status` failed)")
+  elseif status.state == "unmanaged" then
     h.info("Plugin loaded from " .. hs.root .. " (not installed by `hedgesync editor nvim install`)")
-  elseif marker.version == info.version then
-    h.ok("Plugin installed by hedgesync " .. marker.version .. " in " .. hs.root)
+  elseif status.state == "current" then
+    h.ok("Plugin in " .. hs.root .. " matches the CLI")
+  elseif #(status.edited or {}) > 0 or #(status.missing or {}) > 0 then
+    h.warn(
+      "Plugin in " .. hs.root .. " has local changes: " .. table.concat(vim.list_extend(status.edited or {}, status.missing or {}), ", "),
+      { "`hedgesync editor nvim install --force` restores the bundled copy" }
+    )
   else
     h.warn(
-      ("Plugin was installed by hedgesync %s, the CLI is %s"):format(tostring(marker.version), info.version),
-      { "Run `hedgesync editor nvim install` to update the plugin" }
+      ("Plugin was installed by hedgesync %s and differs from the copy in the CLI (%s)"):format(
+        tostring(status.version),
+        info.version
+      ),
+      { "Run `hedgesync editor nvim install` to update it" }
     )
   end
 

@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { BRIDGE_PROTOCOL } from '../../editor-bridge.js';
 import { VERSION } from '../../version.js';
 import type { Command, Context } from '../context.js';
@@ -126,7 +126,10 @@ export function uninstallPlugin(dir: string, options: { force?: boolean } = {}):
     pruneEmptyDirs(dir, dirname(join(dir, path)));
   }
   rmSync(join(dir, MARKER), { force: true });
-  pruneEmptyDirs(dirname(dir), dir);
+  // In the default place, also drop the empty pack/hedgesync/start folders.
+  const start = dirname(dir);
+  const isPack = basename(start) === 'start' && basename(dirname(start)) === 'hedgesync';
+  pruneEmptyDirs(isPack ? dirname(dirname(start)) : start, dir);
 }
 
 /** Remove empty directories from `from` up to (not including) `stop`. */
@@ -173,17 +176,21 @@ export const editor: Command = {
       case 'status': {
         const info = inspectInstall(dir);
         ctx.result({ ...info, binaryVersion: VERSION, protocol: BRIDGE_PROTOCOL }, () => {
+          const changed = info.edited.length > 0 || info.missing.length > 0;
           const line = {
             missing: c('yellow', 'not installed'),
             unmanaged: c('yellow', 'present, but not installed by hedgesync'),
             current: c('green', `installed, matches this binary (${VERSION})`),
-            outdated: c('yellow', `installed by ${info.version ?? 'an unknown version'}, differs from this binary (${VERSION})`),
+            outdated: changed
+              ? c('yellow', `installed by ${info.version ?? 'an unknown version'}, with local changes`)
+              : c('yellow', `installed by ${info.version ?? 'an unknown version'}, this binary bundles a different copy (${VERSION})`),
           }[info.state];
           print(`${c('cyan', 'nvim plugin:')} ${line}`);
           print(`${c('cyan', 'path:')}        ${dir}`);
           if (info.edited.length) print(`${c('cyan', 'edited:')}      ${info.edited.join(', ')}`);
           if (info.missing.length) print(`${c('cyan', 'missing:')}     ${info.missing.join(', ')}`);
-          if (info.state === 'missing' || info.state === 'outdated') print(c('dim', 'Run: hedgesync editor nvim install'));
+          if (info.state === 'missing') print(c('dim', 'Run: hedgesync editor nvim install'));
+          else if (info.state === 'outdated') print(c('dim', `Run: hedgesync editor nvim install${info.edited.length || info.missing.length ? ' --force (discards your changes)' : ''}`));
         });
         if (info.state !== 'current') process.exitCode = 1;
         return;

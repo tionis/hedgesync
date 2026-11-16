@@ -36,7 +36,8 @@
  *   {t:'reset', epoch, seq, text}  replace the buffer; E = 0, R = seq
  *   {t:'edit', seq, base, edits: [{sr, sc, er, ec, text}]}
  *       absolute ranges, last range first, so each applies as is
- *   {t:'cursors', cursors: [{id, name, color, row, col}]}
+ *   {t:'cursors', cursors: [{id, name, color, row?, col?}]}  everyone else
+ *       online; row/col only while their cursor is in the note
  *   {t:'ready', protocol, version, url, noteId, title, editable}
  *   {t:'status' | 'error' | 'note' ...} sent by the CLI wrapper
  */
@@ -97,7 +98,13 @@ export interface WireEdit {
 export type BridgeMessage =
   | { t: 'reset'; epoch: number; seq: number; text: string }
   | { t: 'edit'; seq: number; base: number; edits: WireEdit[] }
-  | { t: 'cursors'; cursors: Array<{ id: string; name: string; color: string; row: number; col: number }> };
+  | CursorMessage;
+
+/** Everyone else in the note; row/col (bytes) only for those with a cursor in it. */
+export interface CursorMessage {
+  t: 'cursors';
+  cursors: Array<{ id: string; name: string; color: string; row?: number; col?: number }>;
+}
 
 export interface EditorBridgeOptions {
   /** Called when local edits cannot be submitted (e.g. no edit permission). */
@@ -334,19 +341,22 @@ export class EditorBridge {
     if (!this.started) return;
     const doc = this.client.getDocument();
     const lines = this.view.split('\n');
-    const cursors = [];
+    const cursors: CursorMessage['cursors'] = [];
     // The server lists this connection too, with the cursor we sent it.
     const self = this.client.socket?.id;
     for (const user of this.client.users.values()) {
-      if (!user.cursor || user.id === self) continue;
+      if (user.id === self) continue;
+      const who = { id: user.id, name: user.name || 'Guest', color: user.color || '#888888' };
+      if (!user.cursor) {
+        cursors.push(who); // online, but not in the editor right now
+        continue;
+      }
       // Positions are in the client document; map through held local edits.
       let index = indexFromCursor(doc, user.cursor);
       if (this.held) index = TextOperation.transformPosition(index, this.held);
       const { line, ch } = cursorFromIndex(this.view, index);
       cursors.push({
-        id: user.id,
-        name: user.name || 'Guest',
-        color: user.color || '#888888',
+        ...who,
         row: line,
         col: utf8Length(lines[line]?.slice(0, ch) ?? ''),
       });

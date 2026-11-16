@@ -27,7 +27,7 @@ vim.api.nvim_create_user_command("Hedge", function(opts)
   end
   fn(rest)
 end, {
-  nargs = "+",
+  nargs = "*",
   complete = function(arglead, line)
     if line:match("^%S+%s+%S*$") then
       return vim.tbl_filter(function(name)
