@@ -21,6 +21,12 @@
   listed with `--note` are reachable, and a token is required unless it
   listens on localhost only. Edits merge live with people's typing.
 
+### Fixed
+
+- On Windows, a timed-out command in the note terminal (and agent, filter
+  and serve commands) now ends at the timeout. Before, a process forked by
+  Git's bash could survive the kill and hold it open until it finished.
+
 ## 2.4.1 (2026-11-16)
 
 ### Fixed

@@ -177,7 +177,7 @@ describe('NoteTerminal', () => {
 
   // Known gap: on Windows (Git for Windows' sh) the timed-out command is not
   // stopped in the note terminal, though taskkill works for runShell.
-  test.skipIf(process.platform === 'win32')('a timeout kills the command and the next one gets a new shell', async () => {
+  test('a timeout kills the command and the next one gets a new shell', async () => {
     const { server, terminal, pump, submit } = await setup('', { timeoutMs: 200 });
     let done = 0;
     terminal.on('done', () => done++);

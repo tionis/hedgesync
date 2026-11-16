@@ -125,14 +125,25 @@ export function spawnShell(cmd: ShellCommand, options: SpawnShellOptions = {}): 
       resolve(code);
     };
     proc.on('close', (code, signal) => done(code ?? (signal ? 128 : 1)));
+    // Killed on Windows: a forked grandchild may survive taskkill and keep the
+    // pipes open, so finish when the shell itself exits.
+    proc.on('exit', (code, signal) => {
+      if (process.platform !== 'win32' || !killed.has(proc)) return;
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      done(code ?? (signal ? 128 : 1));
+    });
     proc.on('error', () => done(127));
   });
   return Object.assign(proc, { exitCode$ });
 }
 
+const killed = new WeakSet<ChildProcess>();
+
 /** Terminate a process started by spawnShell, including its children. */
 export function killShell(proc: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
   if (proc.exitCode !== null || proc.signalCode !== null) return;
+  killed.add(proc);
   try {
     if (proc.pid && process.platform === 'win32') {
       // No process groups: kill the tree, or children (sleep, curl, ...)

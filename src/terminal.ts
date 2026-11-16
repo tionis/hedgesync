@@ -477,6 +477,15 @@ export class NoteTerminal extends SimpleEventEmitter {
       }
     };
     proc.on('close', onGone);
+    // After a timeout, don't wait for the pipes to close: on Windows a
+    // grandchild of Git's bash (forked, so outside taskkill's reach) can
+    // outlive the kill and keep them open until it finishes by itself.
+    proc.on('exit', () => {
+      if (this._proc !== proc || !this._running?.timedOut) return;
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      onGone();
+    });
     proc.on('error', (err) => {
       this.emit('warning', `Shell ${this.shell} failed: ${err.message}`);
       onGone();

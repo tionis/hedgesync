@@ -80,6 +80,14 @@ describe('runShell', () => {
     expect(result.code).not.toBe(0);
     expect(Date.now() - started).toBeLessThan(2000);
   });
+
+  test('timeout ends a command whose shell forked a child', async () => {
+    // Not the last command, so the shell forks for sleep instead of exec'ing it.
+    const started = Date.now();
+    const result = await runShell({ command: 'echo start; sleep 5; echo end' }, { timeoutMs: 500 });
+    expect(result.code).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
 });
 
 process.on('exit', () => rmSync(canaryDir, { recursive: true, force: true }));
