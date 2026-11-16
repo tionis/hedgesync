@@ -12,7 +12,7 @@
  * reference exactly once and never re-parses the result, so note content is
  * always data, never code.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 
 /** A command to run with `sh -c`, plus extra environment and stdin. */
 export interface ShellCommand {
@@ -134,7 +134,13 @@ export function spawnShell(cmd: ShellCommand, options: SpawnShellOptions = {}): 
 export function killShell(proc: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
   if (proc.exitCode !== null || proc.signalCode !== null) return;
   try {
-    if (proc.pid && process.platform !== 'win32') {
+    if (proc.pid && process.platform === 'win32') {
+      // No process groups: kill the tree, or children (sleep, curl, ...)
+      // keep running and hold the output pipes open.
+      spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      return;
+    }
+    if (proc.pid) {
       process.kill(-proc.pid, signal);
       return;
     }
