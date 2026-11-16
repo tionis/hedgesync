@@ -131,6 +131,9 @@ hedgesync watch https://md.example.com/abc123 --ndjson
 hedgesync edit https://md.example.com/abc123
 hedgesync edit https://md.example.com/abc123 -e "code --wait"
 hedgesync edit                                                 # browse your notes (Neovim)
+# Write a commit message together: a note from git's message file, linked
+# for the person you pair with, written back when your editor closes
+GIT_EDITOR="hedgesync edit --new --delete-after" git commit
 
 # Share a local file live (any editor): a new note, synced both ways
 hedgesync share main.go                                        # prints the link to give out

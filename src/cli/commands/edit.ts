@@ -7,20 +7,26 @@
  * - Any other editor: the note in a temp file. Every save is merged into the
  *   note (three-way, so concurrent remote edits survive), and once more when
  *   the editor exits.
+ * - --new <file>: a new note from a file, edited as above (with others, by
+ *   link), and its final text written back to the file. Made for
+ *   GIT_EDITOR: writing a commit message together.
  */
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, unwatchFile, watchFile, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unwatchFile, watchFile, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { HedgeDocClient } from '../../hedgedoc-client.js';
 import { mergeText } from '../../mirror.js';
+import { parseNoteUrl } from '../../url.js';
 import { VERSION } from '../../version.js';
 import { assertEditable, connectionOptions, readOnlyReason, type Command, type Context } from '../context.js';
 import { helpText } from '../help-text.js';
 import { NVIM_PLUGIN_FILES } from '../nvim-plugin.generated.js';
 import { CliError, c } from '../ui.js';
 import { defaultNvimDir, inspectInstall, installPlugin, lazySpecFile } from './editor.js';
+import { createNote, defaultServer, noteText } from './share.js';
 
 /** The editor command line: --editor, $VISUAL, $EDITOR, else nvim. */
 export function chooseEditor(option: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
@@ -90,8 +96,8 @@ function runEditor(editor: string, args: string[], env: NodeJS.ProcessEnv): Prom
  * Neovim with the plugin: `:Hedge open <url>`, or with no note `:Hedge browse
  * [server]`.
  */
-async function editLive(ctx: Context, editor: string, target: { url: string } | { browse: string }): Promise<number> {
-  if ('url' in target) {
+async function editLive(ctx: Context, editor: string, target: { url: string; probe?: boolean } | { browse: string }): Promise<number> {
+  if ('url' in target && target.probe !== false) {
     // Fail here, with the CLI's error messages, rather than in an empty editor.
     const probe = await ctx.connect(0);
     const readOnly = probe.canEdit() ? undefined : readOnlyReason(probe.getNoteInfo().permission, probe.serverUrl);
@@ -125,9 +131,7 @@ function luaString(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
-async function editFile(ctx: Context, editor: string): Promise<number> {
-  const { noteId } = ctx.note(0);
-  const client = await ctx.connect(0);
+async function editFile(ctx: Context, editor: string, client: HedgeDocClient, noteId: string): Promise<number> {
   const dir = mkdtempSync(join(tmpdir(), 'hedgesync-edit-'));
   const path = join(dir, `${noteId}.md`);
   try {
@@ -181,20 +185,99 @@ async function editFile(ctx: Context, editor: string): Promise<number> {
     }
     return code;
   } finally {
-    client.disconnect();
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Resolve once the note had no change for `quietMs` (at most `maxMs`): the last edits of an editor that just closed. */
+function settle(client: HedgeDocClient, quietMs = 700, maxMs = 5000): Promise<void> {
+  return new Promise((resolve) => {
+    let quiet: ReturnType<typeof setTimeout>;
+    const done = () => {
+      clearTimeout(quiet);
+      clearTimeout(cap);
+      client.off('change', onChange);
+      resolve();
+    };
+    const onChange = () => {
+      clearTimeout(quiet);
+      quiet = setTimeout(done, quietMs);
+    };
+    const cap = setTimeout(done, maxMs);
+    client.on('change', onChange);
+    onChange();
+  });
+}
+
+/**
+ * --new: a note from `file`, edited (live in Neovim) with whoever opens the
+ * link, and its final text written back to `file` when the editor exits
+ * successfully.
+ */
+async function editNew(ctx: Context, editor: string, live: boolean, server: string, file: string): Promise<number> {
+  const original = existsSync(file) ? readFileSync(file, 'utf8') : '';
+  const url = await createNote(ctx, server, noteText(original));
+  const { noteId } = parseNoteUrl(url);
+  // To stderr, so it shows even when git runs the editor.
+  ctx.info(`${c('cyan', 'Editing together:')} ${url}?edit`);
+  const client = await ctx.connectTo(server, noteId);
+  try {
+    const code = live ? await editLive(ctx, editor, { url, probe: false }) : await editFile(ctx, editor, client, noteId);
+    if (code !== 0) {
+      ctx.warn(`The editor failed (exit ${code}); ${file} is unchanged. The note stays: ${url}`);
+      return code;
+    }
+    await settle(client);
+    const text = client.getDocument();
+    // Keep the file's final newline convention (git messages end with one).
+    const keepNewline = original === '' || original.endsWith('\n');
+    writeFileSync(file, keepNewline && !text.endsWith('\n') ? text + '\n' : text);
+    if (ctx.flag('delete-after')) {
+      try {
+        await client.deleteNote();
+      } catch (err) {
+        ctx.warn(`Could not delete ${url}: ${(err as Error).message}`);
+      }
+    }
+    return 0;
+  } finally {
+    client.disconnect();
   }
 }
 
 export const edit: Command = {
   name: 'edit',
   summary: 'Open a note in your editor (live in Neovim)',
-  options: [...connectionOptions, { name: 'editor', short: 'e', type: 'value' }, { name: 'no-live', type: 'flag' }],
+  options: [
+    ...connectionOptions,
+    { name: 'editor', short: 'e', type: 'value' },
+    { name: 'no-live', type: 'flag' },
+    { name: 'new', type: 'flag' },
+    { name: 'delete-after', type: 'flag' },
+    { name: 'permission', short: 'p', type: 'value' },
+  ],
   help: helpText.edit,
   async run(ctx) {
     const usage = 'hedgesync edit [<note-url> | <server-url>] [--editor <cmd>]';
     const editor = chooseEditor(ctx.str('editor'));
     const live = isNeovim(editor) && !ctx.flag('no-live');
+    if (ctx.flag('new')) {
+      const newUsage = 'hedgesync edit --new [<server-url>] <file> [--delete-after]';
+      const [first, second] = ctx.positional;
+      if (!first) throw new CliError('Which file?', `Usage: ${newUsage}`);
+      let server: string;
+      let file: string;
+      if (second !== undefined) {
+        const s = serverOnly(first);
+        if (!s) throw new CliError(`Not a server URL: ${first}`, `Usage: ${newUsage}`);
+        [server, file] = [s, second];
+      } else {
+        [server, file] = [defaultServer(newUsage), first];
+      }
+      const code = await editNew(ctx, editor, live, server, file);
+      if (code !== 0) process.exitCode = code;
+      return;
+    }
     const arg = ctx.positional[0];
     // No note: browse your notes (on that server, or the saved login's).
     const server = arg === undefined ? '' : serverOnly(arg);
@@ -205,7 +288,17 @@ export const edit: Command = {
       return;
     }
     const { url } = ctx.note(0, usage);
-    const code = live ? await editLive(ctx, editor, { url }) : await editFile(ctx, editor);
+    let code: number;
+    if (live) {
+      code = await editLive(ctx, editor, { url });
+    } else {
+      const client = await ctx.connect(0);
+      try {
+        code = await editFile(ctx, editor, client, ctx.note(0).noteId);
+      } finally {
+        client.disconnect();
+      }
+    }
     if (code !== 0) process.exitCode = code;
   },
 };

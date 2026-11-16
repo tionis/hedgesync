@@ -720,6 +720,7 @@ ${c('bold', 'hedgesync edit')} - Open a note in your editor
 ${c('yellow', 'USAGE:')}
   hedgesync edit <url> [--editor <cmd>] [--no-live]
   hedgesync edit [<server-url>]        Browse your notes (Neovim)
+  hedgesync edit --new [<server-url>] <file>   Write a file together
 
 ${c('yellow', 'DESCRIPTION:')}
   Opens the note in --editor, $VISUAL or $EDITOR (default: nvim).
@@ -737,14 +738,28 @@ ${c('yellow', 'DESCRIPTION:')}
   that server (or your saved login's), to open, pin, create or search, with
   revisions to view, diff and restore.
 
+  --new makes a note from <file> (on that server, or your saved login's),
+  prints its link for others to join, and opens it like any note. When the
+  editor exits successfully, the note's final text is written back to the
+  file. Made for git: write a commit message or tag together with whoever
+  you are pairing with (see the examples). If the editor fails, the file is
+  left as it was.
+
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-e, --editor <cmd>')} Editor command line (may include arguments)
   ${c('cyan', '--no-live')}          Use the temp-file mode even with Neovim
   ${c('cyan', '--no-reconnect')}     Do not reconnect a dropped session
+  ${c('cyan', '--new')}              Create a note from <file> and write the result back
+  ${c('cyan', '--delete-after')}     With --new: delete the note afterwards (needs a login)
+  ${c('cyan', '-p, --permission <p>')} With --new: the note's permission
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync edit https://md.example.com/abc123
   hedgesync edit https://md.example.com/abc123 -e "code --wait"
   hedgesync edit                        # browse your notes in Neovim
+
+  ${c('dim', '# A commit message written together (or: git config alias.pair-commit ...)')}
+  GIT_EDITOR="hedgesync edit --new --delete-after" git commit
+  git config alias.pair-commit '!GIT_EDITOR="hedgesync edit --new --delete-after" git commit'
 `,
 };

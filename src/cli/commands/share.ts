@@ -65,14 +65,16 @@ export class FileNoteSync {
   }
 }
 
-function defaultServer(): string {
+/** The server of the only saved login. */
+export function defaultServer(usage: string = USAGE): string {
   const saved = listStoredSessions().map(([server]) => server);
   if (saved.length === 1) return saved[0];
   throw new CliError(saved.length ? 'Which server?' : 'Which server? (no saved login)',
-    saved.length ? `Saved logins: ${saved.join(', ')}. Usage: ${USAGE}` : `Usage: ${USAGE}`);
+    saved.length ? `Saved logins: ${saved.join(', ')}. Usage: ${usage}` : `Usage: ${usage}`);
 }
 
-async function createNote(ctx: Context, server: string, text: string): Promise<string> {
+/** Create a note with `text` (and --permission, if given); returns its URL. */
+export async function createNote(ctx: Context, server: string, text: string): Promise<string> {
   const permission = ctx.str('permission')?.toLowerCase();
   if (permission && !(HEDGEDOC1_PERMISSIONS as readonly string[]).includes(permission)) {
     throw new CliError(`Invalid permission '${permission}'`, `One of: ${HEDGEDOC1_PERMISSIONS.join(', ')}`);

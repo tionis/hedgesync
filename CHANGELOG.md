@@ -19,6 +19,10 @@
 - `hedgesync share <file> [<server-url> | <note-url>]`: share a local file
   live from any editor, or join a shared one; file and note are synced both
   ways (three-way merges) until Ctrl+C.
+- `hedgesync edit --new [<server>] <file>`: a new note from a file, edited
+  with whoever opens its link, and written back to the file when the editor
+  closes. As `GIT_EDITOR`, it lets two people write a commit message
+  together. `--delete-after` removes the note again.
 - `hedgesync mirror` filters: `--strip <name>` removes `<!-- name -->`
   blocks and `::name ...::` spans (a GM's secrets, internal remarks),
   `--only`, `--strip-heading`, `--replace` and `--filter <cmd>`. They fail

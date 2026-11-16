@@ -256,6 +256,45 @@ describe('mirror --strip', () => {
   });
 });
 
+describe('edit --new', () => {
+  test('a file edited as a new note, with someone else, and written back', async () => {
+    const file = join(tmp, 'COMMIT_EDITMSG');
+    writeFileSync(file, '\n# Please enter the commit message\n');
+    // The "editor" writes a subject line, then waits while a collaborator adds a line.
+    const editor = `sh -c 'printf "Fix the bug\\n\\n# Please enter the commit message\\n" > "$1"; sleep 2' sh`;
+    const proc = Bun.spawn(['bun', CLI, 'edit', '--new', server.url, file, '--editor', editor], {
+      stdout: 'pipe', stderr: 'pipe',
+      env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1', HEDGESYNC_COOKIE_FILE: join(tmp, 'cookies.json'), HEDGEDOC_COOKIE: 'connect.sid=good' },
+    });
+    const reader = proc.stderr.getReader();
+    let err = '';
+    while (!/Editing together: (\S+)\?edit/.test(err)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      err += new TextDecoder().decode(value);
+    }
+    const url = /Editing together: (\S+)\?edit/.exec(err)![1];
+    const id = url.slice(url.lastIndexOf('/') + 1);
+    const pair = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+    await pair.connect();
+    for (let i = 0; i < 100 && !pair.getDocument().startsWith('Fix the bug'); i++) await Bun.sleep(25);
+    pair.insert('Fix the bug\n'.length, '\nCo-authored-by: Pair <pair@example.com>\n');
+    await pair.flush();
+    expect(await proc.exited).toBe(0);
+    pair.disconnect();
+    expect(readFileSync(file, 'utf8')).toBe('Fix the bug\n\nCo-authored-by: Pair <pair@example.com>\n\n# Please enter the commit message\n');
+  });
+
+  test('a failing editor leaves the file alone', async () => {
+    const file = join(tmp, 'MSG2');
+    writeFileSync(file, 'original\n');
+    const r = await cli(['edit', '--new', server.url, file, '--editor', `sh -c 'echo changed > "$1"; exit 1' sh`]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('is unchanged');
+    expect(readFileSync(file, 'utf8')).toBe('original\n');
+  });
+});
+
 describe('arguments and errors', () => {
   test('unknown options are rejected', async () => {
     const r = await cli(['get', 'http://x/y', '--frobnicate']);

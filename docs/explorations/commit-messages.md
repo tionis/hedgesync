@@ -1,6 +1,6 @@
 # Exploration: writing commit messages and PR descriptions together
 
-Status: idea, not built. 2026-11-16.
+Status: built (`hedgesync edit --new`, without `--wait` for browser-only use), 2026-11-16.
 
 When two people pair, one of them types the commit message and the other
 dictates. With a note as the editor, both write it, from their own editor
