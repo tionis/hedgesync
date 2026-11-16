@@ -36,6 +36,9 @@ local subcommands = {
   close = function()
     require("hedgesync").close(0)
   end,
+  follow = function(args)
+    require("hedgesync").follow(0, args)
+  end,
   users = function()
     require("hedgesync").users(0)
   end,
@@ -53,6 +56,7 @@ local usage = table.concat({
   "  search <text>     search your notes' text into the quickfix list",
   "  revisions         this note's revisions: view, diff, restore",
   "  url [publish|slide]  copy this note's URL",
+  "  follow [name]     your view follows their cursor (any key stops; again to stop)",
   "  users | status | close",
 }, "\n")
 
@@ -74,6 +78,11 @@ end, {
       return vim.tbl_filter(function(name)
         return name:find(arglead, 1, true) == 1
       end, names)
+    end
+    if line:match("^%S+%s+follow%s+%S*$") then
+      return vim.tbl_filter(function(name)
+        return name:lower():find(arglead:lower(), 1, true) == 1
+      end, require("hedgesync").names(0))
     end
     if line:match("^%S+%s+url%s+%S*$") then
       return vim.tbl_filter(function(name)

@@ -231,6 +231,110 @@ end
 
 -- Messages from the bridge -------------------------------------------------
 
+-- Follow mode ------------------------------------------------------------
+
+local follow_ns = api.nvim_create_namespace("hedgesync_follow")
+
+local function stop_following(s, why)
+  if not s.follow then
+    return
+  end
+  local name = s.follow.name
+  s.follow = nil
+  vim.on_key(nil, follow_ns)
+  if why then
+    notify(("stopped following %s (%s)"):format(name, why))
+  end
+  if api.nvim_get_current_buf() == s.buf and s.send_cursor then
+    s.send_cursor() -- visible again
+  end
+end
+
+--- Move to the followed person's cursor (current window only), centring it
+--- when it left the screen.
+local function follow_update(s)
+  local f = s.follow
+  if not f then
+    return
+  end
+  local who
+  for _, c in ipairs(s.cursors or {}) do
+    if c.id == f.id then
+      who = c
+    end
+  end
+  if not who then
+    return stop_following(s, "they left")
+  end
+  if not who.row or api.nvim_get_current_buf() ~= s.buf then
+    return
+  end
+  local win = api.nvim_get_current_win()
+  local row = math.min(who.row + 1, api.nvim_buf_line_count(s.buf))
+  pcall(api.nvim_win_set_cursor, win, { row, who.col or 0 })
+  api.nvim_win_call(win, function()
+    if row < vim.fn.line("w0") or row > vim.fn.line("w$") then
+      vim.cmd("normal! zz")
+    end
+  end)
+end
+
+--- Follow someone's cursor: your view moves with it until you press a key.
+---@param buf? integer
+---@param name? string a name (or the start of one); nil: the only other person, else ask
+function M.follow(buf, name)
+  local s = M.session(buf)
+  if not s then
+    return notify("not a hedgesync buffer", vim.log.levels.WARN)
+  end
+  name = vim.trim(name or "")
+  if s.follow and name == "" then
+    return stop_following(s, "as asked")
+  end
+  local candidates = vim.tbl_filter(function(c)
+    return name == "" or c.name:lower():find(name:lower(), 1, true) == 1
+  end, s.cursors or {})
+  local function start(c)
+    s.follow = { id = c.id, name = c.name }
+    -- While following, stay invisible: your cursor is theirs anyway.
+    send(s, { t = "cursor", row = vim.NIL })
+    vim.on_key(function(key)
+      if api.nvim_get_mode().mode:sub(1, 1) == "c" or key == ":" then
+        return -- running a command (:Hedge users) keeps following
+      end
+      vim.schedule(function()
+        stop_following(s, "you moved")
+      end)
+    end, follow_ns)
+    notify(("following %s; any key stops"):format(c.name))
+    follow_update(s)
+  end
+  if #candidates == 0 then
+    notify(name == "" and "nobody else is in this note" or ("nobody called " .. name .. " is here"), vim.log.levels.WARN)
+  elseif #candidates == 1 then
+    start(candidates[1])
+  else
+    vim.ui.select(candidates, {
+      prompt = "Follow",
+      format_item = function(c)
+        return c.name .. (c.row and (" (line " .. (c.row + 1) .. ")") or "")
+      end,
+    }, function(c)
+      if c then
+        start(c)
+      end
+    end)
+  end
+end
+
+--- Names of the others in the note, for completion.
+function M.names(buf)
+  local s = M.session(buf)
+  return vim.tbl_map(function(c)
+    return c.name
+  end, s and s.cursors or {})
+end
+
 local function on_reset(s, msg)
   flush(s) -- dropped anyway (new epoch), but keeps the snapshot honest
   local buf = s.buf
@@ -333,6 +437,7 @@ local handlers = {
   cursors = function(s, msg)
     s.cursors = msg.cursors
     draw_cursors(s, msg.cursors)
+    follow_update(s)
   end,
   status = function(s, msg)
     if msg.state == "desync" then
@@ -389,7 +494,7 @@ local function attach(s)
   local timer = vim.uv.new_timer()
   s.cursor_timer = timer
   local function send_cursor()
-    if not s.loaded or api.nvim_get_current_buf() ~= s.buf then
+    if not s.loaded or api.nvim_get_current_buf() ~= s.buf or s.follow then
       return
     end
     flush(s)
@@ -404,11 +509,13 @@ local function attach(s)
       timer:start(M.config.cursor_debounce, 0, vim.schedule_wrap(send_cursor))
     end,
   })
+  s.send_cursor = send_cursor
   api.nvim_create_autocmd("BufEnter", { group = group, buffer = s.buf, callback = send_cursor })
   api.nvim_create_autocmd("BufLeave", {
     group = group,
     buffer = s.buf,
     callback = function()
+      stop_following(s, "you left the buffer")
       send(s, { t = "cursor", row = vim.NIL })
     end,
   })
@@ -588,6 +695,7 @@ function M.close(buf)
   if not s then
     return
   end
+  stop_following(s)
   sessions[buf] = nil
   if s.cursor_timer then
     s.cursor_timer:stop()
@@ -642,7 +750,7 @@ function M.status(buf)
   end
   local icon = ({ connected = "●", connecting = "◌", reconnecting = "◌", disconnected = "○", closed = "×" })[s.state]
     or "?"
-  return icon .. " " .. tostring(s.state)
+  return icon .. " " .. tostring(s.state) .. (s.follow and (" · following " .. s.follow.name) or "")
 end
 
 function M.users(buf)

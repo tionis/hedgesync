@@ -11,6 +11,8 @@
   in the quickfix list; `:Hedge revisions` views a revision, diffs it
   against the live note or restores it as an undoable edit; `:Hedge url
   [publish|slide]` copies a link.
+- Neovim: `:Hedge follow [name]` makes your view follow someone's cursor
+  until you press a key.
 - `hedgesync edit` without a note opens `:Hedge browse` (on the given server
   or your saved login's).
 - Release binaries for linux-arm64 and linux-x64-musl (Alpine).

@@ -286,3 +286,41 @@ finish(listing)
     expect(server.note(id).document).toBe('now\n'); // restored, then undone
   });
 });
+
+describe.skipIf(!NVIM)('neovim plugin: follow', () => {
+  test(':Hedge follow moves with their cursor until you press a key', async () => {
+    const id = 'follow-note';
+    server.note(id).document = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+    const guide = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+    await guide.connect();
+    guide.setCursor({ line: 59, ch: 2 });
+    const reached = join(mkdtempSync(join(tmp, 'follow-')), 'reached-60');
+    try {
+      const run = nvimWith(PLUGIN, ['bun', CLI], `
+local function until_(what, cond)
+  if not vim.wait(15000, cond, 20) then finish("timed out waiting for " .. what .. "\\n" .. table.concat(notes, "\\n")) end
+end
+local buf = hs.open("${server.url}/${id}")
+until_("their cursor", function() local s = hs.session(buf); return s.loaded and s.cursors and s.cursors[1] and s.cursors[1].row end)
+vim.cmd("Hedge follow")
+until_("line 60", function() return vim.api.nvim_win_get_cursor(0)[1] == 60 end)
+local status = hs.status(buf)
+io.open("${reached}", "w"):close()
+until_("line 10", function() return vim.api.nvim_win_get_cursor(0)[1] == 10 end)
+vim.api.nvim_feedkeys("j", "xt", false)
+vim.wait(200)
+finish(status .. "|" .. tostring(hs.session(buf).follow) .. "|" .. table.concat(notes, "/"))
+`);
+      const early = await Promise.race([waitForFile(reached, 30_000).then(() => null), run]);
+      if (early !== null) throw new Error(`nvim ended early: ${early}`);
+      guide.setCursor({ line: 9, ch: 0 });
+      const [status, follow, notes] = (await run).split('|');
+      expect(status).toMatch(/following user-/);
+      expect(follow).toBe('nil');
+      expect(notes).toMatch(/following user-\S+; any key stops/);
+      expect(notes).toMatch(/stopped following user-\S+ \(you moved\)/);
+    } finally {
+      guide.disconnect();
+    }
+  });
+});

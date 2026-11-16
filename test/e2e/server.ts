@@ -167,6 +167,8 @@ export async function startTestServer(initial: Record<string, string | { documen
       userid: (io.sockets.sockets.get(sid)?.data as { userId?: string | null } | undefined)?.userId ?? null,
       name: `user-${sid.slice(0, 4)}`,
       color: '#000',
+      // Like HedgeDoc 1, newcomers learn where everyone's cursor is.
+      cursor: (io.sockets.sockets.get(sid)?.data as { cursor?: unknown } | undefined)?.cursor ?? null,
     }));
 
     socket.emit('doc', { str: n.document, revision: n.operations.length, clients: {} });
@@ -200,9 +202,15 @@ export async function startTestServer(initial: Record<string, string | { documen
       setTimeout(() => io.in(room).disconnectSockets(true), 0);
     });
     for (const event of ['cursor focus', 'cursor activity']) {
-      socket.on(event, (cursor: unknown) => socket.to(room).emit(event, { ...users().find(u => u.id === socket.id), cursor }));
+      socket.on(event, (cursor: unknown) => {
+        (socket.data as { cursor?: unknown }).cursor = cursor;
+        socket.to(room).emit(event, { ...users().find(u => u.id === socket.id), cursor });
+      });
     }
-    socket.on('cursor blur', () => socket.to(room).emit('cursor blur', { id: socket.id }));
+    socket.on('cursor blur', () => {
+      (socket.data as { cursor?: unknown }).cursor = null;
+      socket.to(room).emit('cursor blur', { id: socket.id });
+    });
     socket.on('disconnect', () => io.to(room).emit('online users', { users: users() }));
   });
 

@@ -66,6 +66,7 @@ Inside Neovim:
 :Hedge search <text>                       " search your notes' text into the quickfix list
 :Hedge revisions                           " this note's revisions: view, diff, restore
 :Hedge url [publish|slide]                 " copy the note's (published, slide) URL
+:Hedge follow [name]                       " your view follows their cursor
 :Hedge users                               " who else is in the note
 :Hedge status
 :Hedge close                               " stop syncing this buffer
@@ -87,6 +88,11 @@ there are several). Keys (`?` shows them):
 In `:Hedge revisions`, `<CR>` shows a revision, `d` diffs it against the
 live note side by side, and `R` restores it. Restoring is an edit in the
 live buffer, synced like typing, so `u` takes it back.
+
+`:Hedge follow` keeps your cursor on someone else's, scrolling along, for
+pairing or a walkthrough. While you follow, your own cursor is hidden from
+the others. Any key stops it (`:` commands do not), as does `:Hedge follow`
+again; the statusline helper shows `following <name>`.
 
 Search results open the note live at the matching line (`:cnext` and
 friends work as usual). Notes appear in your history once opened while
