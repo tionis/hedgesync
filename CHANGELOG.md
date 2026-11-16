@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 (2026-11-16)
 
 ### Added
 
@@ -53,6 +53,17 @@
   and Neovim, the plugin's end-to-end tests run against a real Neovim, unit
   tests also on macOS and Windows, the released binaries are the ones built
   and smoke-tested (not a rebuild), and release notes come from this file.
+
+### Fixed
+
+- Windows: a timed-out or stopped shell command (`exec`, macro commands)
+  now stops its child processes too (`taskkill /T`); before, they ran on
+  and held the output open. The note terminal still has this gap on
+  Windows.
+- Text files are checked out with LF everywhere, so builds on Windows embed
+  the same Neovim plugin.
+- Help: `append`, `prepend`, `insert` and `line` document `--file`, and
+  `replace` documents `--flags`; a test keeps every option documented.
 
 ## 2.3.0 (2026-11-16)
 

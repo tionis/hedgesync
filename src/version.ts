@@ -1,2 +1,2 @@
 /** Package version (kept equal to package.json; a unit test checks). */
-export const VERSION = '2.3.0';
+export const VERSION = '2.4.0';
