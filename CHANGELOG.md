@@ -13,6 +13,9 @@
   [publish|slide]` copies a link.
 - Neovim: `:Hedge follow [name]` makes your view follow someone's cursor
   until you press a key.
+- Neovim: `:Hedge share [permission]` shares the file buffer you are in
+  live: a new note gets its text and the buffer stays the file (`:w` saves
+  it) while syncing; the copied link carries the filetype for Neovim guests.
 - `hedgesync edit` without a note opens `:Hedge browse` (on the given server
   or your saved login's).
 - Release binaries for linux-arm64 and linux-x64-musl (Alpine).

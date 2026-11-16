@@ -324,3 +324,49 @@ finish(status .. "|" .. tostring(hs.session(buf).follow) .. "|" .. table.concat(
     }
   });
 });
+
+describe.skipIf(!NVIM)('neovim plugin: share', () => {
+  test(':Hedge share syncs a file buffer with a new note; :w still writes the file', async () => {
+    const dir = mkdtempSync(join(tmp, 'share-'));
+    const file = join(dir, 'code.lua');
+    const urlFile = join(dir, 'url');
+    writeFileSync(file, 'local M = {}\nreturn M\n');
+    const run = nvimWith(PLUGIN, ['bun', CLI], `
+local function until_(what, cond)
+  if not vim.wait(15000, cond, 20) then finish("timed out waiting for " .. what .. "\\n" .. table.concat(notes, "\\n")) end
+end
+local ui = require("hedgesync.ui")
+ui.last_server = "${server.url}"
+vim.cmd("edit ${file}")
+local buf = vim.api.nvim_get_current_buf()
+vim.cmd("Hedge share")
+until_("the share", function() local s = hs.session(buf); return s and s.loaded end)
+local clean = tostring(vim.bo[buf].modified)
+vim.fn.writefile({ hs.session(buf).url }, "${urlFile}")
+until_("the remote edit", function() return vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == "-- remote" end)
+local modified = tostring(vim.bo[buf].modified)
+vim.cmd("write")
+vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "-- local" })
+vim.wait(1000)
+vim.cmd("Hedge close")
+finish(table.concat({ clean, modified, vim.bo[buf].buftype, vim.bo[buf].filetype, tostring(vim.bo[buf].modifiable), vim.fn.getreg('"') }, "|"))
+`);
+    const early = await Promise.race([waitForFile(urlFile, 30_000).then(() => null), run]);
+    if (early !== null) throw new Error(`nvim ended early: ${early}`);
+    const url = readFileSync(urlFile, 'utf8').trim();
+    const id = url.split('/').pop()!;
+    expect(server.note(id).document).toBe('local M = {}\nreturn M');
+    const other = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+    await other.connect();
+    other.insert(0, '-- remote\n');
+    await other.flush();
+    const [clean, modified, buftype, filetype, modifiable, link] = (await run).split('|');
+    other.disconnect();
+    expect({ clean, modified, buftype, filetype, modifiable }).toEqual({
+      clean: 'false', modified: 'true', buftype: '', filetype: 'lua', modifiable: 'true',
+    });
+    expect(link).toBe(`${url}?edit#ft=lua`);
+    expect(readFileSync(file, 'utf8')).toBe('-- remote\nlocal M = {}\nreturn M\n'); // :w before the local line
+    expect(server.note(id).document).toBe('-- remote\nlocal M = {}\nreturn M\n-- local');
+  });
+});

@@ -143,7 +143,9 @@ local function flush(s)
     text = n:sub(p + 1, #n - q),
     size = buf_size(buf),
   })
-  vim.bo[buf].modified = false
+  if not s.shared then
+    vim.bo[buf].modified = false
+  end
 end
 
 --- Apply text without reporting it back to the bridge.
@@ -156,12 +158,19 @@ local function apply(s, fn)
   local ok, err = pcall(fn)
   vim.bo[buf].modifiable, vim.bo[buf].readonly = modifiable, readonly
   s.applying = false
-  vim.bo[buf].modified = false
+  if not s.shared then
+    vim.bo[buf].modified = false -- nothing to save: the note is the file
+  end
   s.lines = api.nvim_buf_get_lines(buf, 0, -1, false)
   return ok, err
 end
 
 local function set_modifiable(s)
+  if s.shared and s.closed then
+    -- Back to a plain file buffer.
+    vim.bo[s.buf].modifiable, vim.bo[s.buf].readonly = true, false
+    return
+  end
   vim.bo[s.buf].modifiable = s.editable and not s.closed
   vim.bo[s.buf].readonly = not s.editable
 end
@@ -339,6 +348,16 @@ local function on_reset(s, msg)
   flush(s) -- dropped anyway (new epoch), but keeps the snapshot honest
   local buf = s.buf
   local first = not s.loaded
+  if first and s.shared and table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n") == msg.text then
+    -- Sharing a file buffer: the note was made from it, so leave the buffer
+    -- (and its undo history and modified flag) alone.
+    apply(s, function() end)
+    s.epoch, s.E, s.R, s.loaded = msg.epoch, 0, msg.seq, true
+    return
+  end
+  if first and s.shared then
+    first = false -- an ordinary, undoable change to the user's file
+  end
   local view = vim.fn.bufwinid(buf) ~= -1 and vim.fn.winsaveview() or nil
   local undolevels = vim.bo[buf].undolevels
   if first then
@@ -519,14 +538,16 @@ local function attach(s)
       send(s, { t = "cursor", row = vim.NIL })
     end,
   })
-  api.nvim_create_autocmd("BufWriteCmd", {
-    group = group,
-    buffer = s.buf,
-    callback = function()
-      vim.bo[s.buf].modified = false
-      notify(s.state == "connected" and "changes are synced live" or ("not connected (" .. tostring(s.state) .. ")"))
-    end,
-  })
+  if not s.shared then -- a shared file saves to disk as usual
+    api.nvim_create_autocmd("BufWriteCmd", {
+      group = group,
+      buffer = s.buf,
+      callback = function()
+        vim.bo[s.buf].modified = false
+        notify(s.state == "connected" and "changes are synced live" or ("not connected (" .. tostring(s.state) .. ")"))
+      end,
+    })
+  end
   api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
     group = group,
     buffer = s.buf,
@@ -565,6 +586,9 @@ M.buf_name = buf_name
 function M.open(url, opts)
   opts = opts or {}
   url = M.http_url(url)
+  -- https://host/id?edit#ft=lua: a shared file's link; the filetype is a hint.
+  local filetype = url:match("#.*ft=([%w_.-]+)")
+  url = url:gsub("#.*$", ""):gsub("%?.*$", "")
   if url == "" then
     notify("usage: :Hedge open <note url>", vim.log.levels.ERROR)
     return
@@ -581,6 +605,9 @@ function M.open(url, opts)
 
   local prev = api.nvim_get_current_buf()
   local name = buf_name(url)
+  if opts.share then
+    return M._start(url, opts.share, { shared = true })
+  end
   local buf = opts.buf
   if not buf then
     for _, b in ipairs(api.nvim_list_bufs()) do
@@ -596,7 +623,7 @@ function M.open(url, opts)
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].swapfile = false
   vim.bo[buf].modifiable = false
-  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].filetype = filetype or "markdown"
   if not opts.buf then
     api.nvim_set_current_buf(buf)
   end
@@ -613,7 +640,14 @@ function M.open(url, opts)
     pcall(api.nvim_buf_delete, prev, {})
   end
 
+  return M._start(url, buf, { goto_line = opts.line, wait = opts.wait })
+end
+
+--- Start syncing `buf` with the note at `url`.
+---@param extra { goto_line?: integer, wait?: integer, shared?: boolean }
+function M._start(url, buf, extra)
   local s = {
+    shared = extra.shared,
     buf = buf,
     url = url,
     E = 0,
@@ -623,7 +657,7 @@ function M.open(url, opts)
     editable = false,
     state = "connecting",
     lines = {},
-    goto_line = opts.line,
+    goto_line = extra.goto_line,
   }
   sessions[buf] = s
   update_status(s, "connecting")
@@ -680,8 +714,8 @@ function M.open(url, opts)
     return
   end
   s.proc = proc
-  if opts.wait then
-    vim.wait(opts.wait, function()
+  if extra.wait then
+    vim.wait(extra.wait, function()
       return s.loaded or s.closed
     end, 10)
   end
@@ -712,7 +746,12 @@ function M.close(buf)
   if api.nvim_buf_is_valid(buf) then
     pcall(api.nvim_buf_clear_namespace, buf, ns, 0, -1)
     pcall(api.nvim_del_augroup_by_name, "hedgesync_buf_" .. buf)
-    vim.bo[buf].modifiable = false
+    if s.shared then
+      vim.bo[buf].modifiable, vim.bo[buf].readonly = true, false
+      notify("stopped sharing")
+    else
+      vim.bo[buf].modifiable = false
+    end
   end
 end
 

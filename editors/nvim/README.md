@@ -66,6 +66,7 @@ Inside Neovim:
 :Hedge search <text>                       " search your notes' text into the quickfix list
 :Hedge revisions                           " this note's revisions: view, diff, restore
 :Hedge url [publish|slide]                 " copy the note's (published, slide) URL
+:Hedge share [permission]                  " share this file buffer live (see below)
 :Hedge follow [name]                       " your view follows their cursor
 :Hedge users                               " who else is in the note
 :Hedge status
@@ -88,6 +89,13 @@ there are several). Keys (`?` shows them):
 In `:Hedge revisions`, `<CR>` shows a revision, `d` diffs it against the
 live note side by side, and `R` restores it. Restoring is an edit in the
 live buffer, synced like typing, so `u` takes it back.
+
+`:Hedge share` shares the file you are editing, code or anything else: a
+new note gets its text, and the buffer stays your file (`:w` saves it, as
+always) while it syncs with the note. The link it copies (`:Hedge url` shows
+it again) opens the editor view in a browser; in Neovim, `:Hedge open
+<link>` takes the filetype from it, and `hedgesync share <file> <link>`
+joins from any other editor. `:Hedge close` stops sharing.
 
 `:Hedge follow` keeps your cursor on someone else's, scrolling along, for
 pairing or a walkthrough. While you follow, your own cursor is hidden from

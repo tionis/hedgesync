@@ -216,10 +216,17 @@ end
 
 --- The note a command is about: the live note in this buffer, or the note
 --- under the cursor in a browse view.
+--- The link to give out for a shared file buffer: the browser opens the
+--- editor view, :Hedge open takes the filetype from it.
+local function share_link(s)
+  local ft = vim.bo[s.buf].filetype
+  return s.url .. "?edit" .. (ft ~= "" and ("#ft=" .. ft) or "")
+end
+
 local function current_note()
   local s = hs().session(0)
   if s then
-    return { url = s.url, title = s.title }
+    return { url = s.url, title = s.title, link = s.shared and share_link(s) or nil }
   end
   local view = views[api.nvim_get_current_buf()]
   if view and view.kind == "browse" then
@@ -673,13 +680,52 @@ function M.url(kind)
   end
   kind = vim.trim(kind or "")
   if kind == "" or kind == "edit" then
-    return copy(note.url)
+    return copy(note.link or note.url)
   end
   if kind ~= "publish" and kind ~= "slide" then
     return notify("usage: :Hedge url [edit|publish|slide]", vim.log.levels.ERROR)
   end
   M.cli({ "publish", note.url }, function(data)
     copy(data[kind])
+  end)
+end
+
+-- :Hedge share -------------------------------------------------------------
+
+--- Share the current file buffer live: a new note holds its text and this
+--- buffer stays the file (save with :w as usual) while it syncs with the
+--- note. Others join with the copied link: in a browser, or in Neovim with
+--- :Hedge open (which takes the filetype from the link).
+---@param permission? string note permission (freely, editable, limited, ...)
+function M.share(permission)
+  local buf = api.nvim_get_current_buf()
+  if hs().session(buf) then
+    return notify("this buffer is already live", vim.log.levels.WARN)
+  end
+  if vim.bo[buf].buftype ~= "" then
+    return notify("only file buffers can be shared", vim.log.levels.WARN)
+  end
+  permission = vim.trim(permission or "")
+  M.pick_server(nil, function(srv)
+    local name = vim.fn.fnamemodify(api.nvim_buf_get_name(buf), ":t")
+    local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+    -- No trailing newline: the buffer's lines are exactly the note's
+    -- (the file's final newline is Neovim's 'eol' business).
+    local args = { "create", srv }
+    if permission ~= "" then
+      vim.list_extend(args, { "--permission", permission })
+    end
+    local content = table.concat(lines, "\n")
+    M.cli(args, function(data)
+      if not api.nvim_buf_is_valid(buf) then
+        return
+      end
+      hs().open(data.url, { share = buf })
+      local link = share_link(hs().session(buf))
+      set_clipboard(link)
+      -- Short, or it wraps into a hit-enter prompt; :Hedge url shows the link.
+      notify(("sharing %s, link copied (:Hedge url)"):format(name ~= "" and name or "buffer"))
+    end, { stdin = content ~= "" and content or "\n" })
   end)
 end
 
