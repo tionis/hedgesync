@@ -750,7 +750,9 @@ ${c('yellow', 'DESCRIPTION:')}
   editor exits successfully, the note's final text is written back to the
   file. Made for git: write a commit message or tag together with whoever
   you are pairing with (see the examples). If the editor fails, the file is
-  left as it was.
+  left as it was. With --wait no editor opens: everyone writes in the
+  browser, and the file is written once someone puts /done on a line of
+  its own (that line is dropped); Ctrl+C aborts.
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-e, --editor <cmd>')} Editor command line (may include arguments)
@@ -758,6 +760,7 @@ ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '--no-reconnect')}     Do not reconnect a dropped session
   ${c('cyan', '--new')}              Create a note from <file> and write the result back
   ${c('cyan', '--delete-after')}     With --new: delete the note afterwards (needs a login)
+  ${c('cyan', '--wait')}             With --new: no editor; finish when the note has a /done line
   ${c('cyan', '-p, --permission <p>')} With --new: the note's permission
 
 ${c('yellow', 'EXAMPLES:')}

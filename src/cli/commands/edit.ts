@@ -209,6 +209,35 @@ function settle(client: HedgeDocClient, quietMs = 700, maxMs = 5000): Promise<vo
   });
 }
 
+/** With --wait, a line with just this ends the editing. */
+const DONE = '/done';
+const DONE_LINE = /^[ \t]*\/done[ \t]*$/m;
+
+/** The text without the /done line (and a blank line it leaves at the end). */
+export function withoutDone(text: string): string {
+  return text.replace(/^[ \t]*\/done[ \t]*(\n|$)/m, '').replace(/\n\n+$/, '\n');
+}
+
+/** Wait for a /done line in the note (0), or Ctrl+C (130). */
+function waitForDone(client: HedgeDocClient): Promise<number> {
+  return new Promise((resolve) => {
+    const finish = (code: number) => {
+      client.off('change', check);
+      process.off('SIGINT', abort);
+      process.off('SIGTERM', abort);
+      resolve(code);
+    };
+    const check = () => {
+      if (DONE_LINE.test(client.getDocument())) finish(0);
+    };
+    const abort = () => finish(130);
+    client.on('change', check);
+    process.on('SIGINT', abort);
+    process.on('SIGTERM', abort);
+    check();
+  });
+}
+
 /**
  * --new: a note from `file`, edited (live in Neovim) with whoever opens the
  * link, and its final text written back to `file` when the editor exits
@@ -222,13 +251,19 @@ async function editNew(ctx: Context, editor: string, live: boolean, server: stri
   ctx.info(`${c('cyan', 'Editing together:')} ${url}?edit`);
   const client = await ctx.connectTo(server, noteId);
   try {
-    const code = live ? await editLive(ctx, editor, { url, probe: false }) : await editFile(ctx, editor, client, noteId);
+    let code: number;
+    if (ctx.flag('wait')) {
+      ctx.info(c('dim', `No editor: write ${DONE} on a line of its own in the note when done (Ctrl+C aborts)`));
+      code = await waitForDone(client);
+    } else {
+      code = live ? await editLive(ctx, editor, { url, probe: false }) : await editFile(ctx, editor, client, noteId);
+    }
     if (code !== 0) {
-      ctx.warn(`The editor failed (exit ${code}); ${file} is unchanged. The note stays: ${url}`);
+      ctx.warn(`${ctx.flag('wait') ? 'Aborted' : `The editor failed (exit ${code})`}; ${file} is unchanged. The note stays: ${url}`);
       return code;
     }
     await settle(client);
-    const text = client.getDocument();
+    const text = withoutDone(client.getDocument());
     // Keep the file's final newline convention (git messages end with one).
     const keepNewline = original === '' || original.endsWith('\n');
     writeFileSync(file, keepNewline && !text.endsWith('\n') ? text + '\n' : text);
@@ -254,6 +289,7 @@ export const edit: Command = {
     { name: 'no-live', type: 'flag' },
     { name: 'new', type: 'flag' },
     { name: 'delete-after', type: 'flag' },
+    { name: 'wait', type: 'flag' },
     { name: 'permission', short: 'p', type: 'value' },
   ],
   help: helpText.edit,
@@ -262,7 +298,7 @@ export const edit: Command = {
     const editor = chooseEditor(ctx.str('editor'));
     const live = isNeovim(editor) && !ctx.flag('no-live');
     if (ctx.flag('new')) {
-      const newUsage = 'hedgesync edit --new [<server-url>] <file> [--delete-after]';
+      const newUsage = 'hedgesync edit --new [<server-url>] <file> [--wait] [--delete-after]';
       const [first, second] = ctx.positional;
       if (!first) throw new CliError('Which file?', `Usage: ${newUsage}`);
       let server: string;

@@ -285,6 +285,47 @@ describe('edit --new', () => {
     expect(readFileSync(file, 'utf8')).toBe('Fix the bug\n\nCo-authored-by: Pair <pair@example.com>\n\n# Please enter the commit message\n');
   });
 
+  async function startWait(file: string) {
+    const proc = Bun.spawn(['bun', CLI, 'edit', '--new', server.url, file, '--wait'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    const reader = proc.stderr.getReader();
+    let err = '';
+    while (!/Editing together: (\S+)\?edit[\s\S]*Ctrl\+C/.test(err)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      err += new TextDecoder().decode(value);
+    }
+    const url = /Editing together: (\S+)\?edit/.exec(err)![1];
+    const pair = new HedgeDocClient({ serverUrl: server.url, noteId: url.slice(url.lastIndexOf('/') + 1) });
+    await pair.connect();
+    return { proc, pair };
+  }
+
+  test('--wait: written in the browser, finished with /done', async () => {
+    const file = join(tmp, 'MSG-wait');
+    writeFileSync(file, '\n# comment\n');
+    const { proc, pair } = await startWait(file);
+    pair.insert(0, 'Written in the browser');
+    pair.insert(pair.getDocument().length, '\n/done\n');
+    await pair.flush();
+    expect(await proc.exited).toBe(0);
+    pair.disconnect();
+    expect(readFileSync(file, 'utf8')).toBe('Written in the browser\n# comment\n');
+  });
+
+  test('--wait: Ctrl+C aborts and keeps the file', async () => {
+    const file = join(tmp, 'MSG-abort');
+    writeFileSync(file, 'original\n');
+    const { proc, pair } = await startWait(file);
+    pair.insert(0, 'changed ');
+    await pair.flush();
+    proc.kill('SIGINT');
+    expect(await proc.exited).toBe(130);
+    pair.disconnect();
+    expect(readFileSync(file, 'utf8')).toBe('original\n');
+  });
+
   test('a failing editor leaves the file alone', async () => {
     const file = join(tmp, 'MSG2');
     writeFileSync(file, 'original\n');

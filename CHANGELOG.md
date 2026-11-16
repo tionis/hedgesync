@@ -9,6 +9,8 @@
   prompt on stdin, or any OpenAI-compatible API (`--api`, `--model`). The
   answer streams into a quote below the request, with the assistant's
   cursor; `--allow` limits who may ask.
+- `hedgesync edit --new --wait`: no local editor; everyone writes in the
+  browser, and the file is written once someone adds a `/done` line.
 - `hedgesync serve`: an HTTP endpoint for writing into notes from scripts
   and webhooks. Append, prepend or replace a note or one of its sections
   (`?section=Timeline`), optionally with the time in front; only the notes
