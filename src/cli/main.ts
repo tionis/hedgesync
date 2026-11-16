@@ -28,13 +28,17 @@ import { CliError, c, eprint, print, printJson, setColor } from './ui.js';
 import { VERSION } from '../version.js';
 
 const realtimeCommands: Command[] = [
-  edit, share, clip, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, bridge, mcp,
+  edit, share, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, bridge,
 ];
+/** Long-running helpers that take no note URL. */
+const toolCommands: Command[] = [clip, mcp];
 const httpCommands: Command[] = [
   list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout, sessions,
 ];
 const setupCommands: Command[] = [editor];
-const commands = new Map<string, Command>([...realtimeCommands, ...httpCommands, ...setupCommands]
+/** Every command, in overview order. */
+export const allCommands: Command[] = [...realtimeCommands, ...httpCommands, ...toolCommands, ...setupCommands];
+const commands = new Map<string, Command>(allCommands
   .flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])].map(name => [name, cmd] as const)));
 
 function overview(): string {
@@ -51,6 +55,9 @@ ${realtimeCommands.map(row).join('\n')}
 
 ${c('yellow', 'HTTP COMMANDS:')}
 ${httpCommands.map(row).join('\n')}
+
+${c('yellow', 'TOOLS:')} ${c('dim', '(no note URL)')}
+${toolCommands.map(row).join('\n')}
 
 ${c('yellow', 'SETUP COMMANDS:')}
 ${setupCommands.map(row).join('\n')}

@@ -46,13 +46,15 @@ ${c('yellow', 'USAGE:')}
 
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-r, --regex')}    Treat search pattern as regex
-  ${c('cyan', '-a, --all')}      Replace all occurrences (not just first)
+  ${c('cyan', '-a, --all')}      Replace all occurrences (not just first; also --global)
+  ${c('cyan', '--flags <f>')}    Regular expression flags, e.g. i (case-insensitive), m, s
   ${c('cyan', '--json')}         Output result in JSON format
   ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync replace https://md.example.com/abc123 "old" "new"
   hedgesync replace https://md.example.com/abc123 "\\\\d+" "NUM" --regex --all
+  hedgesync replace https://md.example.com/abc123 "todo" "TODO" --all --flags i
 `,
 
   macro: () => `
@@ -453,13 +455,14 @@ ${c('yellow', 'EXAMPLES:')}
 ${c('bold', 'hedgesync line')} - Get or set a specific line
 
 ${c('yellow', 'USAGE:')}
-  hedgesync line <url> <line-number> [new-content]
+  hedgesync line <url> <line-number> [<new-content> | -f <file>]
 
 ${c('yellow', 'ARGUMENTS:')}
   ${c('cyan', '<line-number>')}  Line number (0-indexed)
-  ${c('cyan', '[new-content]')}  If provided, sets the line content
+  ${c('cyan', '[new-content]')}  If provided (or --file), sets the line content
 
 ${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-f, --file')}     Set the line to a file's content (its final newline dropped)
   ${c('cyan', '--json')}         Output result in JSON format
   ${c('cyan', '-q, --quiet')}    Suppress success message
 
@@ -472,9 +475,10 @@ ${c('yellow', 'EXAMPLES:')}
 ${c('bold', 'hedgesync append')} - Append text to document
 
 ${c('yellow', 'USAGE:')}
-  hedgesync append <url> <text>
+  hedgesync append <url> [<text> | -f <file>]   (else stdin)
 
 ${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-f, --file')}     Read the text from a file (otherwise the argument, else stdin)
   ${c('cyan', '--json')}         Output result in JSON format
   ${c('cyan', '-q, --quiet')}    Suppress success message
 
@@ -487,27 +491,30 @@ ${c('yellow', 'EXAMPLES:')}
 ${c('bold', 'hedgesync prepend')} - Prepend text to document
 
 ${c('yellow', 'USAGE:')}
-  hedgesync prepend <url> <text>
+  hedgesync prepend <url> [<text> | -f <file>]  (else stdin)
 
 ${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-f, --file')}     Read the text from a file (otherwise the argument, else stdin)
   ${c('cyan', '--json')}         Output result in JSON format
   ${c('cyan', '-q, --quiet')}    Suppress success message
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync prepend https://md.example.com/abc123 "Content at start"
+  hedgesync prepend https://md.example.com/abc123 -f header.md
 `,
 
   insert: () => `
 ${c('bold', 'hedgesync insert')} - Insert text at position
 
 ${c('yellow', 'USAGE:')}
-  hedgesync insert <url> <position> <text>
+  hedgesync insert <url> <position> [<text> | -f <file>]  (else stdin)
 
 ${c('yellow', 'ARGUMENTS:')}
   ${c('cyan', '<position>')}     Character position (0-indexed)
-  ${c('cyan', '<text>')}         Text to insert
+  ${c('cyan', '<text>')}         Text to insert (or --file, or stdin)
 
 ${c('yellow', 'OPTIONS:')}
+  ${c('cyan', '-f, --file')}     Read the text from a file (otherwise the argument, else stdin)
   ${c('cyan', '--json')}         Output result in JSON format
   ${c('cyan', '-q, --quiet')}    Suppress success message
 

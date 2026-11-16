@@ -203,6 +203,8 @@ hedgesync revisions https://md.example.com/abc123 ~3 --restore      # bring it b
 hedgesync me https://md.example.com
 hedgesync history https://md.example.com --pinned
 hedgesync pin https://md.example.com/abc123
+hedgesync unpin https://md.example.com/abc123
+hedgesync history-delete https://md.example.com/abc123   # drop it from your history (the note stays)
 hedgesync export https://md.example.com -o notes.zip
 hedgesync status https://md.example.com
 
