@@ -396,9 +396,11 @@ describe('crater', () => {
     expect(lines).toHaveLength(9);
     const width = (l: string) => Array.from(l).filter(isRubble).length;
     expect(lines[4]).toContain(BLAST);
-    expect(width(lines[4])).toBe(18);
+    // 18 columns of rubble, one of them covered by the double-width 💥
+    expect(width(lines[4])).toBe(17);
     expect(width(lines[3])).toBeGreaterThan(0);
-    expect(width(lines[3])).toBeLessThan(width(lines[4]));
+    // On screen the bomb line is 2 columns wider than its rubble: 💥 is double width.
+    expect(width(lines[3])).toBeLessThan(width(lines[4]) + 2);
     expect(width(lines[3])).toBe(width(lines[5]));
     expect(width(lines[1])).toBe(width(lines[7]));
     expect(width(lines[1])).toBeLessThan(width(lines[2]));
@@ -411,7 +413,7 @@ describe('crater', () => {
     const line = blast(9).split('\n')[4];
     const i = Array.from(line).indexOf(BLAST);
     expect(Array.from(line)[i + 1]).toBe(RUBBLE[0]);
-    expect(Array.from(line)[i + 9]).toBe(RUBBLE[2]);
+    expect(Array.from(line)[i + 8]).toBe(RUBBLE[2]);
   });
 
   test('replaces the bomb and pads short lines', () => {

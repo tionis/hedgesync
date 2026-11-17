@@ -201,7 +201,7 @@ export const BLAST = '💥';
 export const RUBBLE = ['▓', '▒', '░'] as const;
 
 /**
- * The crater left by a bomb at [start, end): an ellipse of rubble around it,
+ * The crater left by a bomb at [start, end): 💥 in an ellipse of rubble,
  * `radius` characters wide each way and a third as many lines high. Line
  * breaks survive; lines too short to reach into the crater are padded with
  * spaces so it keeps its shape. Returns the range to replace and its new text.
@@ -241,6 +241,9 @@ export function crater(doc: string, start: number, end: number, radius: number):
       while (chars.length < col) chars.push(' ');
       chars[col] = rubble;
     }
+    // 💥 is two columns wide on screen: drop the rubble right after it, so
+    // the crater's right half lines up with the lines above and below.
+    if (r === row && (RUBBLE as readonly string[]).includes(chars[cx + 1])) chars.splice(cx + 1, 1);
     out.push(chars.join(''));
   }
   const from = offsets[first];
