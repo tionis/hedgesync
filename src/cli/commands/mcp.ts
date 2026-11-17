@@ -44,16 +44,23 @@ export const mcp: Command = {
     { name: 'read-only', type: 'flag' },
     { name: 'tools', type: 'value' },
     { name: 'note', type: 'multi' },
+    { name: 'http', type: 'value' },
+    { name: 'public-url', type: 'value' },
+    { name: 'token', type: 'value' },
+    { name: 'owner', type: 'multi' },
   ],
   help: () => `
 hedgesync mcp - Serve HedgeDoc notes to AI agents (Model Context Protocol)
 
 USAGE:
   hedgesync mcp [--server <url>] [--read-only] [--tools <groups>] [--note <url>...]
+  hedgesync mcp --http [<host>:]<port> [--token <t> | --owner <url>...] [...]
 
 Speaks MCP on stdin/stdout, for agents such as Claude Code:
 
   claude mcp add hedgesync -- hedgesync mcp --server https://md.example.com
+
+or over HTTP (--http), for agents elsewhere and hosted ones.
 
 Edits go through live sessions, like a person typing: they merge with
 concurrent edits, appear in everyone's editor at once, and the agent's cursor
@@ -77,6 +84,25 @@ OPTIONS:
   --note <url>         Only this note (repeatable): no other note can be read,
                        edited or listed, and no notes can be created
 
+HTTP (Streamable HTTP, at /mcp):
+  --http [<host>:]<port>   Listen here (host default 127.0.0.1)
+  --token <token>          Require this bearer token (or HEDGESYNC_MCP_TOKEN)
+  --owner <url>            Require OAuth sign-in by this person (repeatable):
+                           their website, checked with IndieAuth
+  --public-url <url>       Where clients reach the server, e.g. behind a
+                           reverse proxy: https://mcp.example.com (an origin)
+
+  Without --token or --owner the server only listens on loopback, and only
+  answers requests for localhost (no web page can reach it).
+
+  With --owner, agents sign in like apps do (OAuth 2.1: PKCE, client
+  metadata documents or dynamic registration, refresh tokens). The person
+  approves the agent and proves who they are with IndieAuth (their website
+  names their IndieAuth server). The scopes read, edit and create pick
+  the tool groups an agent gets. Tokens are stored (hashed) in
+  mcp-oauth.json next to your logins.
+
+Everyone who gets in works as this machine's HedgeDoc login.
 Logins are the CLI's (hedgesync login <server> --save, or HEDGEDOC_COOKIE).
 
 EXAMPLES:
@@ -84,6 +110,9 @@ EXAMPLES:
   claude mcp add planning -- hedgesync mcp --note https://md.example.com/plan
   # Read-only access to everything in your history
   claude mcp add hedgedoc -- hedgesync mcp -s https://md.example.com --read-only
+  # On a server, behind a reverse proxy, for you only
+  hedgesync mcp --http 8788 --public-url https://mcp.example.com --owner https://you.example.com
+  claude mcp add --transport http hedgedoc https://mcp.example.com/mcp
 `,
   async run(ctx) {
     const options = mcpToolOptions(ctx);
@@ -93,6 +122,14 @@ EXAMPLES:
     const { buildServer } = await import('../mcp/server.js');
     const { HedgeDocTools } = await import('../mcp/tools.js');
     const tools = new HedgeDocTools(ctx, options);
+    const http = ctx.str('http');
+    if (http !== undefined) {
+      await runHttp(ctx, tools, http, options.groups ?? []);
+      return;
+    }
+    for (const o of ['public-url', 'token', 'owner']) {
+      if (ctx.str(o) !== undefined || ctx.list(o).length) throw new CliError(`--${o} goes with --http`);
+    }
     // One connection on stdio; it ends when the agent closes stdin.
     await new Promise<void>((resolve) => {
       serveStdio((requestCtx) => {
@@ -108,3 +145,59 @@ EXAMPLES:
     await tools.closeAll();
   },
 };
+
+/** "8788", "0.0.0.0:8788" or "[::1]:8788" to host and port. */
+export function parseListen(spec: string): { host: string; port: number } {
+  const m = /^(?:\[([^\]]+)\]:|([^:]+):)?(\d+)$/.exec(spec.trim());
+  const port = m ? Number(m[3]) : NaN;
+  if (!m || port > 65535) throw new CliError(`Invalid --http "${spec}"`, 'Use --http <port> or --http <host>:<port>');
+  return { host: m[1] ?? m[2] ?? '127.0.0.1', port };
+}
+
+async function runHttp(ctx: Context, tools: import('../mcp/tools.js').HedgeDocTools, spec: string, groups: string[]): Promise<void> {
+  const { host, port } = parseListen(spec);
+  const { isLoopback, serveHttp } = await import('../mcp/http.js');
+  const token = ctx.str('token') ?? process.env.HEDGESYNC_MCP_TOKEN;
+  const owners = ctx.list('owner');
+  const publicUrl = ctx.str('public-url');
+  if (token && owners.length) throw new CliError('Use either --token or --owner, not both');
+  if (!token && !owners.length && !isLoopback(host)) {
+    throw new CliError(`Refusing to serve ${host} without authentication`, 'Add --owner <your website> (OAuth) or --token <secret>, or listen on 127.0.0.1');
+  }
+  if (owners.length && !publicUrl && !isLoopback(host)) {
+    throw new CliError('--owner needs --public-url', 'The URL clients reach this server at, e.g. https://mcp.example.com');
+  }
+  if (publicUrl) {
+    let url: URL;
+    try {
+      url = new URL(publicUrl);
+    } catch {
+      throw new CliError(`Invalid --public-url "${publicUrl}"`);
+    }
+    if (url.protocol !== 'https:' && !isLoopback(url.hostname)) throw new CliError('--public-url must use https (except on localhost)');
+  }
+  for (const owner of owners) {
+    try {
+      new URL(/^https?:\/\//i.test(owner) ? owner : `https://${owner}`);
+    } catch {
+      throw new CliError(`Invalid --owner "${owner}"`, 'Use your website, e.g. https://you.example.com');
+    }
+  }
+  const server = await serveHttp(tools, {
+    host, port, publicUrl, token, owners, groups,
+    log: (m) => ctx.warn(m),
+  });
+  ctx.info(`MCP server at ${server.url}${owners.length ? ` (OAuth, sign-in: ${owners.join(', ')})` : token ? ' (bearer token)' : ' (no authentication, this machine only)'}`);
+  ctx.info(`Tools: ${groups.join(', ')}${tools.allowedNotes ? `; notes: ${[...tools.allowedNotes].join(', ')}` : ''}. Ctrl+C stops.`);
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      resolve();
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  await server.close();
+  await tools.closeAll();
+}

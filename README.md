@@ -1206,6 +1206,25 @@ hedgesync mcp --tools read,edit                   # no creating notes
 hedgesync mcp --note https://md.example.com/plan  # only this note (repeatable)
 ```
 
+Over HTTP (Streamable HTTP, at `/mcp`), for agents on other machines and
+hosted ones:
+
+```sh
+hedgesync mcp --http 8788                          # this machine only, no sign-in
+hedgesync mcp --http 0.0.0.0:8788 --token "$SECRET" # a fixed bearer token
+hedgesync mcp --http 8788 --public-url https://mcp.example.com \
+  --owner https://you.example.com                  # OAuth 2.1, signing in with IndieAuth
+claude mcp add --transport http hedgedoc https://mcp.example.com/mcp
+```
+
+With `--owner`, hedgesync is its own OAuth 2.1 authorization server, as the
+MCP spec expects: agents register (Client ID Metadata Documents or dynamic
+registration), you approve them in the browser and prove who you are with
+[IndieAuth](https://indieauth.spec.indieweb.org/) (your website names your
+IndieAuth server), and the agent gets tokens whose scopes (`read`, `edit`,
+`create`) pick its tools. Everyone let in works as the machine's HedgeDoc
+login.
+
 The server speaks the current protocol revision (2026-07-28) and the 2025
 revisions, so newer and older clients both work.
 

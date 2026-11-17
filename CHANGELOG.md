@@ -19,6 +19,12 @@
   take requests written into a note.
 - MCP: `--read-only`, `--tools <groups>` (read, edit, create) and
   `--note <url>` (repeatable) limit what an agent can do.
+- `hedgesync mcp --http [<host>:]<port>` serves MCP over Streamable HTTP:
+  without authentication on loopback only (with host and origin checks), with
+  a fixed bearer token (`--token`), or with OAuth 2.1 (`--owner <website>`):
+  a built-in authorization server (PKCE, resource indicators, refresh token
+  rotation, Client ID Metadata Documents and dynamic registration) where
+  people sign in with IndieAuth, and token scopes select the tool groups.
 - MCP: tools have titles, annotations and structured results;
   `search_notes` reports progress and can be cancelled; errors say how to
   recover (e.g. the note's headings when a section is not found).

@@ -69,6 +69,8 @@ interface Open {
   /** Kept open while a client is subscribed to the note as a resource. */
   pinned: number;
   updateTimer?: ReturnType<typeof setTimeout>;
+  /** Not closed for being idle before this time (ms). */
+  keepUntil?: number;
 }
 
 const str = (v: unknown, name: string, required = true): string | undefined => {
@@ -210,9 +212,16 @@ export class HedgeDocTools {
     return { url, note };
   }
 
-  private touch(url: string, note: Open): void {
+  private touch(url: string, note: Open, ms = IDLE_MS): void {
     clearTimeout(note.timer);
-    if (note.pinned === 0) note.timer = setTimeout(() => this.close(url), IDLE_MS);
+    note.keepUntil = Math.max(note.keepUntil ?? 0, Date.now() + ms);
+    if (note.pinned === 0) note.timer = setTimeout(() => this.close(url), note.keepUntil - Date.now());
+  }
+
+  /** Keep an open note's session for at least this long. */
+  keepOpen(url: string, ms: number): void {
+    const note = this.open.get(url);
+    if (note) this.touch(url, note, ms);
   }
 
   private close(url: string): void {

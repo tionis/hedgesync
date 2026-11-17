@@ -11,11 +11,21 @@
 import { McpServer, ResourceTemplate, type McpRequestContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { VERSION } from '../../version.js';
-import { type HedgeDocTools, ToolError } from './tools.js';
+import { type HedgeDocTools, type Tool, ToolError } from './tools.js';
+
+/** How long a note read as a resource over HTTP stays open, so listeners hear about changes. */
+const HTTP_RESOURCE_KEEP_MS = 60 * 60_000;
+
+export interface BuildOptions {
+  /** Only tools of these groups (e.g. the scopes of an OAuth token). */
+  groups?: string[];
+  /** Served over HTTP: one instance per request, notifications published by the handler. */
+  http?: boolean;
+}
 
 /** The server's instructions to agents; key words first, since clients may cut them short. */
-export function instructions(tools: HedgeDocTools): string {
-  const names = new Set(tools.enabled().map(t => t.name));
+export function instructions(tools: HedgeDocTools, enabled: Tool[] = tools.enabled()): string {
+  const names = new Set(enabled.map(t => t.name));
   const lines = [
     'HedgeDoc notes (collaborative Markdown), read and edited live: your edits merge with what people are typing and appear in their editors at once, with your cursor where you worked.',
     'Notes are identified by their URL, e.g. https://md.example.com/abc123.',
@@ -24,7 +34,7 @@ export function instructions(tools: HedgeDocTools): string {
     lines.push('Read a note (read_note) before editing it. Prefer small edits: edit_note to replace exact text, edit_section to change or add to the section under a heading, append_to_note to add at the end; write_note replaces everything and is refused if the note changed since you read it.');
     lines.push('People may be typing in the same place: if old_text is not found, read the note again rather than retrying blindly.');
   } else {
-    lines.push('This server is read-only: notes can be read and searched, not changed.');
+    lines.push('Read-only: notes can be read and searched, not changed.');
   }
   lines.push('Long notes: read_note with section or lines, after looking at the outline it gives for notes too long to return at once.');
   if (names.has('wait_for_change')) {
@@ -35,15 +45,16 @@ export function instructions(tools: HedgeDocTools): string {
 }
 
 /** An MCP server instance over a tool pool (one per connection; the pool can be shared). */
-export function buildServer(tools: HedgeDocTools, ctx?: Partial<McpRequestContext>): McpServer {
+export function buildServer(tools: HedgeDocTools, ctx?: Partial<McpRequestContext>, options: BuildOptions = {}): McpServer {
+  const enabled = tools.enabled().filter(t => !options.groups || options.groups.includes(t.group));
   const server = new McpServer(
     { name: 'hedgesync', title: 'HedgeDoc (hedgesync)', version: VERSION, websiteUrl: 'https://github.com/tionis/hedgesync' },
     {
-      instructions: instructions(tools),
-      capabilities: { resources: { subscribe: true, listChanged: false } },
+      instructions: instructions(tools, enabled),
+      // A 2025 request over HTTP is stateless: nothing to subscribe on.
+      capabilities: { resources: { subscribe: !(options.http && ctx?.era !== 'modern'), listChanged: false } },
     },
   );
-  const enabled = tools.enabled();
 
   for (const tool of enabled) {
     server.registerTool(tool.name, {
@@ -102,7 +113,8 @@ export function buildServer(tools: HedgeDocTools, ctx?: Partial<McpRequestContex
     }, async (uri) => {
       try {
         const { url, title, text } = await tools.text(uri.href);
-        if (!legacy && !subscribed.has(url)) {
+        if (options.http) tools.keepOpen(url, HTTP_RESOURCE_KEEP_MS);
+        else if (!legacy && !subscribed.has(url)) {
           subscribed.add(url);
           await tools.pin(url);
         }
@@ -112,30 +124,33 @@ export function buildServer(tools: HedgeDocTools, ctx?: Partial<McpRequestContex
       }
     });
 
-    const stop = tools.onNoteChange((url) => {
-      if (legacy && !subscribed.has(url)) return;
-      void server.server.sendResourceUpdated({ uri: url }).catch(() => undefined);
-    });
-    server.server.setRequestHandler('resources/subscribe', async (req) => {
-      const { url } = tools.noteUrl(req.params.uri);
-      if (!subscribed.has(url)) {
-        await tools.pin(url);
-        subscribed.add(url);
-      }
-      return {};
-    });
-    server.server.setRequestHandler('resources/unsubscribe', async (req) => {
-      const { url } = tools.noteUrl(req.params.uri);
-      if (subscribed.delete(url)) tools.unpin(url);
-      return {};
-    });
-    const previous = server.server.onclose;
-    server.server.onclose = () => {
-      stop();
-      for (const url of subscribed) tools.unpin(url);
-      subscribed.clear();
-      previous?.();
-    };
+    // Over HTTP the handler publishes changes; requests have no connection to subscribe on.
+    if (!options.http) {
+      const stop = tools.onNoteChange((url) => {
+        if (legacy && !subscribed.has(url)) return;
+        void server.server.sendResourceUpdated({ uri: url }).catch(() => undefined);
+      });
+      server.server.setRequestHandler('resources/subscribe', async (req) => {
+        const { url } = tools.noteUrl(req.params.uri);
+        if (!subscribed.has(url)) {
+          await tools.pin(url);
+          subscribed.add(url);
+        }
+        return {};
+      });
+      server.server.setRequestHandler('resources/unsubscribe', async (req) => {
+        const { url } = tools.noteUrl(req.params.uri);
+        if (subscribed.delete(url)) tools.unpin(url);
+        return {};
+      });
+      const previous = server.server.onclose;
+      server.server.onclose = () => {
+        stop();
+        for (const url of subscribed) tools.unpin(url);
+        subscribed.clear();
+        previous?.();
+      };
+    }
   }
 
   if (enabled.some(t => t.name === 'wait_for_change') && enabled.some(t => t.name === 'edit_note')) {
