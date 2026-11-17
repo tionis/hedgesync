@@ -2,7 +2,7 @@
 
 A TypeScript library and CLI for live (OT) editing of HedgeDoc 1 notes. Bun
 for development and the standalone binary; the npm package also runs on
-Node 18+.
+Node 20+.
 
 ## Commands
 

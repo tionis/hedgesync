@@ -1,7 +1,7 @@
 {
   "name": "hedgesync",
   "displayName": "HedgeDoc (hedgesync)",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Read and edit HedgeDoc notes live, alongside the people typing in them: a skill for the hedgesync CLI and its MCP server.",
   "author": { "name": "tionis", "url": "https://github.com/tionis" },
   "homepage": "https://github.com/tionis/hedgesync",

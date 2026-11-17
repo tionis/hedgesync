@@ -85,7 +85,7 @@ hedgesync self-update          # --check only looks
 
 | Runtime | Library | CLI |
 |---------|---------|-----|
-| Node.js 18+ | ✅ | ✅ |
+| Node.js 20+ | ✅ | ✅ |
 | Bun | ✅ | ✅ |
 | Deno | ✅ (with import map) | ✅ |
 | Obsidian plugin | ✅ via `hedgesync/obsidian` | ❌ |
@@ -1616,7 +1616,7 @@ The HedgeDoc 1.x driver works like this:
 ## Compatibility
 
 - **HedgeDoc**: Version 1.10.4 or later (uses OT-based real-time sync with Socket.IO v4)
-- **Runtime**: Node.js 18+, Bun, Deno (with import map), and Obsidian plugins via `hedgesync/obsidian`
+- **Runtime**: Node.js 20+, Bun, Deno (with import map), and Obsidian plugins via `hedgesync/obsidian`
 - **Node-only modules**: Auth helper flows, macro engine, and pandoc transformer are not part of the Obsidian entrypoint
 - **Not supported**: HedgeDoc < 1.10.4 (Socket.IO v2) or HedgeDoc 2.x (a plain
   WebSocket with Y.js instead of Socket.IO with OT). `detectServer()` and

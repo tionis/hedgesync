@@ -1,6 +1,52 @@
 # Changelog
 
-## Unreleased
+## 2.7.0 (2026-11-17)
+
+hedgesync for AI agents: a new MCP server with HTTP and OAuth, an Agent
+Skill and a Claude Code plugin. The guide is [docs/agents.md](docs/agents.md).
+
+### Added
+
+- MCP tools:
+  - `edit_section` replaces, appends to or prepends to the section under a
+    Markdown heading, or adds the section.
+  - `read_note` reads one `section` or a range of `lines`, and cuts notes
+    over 40,000 characters with an outline of their headings.
+  - Tools have titles, annotations and structured results; `search_notes`
+    reports progress and can be cancelled; errors say how to recover
+    (e.g. the note's headings when a section is not found).
+- MCP resources and prompts: notes are resources (the note URL is the URI),
+  with change notifications for subscribers; the `work_in_note` prompt has
+  an agent take requests written into a note.
+- `hedgesync mcp --read-only`, `--tools <groups>` (read, edit, create) and
+  `--note <url>` (repeatable) limit what an agent can do.
+- `hedgesync mcp --http [<host>:]<port>` serves MCP over Streamable HTTP:
+  - without authentication on loopback only (with host and origin checks);
+  - with a fixed bearer token (`--token`);
+  - or with OAuth 2.1 (`--owner <website>`): a built-in authorization server
+    (PKCE, resource indicators, refresh token rotation) where people approve
+    agents and sign in with IndieAuth, and token scopes select the tool
+    groups. Clients identify themselves with Client ID Metadata Documents,
+    checked as the MCP spec asks (exact `client_id`, required fields, public
+    clients only, size limit, no fetches from private addresses, caching by
+    HTTP headers, a consent page showing where the client comes from), or
+    by dynamic registration.
+- An Agent Skill for HedgeDoc notes (`plugin/skills/hedgesync`, the open
+  SKILL.md format): when to use hedgesync, how to edit safely while people
+  type, and how to set up the MCP server. `hedgesync agent install`
+  installs the copy bundled with the binary for Claude Code
+  (`~/.claude/skills`) and agents that read `~/.agents/skills` (Codex and
+  others), or into a project with `--project`; `status` and `uninstall` as
+  for the Neovim plugin.
+- `hedgesync agent config <client>` prints how to register the MCP server
+  with Claude Code, Codex, Cursor, Gemini CLI or VS Code.
+- A Claude Code plugin and marketplace in the repository (`plugin/`):
+  `claude plugin marketplace add tionis/hedgesync`, then
+  `claude plugin install hedgesync@hedgesync` installs the skill and
+  registers the MCP server, asking for the HedgeDoc server and tool groups.
+- docs/agents.md (setting up agents: skill, MCP over stdio and HTTP, OAuth
+  with IndieAuth, per-client configs, security), AGENTS.md for contributors,
+  and llms.txt.
 
 ### Changed
 
@@ -8,47 +54,8 @@
   current protocol revision (2026-07-28: no handshake, `server/discover`,
   cache hints) as well as the 2025 revisions, so older and newer clients
   both work.
-
-### Added
-
-- MCP: `edit_section` changes or adds to the section under a Markdown
-  heading; `read_note` reads one `section` or a range of `lines`, and cuts
-  notes over 40,000 characters with an outline of their headings.
-- MCP: notes are resources (the note URL is the URI) with change
-  notifications for subscribers, and a `work_in_note` prompt has an agent
-  take requests written into a note.
-- MCP: `--read-only`, `--tools <groups>` (read, edit, create) and
-  `--note <url>` (repeatable) limit what an agent can do.
-- An Agent Skill for HedgeDoc notes (`plugin/skills/hedgesync`, the open SKILL.md
-  format): when to use hedgesync, how to edit safely while people type, and
-  how to set up the MCP server. `hedgesync agent install` installs the copy
-  bundled with the binary for Claude Code (`~/.claude/skills`) and agents
-  that read `~/.agents/skills` (Codex and others), or into a project with
-  `--project`; `status` and `uninstall` as for the Neovim plugin.
-- A Claude Code plugin and marketplace in the repository (`plugin/`):
-  `claude plugin marketplace add tionis/hedgesync`, then
-  `claude plugin install hedgesync@hedgesync` installs the skill and
-  registers the MCP server, asking for the HedgeDoc server and tool groups.
-- docs/agents.md: setting up agents (skill, MCP over stdio and HTTP, OAuth
-  with IndieAuth, per-client configs, security), AGENTS.md for contributors
-  and llms.txt.
-- `hedgesync agent config <client>` prints how to register the MCP server
-  with Claude Code, Codex, Cursor, Gemini CLI or VS Code.
-- `hedgesync mcp --http [<host>:]<port>` serves MCP over Streamable HTTP:
-  without authentication on loopback only (with host and origin checks), with
-  a fixed bearer token (`--token`), or with OAuth 2.1 (`--owner <website>`):
-  a built-in authorization server (PKCE, resource indicators, refresh token
-  rotation, Client ID Metadata Documents and dynamic registration) where
-  people sign in with IndieAuth, and token scopes select the tool groups.
-  Client ID Metadata Documents, the way current MCP clients identify
-  themselves, are checked as the MCP spec asks: exact `client_id`, required
-  `client_name` and `redirect_uris`, public clients only, a size limit, no
-  fetches from private addresses, caching by HTTP headers, and a consent page
-  that shows where the client comes from and warns about localhost-only
-  clients.
-- MCP: tools have titles, annotations and structured results;
-  `search_notes` reports progress and can be cancelled; errors say how to
-  recover (e.g. the note's headings when a section is not found).
+- The npm package needs Node.js 20 or newer (the MCP SDK does; Node 18 is
+  out of support).
 
 ## 2.6.0 (2026-11-17)
 
