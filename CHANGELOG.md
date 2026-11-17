@@ -12,7 +12,8 @@
   `--transpose`, `--sticky-caps`, `--echo`, `--homoglyphs`, `--haunt`
   (typing disappears again a few seconds later), `--ghost` (a cursor types
   remarks next to the victim and erases them), `--bombs` (defuse the
-  ticking bomb by deleting it, or it leaves a crater), `--deny <user>`
+  ticking bomb by deleting it, or it blasts a round crater across the
+  surrounding lines), `--deny <user>`
   (reverts everything they type) and `--rule <text>` (an AI agent rewrites
   paragraphs to follow rules, using the same agents as `assistant`).
 - `hedgesync prank --only <user>`, `--except <user>` and `--spare-me` pick

@@ -1051,7 +1051,7 @@ in real time, until Ctrl+C. Combine any of:
 | `--homoglyphs <%>` | letters become identical-looking Cyrillic ones; search and spell checking break |
 | `--haunt <%>` | a burst of typing quietly disappears 3-10 s after it ends |
 | `--ghost <seconds>` | about this often, your cursor appears below the victim, types a remark (`--ghost-message`) and erases it |
-| `--bombs <%>` | a ticking `💣15` appears near the victim; deleting it defuses it, otherwise it explodes into a crater of `░` (`--fuse`, `--blast`) |
+| `--bombs <%>` | a ticking `💣15` appears near the victim; deleting it defuses it, otherwise it blasts a round crater of `▓▒░` rubble across the surrounding lines (`--fuse`, `--blast`) |
 | `--deny <user>` | everything that user types is reverted at once |
 | `--rule <text>` | an AI agent rewrites what victims write to follow the rule |
 

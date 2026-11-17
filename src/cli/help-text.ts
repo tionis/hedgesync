@@ -319,10 +319,12 @@ ${c('yellow', 'PRANKS OVER TIME:')}
                         "are you sure about this?", "👀", ...)
   ${c('cyan', '--bombs')} <%>           Per edit: a bomb with a countdown (💣15) appears within
                         two lines of the victim. Deleting any part of it defuses
-                        it; otherwise it explodes into 💥 and turns the text around
-                        it into ░ rubble (line breaks survive). At most 3 at once.
+                        it; otherwise it explodes into 💥 and blasts a round crater
+                        of ▓▒░ rubble into the text, across the lines above and
+                        below too (line breaks survive). At most 3 at once.
   ${c('cyan', '--fuse')} <seconds>      Bomb countdown (default 15, at most 99)
-  ${c('cyan', '--blast')} <chars>       Characters destroyed on each side (default 25)
+  ${c('cyan', '--blast')} <chars>       Crater radius in characters (default 10); it reaches
+                        a third as many lines up and down
 
 ${c('yellow', 'CONTROL:')}
   ${c('cyan', '--deny')} <user>         Revert everything this user types, instantly

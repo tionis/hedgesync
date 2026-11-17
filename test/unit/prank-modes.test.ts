@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { HedgeDocClient } from '../../src/hedgedoc-client.js';
 import type { Agent } from '../../src/note-assistant.js';
 import {
-  BLAST, BOMB, HOMOGLYPHS, PrankEngine, RUBBLE, bombs, cleanAnswer, deny, echo, fatFingers, ghostTypist,
+  BLAST, BOMB, HOMOGLYPHS, crater, PrankEngine, RUBBLE, bombs, cleanAnswer, deny, echo, fatFingers, ghostTypist,
   hauntedUndo, homoglyphs, keyNeighbours, paragraphAt, rulesKeeper, stickyCaps, stutter, transposer, userMatcher,
   type PrankEngineOptions,
 } from '../../src/prank/index.js';
@@ -355,9 +355,12 @@ describe('bombs', () => {
     await waitFor(d => d.includes(`${BOMB}01`), 2500);
     await waitFor(d => d.includes(BLAST), 2500);
     const after = clients[0].getDocument();
-    expect(after).toContain(RUBBLE.repeat(3) + BLAST);
+    const lines = after.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(BLAST);
     expect(after).not.toContain(BOMB);
-    expect(after.split('\n')).toHaveLength(2);
+    // The blast reaches the next line too.
+    expect(RUBBLE.some(r => lines[1].includes(r))).toBe(true);
     expect(messages).toEqual(['bombs: planted, 2s fuse', 'bombs: exploded']);
   });
 
@@ -376,6 +379,56 @@ describe('bombs', () => {
     await sync();
     expect(server.document).not.toContain(BLAST);
     expect(server.document).not.toContain(BOMB);
+  });
+});
+
+describe('crater', () => {
+  const isRubble = (ch: string) => (RUBBLE as readonly string[]).includes(ch);
+  const doc = Array.from({ length: 9 }, (_, i) => `line ${i} `.padEnd(40, 'x')).join('\n');
+  const bombAt = doc.indexOf('line 4') + 20;
+  const blast = (radius: number, source = doc, at = bombAt, len = 0) => {
+    const c = crater(source, at, at + len, radius);
+    return source.slice(0, c.from) + c.text + source.slice(c.to);
+  };
+
+  test('is round: wide on the bomb line, narrower above and below, and spares far lines', () => {
+    const lines = blast(9).split('\n');
+    expect(lines).toHaveLength(9);
+    const width = (l: string) => Array.from(l).filter(isRubble).length;
+    expect(lines[4]).toContain(BLAST);
+    expect(width(lines[4])).toBe(18);
+    expect(width(lines[3])).toBeGreaterThan(0);
+    expect(width(lines[3])).toBeLessThan(width(lines[4]));
+    expect(width(lines[3])).toBe(width(lines[5]));
+    expect(width(lines[1])).toBe(width(lines[7]));
+    expect(width(lines[1])).toBeLessThan(width(lines[2]));
+    // radius 9 reaches 3 lines up and down
+    expect(lines[0]).toBe(doc.split('\n')[0]);
+    expect(lines[8]).toBe(doc.split('\n')[8]);
+  });
+
+  test('is darker in the middle', () => {
+    const line = blast(9).split('\n')[4];
+    const i = Array.from(line).indexOf(BLAST);
+    expect(Array.from(line)[i + 1]).toBe(RUBBLE[0]);
+    expect(Array.from(line)[i + 9]).toBe(RUBBLE[2]);
+  });
+
+  test('replaces the bomb and pads short lines', () => {
+    const source = `ab ${BOMB}01 cd\n\nx`;
+    const at = source.indexOf(BOMB);
+    const out = blast(3, source, at, `${BOMB}01`.length).split('\n');
+    expect(out[0]).not.toContain(BOMB);
+    expect(out[0]).toContain(BLAST);
+    expect(out[1].length).toBeGreaterThan(0);
+    expect(Array.from(out[1].trimStart()).every(isRubble)).toBe(true);
+  });
+
+  test('keeps surrogate pairs whole', () => {
+    const source = '😀😀😀😀\n😀😀😀😀';
+    const out = blast(2, source, source.indexOf('\n') + 4);
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(out).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
   });
 });
 

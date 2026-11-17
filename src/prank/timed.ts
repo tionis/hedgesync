@@ -183,7 +183,11 @@ export interface BombOptions {
   probability: number;
   /** Seconds to defuse it (default 15, at most 99). */
   fuseSeconds?: number;
-  /** Characters on each side destroyed by the blast (default 25). */
+  /**
+   * Crater radius in characters, left and right of the bomb (default 10).
+   * It reaches a third as many lines up and down (at least one), since a
+   * line is taller than a character is wide.
+   */
   radius?: number;
   /** Lines above and below the victim's that may get a bomb (default 2). */
   spreadLines?: number;
@@ -193,7 +197,56 @@ export interface BombOptions {
 
 export const BOMB = '💣';
 export const BLAST = '💥';
-export const RUBBLE = '░';
+/** Rubble from the crater's centre outwards. */
+export const RUBBLE = ['▓', '▒', '░'] as const;
+
+/**
+ * The crater left by a bomb at [start, end): an ellipse of rubble around it,
+ * `radius` characters wide each way and a third as many lines high. Line
+ * breaks survive; lines too short to reach into the crater are padded with
+ * spaces so it keeps its shape. Returns the range to replace and its new text.
+ */
+export function crater(doc: string, start: number, end: number, radius: number): { from: number; to: number; text: string } {
+  const rx = Math.max(1, radius);
+  const ry = Math.max(1, Math.round(rx / 3));
+  const lines = doc.split('\n');
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  // The bomb's line, and its column there (in characters, not UTF-16 units).
+  let row = lines.length - 1;
+  while (row > 0 && offsets[row] > start) row--;
+  const cx = Array.from(doc.slice(offsets[row], start)).length;
+  const first = Math.max(0, row - ry);
+  const last = Math.min(lines.length - 1, row + ry);
+
+  const out: string[] = [];
+  for (let r = first; r <= last; r++) {
+    const text = r === row
+      ? doc.slice(offsets[r], start) + BLAST + doc.slice(end, offsets[r] + lines[r].length)
+      : lines[r];
+    const chars = Array.from(text);
+    const dy = (r - row) / (ry + 0.5);
+    const half = rx * Math.sqrt(Math.max(0, 1 - dy * dy));
+    const left = Math.max(0, Math.ceil(cx - half));
+    const right = Math.floor(cx + half);
+    for (let col = left; col <= right; col++) {
+      if (r === row && col === cx) continue; // the 💥 itself
+      const dx = (col - cx) / (rx + 0.5);
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const rubble = RUBBLE[d < 0.4 ? 0 : d < 0.7 ? 1 : 2];
+      while (chars.length < col) chars.push(' ');
+      chars[col] = rubble;
+    }
+    out.push(chars.join(''));
+  }
+  const from = offsets[first];
+  const to = offsets[last] + lines[last].length;
+  return { from, to, text: out.join('\n') };
+}
 
 const bombText = (seconds: number) => `${BOMB}${String(Math.max(0, seconds)).padStart(2, '0')}`;
 
@@ -202,7 +255,7 @@ const bombText = (seconds: number) => `${BOMB}${String(Math.max(0, seconds)).pad
  * (or any part of it) to defuse it; otherwise it explodes and leaves a crater.
  */
 export function bombs(options: BombOptions): Prank {
-  const { probability, radius = 25, spreadLines = 2, maxBombs = 3 } = options;
+  const { probability, radius = 10, spreadLines = 2, maxBombs = 3 } = options;
   const fuse = Math.min(99, Math.max(1, Math.round(options.fuseSeconds ?? 15)));
   let api: PrankApi;
   const live = new Set<Anchor>();
@@ -274,13 +327,8 @@ export function bombs(options: BombOptions): Prank {
   };
 
   const explode = (doc: string, start: number, end: number) => {
-    const from = Math.max(0, start - radius);
-    const to = Math.min(doc.length, end + radius);
-    // Everything in reach turns to rubble; line breaks survive, so the note keeps its shape.
-    const crater = Array.from(doc.slice(from, start)).map(ch => ch === '\n' ? ch : RUBBLE).join('')
-      + BLAST
-      + Array.from(doc.slice(end, to)).map(ch => ch === '\n' ? ch : RUBBLE).join('');
-    api.apply(new TextOperation().retain(from).delete(to - from).insert(crater).retain(doc.length - to));
+    const { from, to, text } = crater(doc, start, end, radius);
+    api.apply(new TextOperation().retain(from).delete(to - from).insert(text).retain(doc.length - to));
   };
 
   return {

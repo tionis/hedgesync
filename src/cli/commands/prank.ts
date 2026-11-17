@@ -38,7 +38,7 @@ const CHANCE_PRANKS: Record<string, (probability: number, ctx: Context) => Prank
   bombs: (probability, ctx) => bombs({
     probability,
     fuseSeconds: seconds(ctx.str('fuse'), 15, '--fuse'),
-    radius: ctx.int('blast', 25),
+    radius: ctx.int('blast', 10),
   }),
 };
 
