@@ -162,6 +162,10 @@ hedgesync macro https://md.example.com/abc123 --built-in --watch
 hedgesync macro https://md.example.com/abc123 --exec '/::calc (.+?)::/gi:echo {1} | bc -l' --watch
 hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 
+# Pranks (Ctrl+C to stop)
+hedgesync prank https://md.example.com/abc123 --stutter 15            # tthat's annoying
+hedgesync prank https://md.example.com/abc123 --stutter 30 --stutter-deletes -U '^Bob'
+
 # Mirror one note into another (Ctrl+C to stop)
 hedgesync mirror https://md.example.com/source https://md.example.com/target
 hedgesync mirror https://md.example.com/a https://md.example.com/b --bidirectional
@@ -1030,6 +1034,30 @@ hedgesync assistant https://md.example.com/abc --api https://openrouter.ai/api/v
 ```
 
 Everyone who can edit the note can use it; `--allow <user>` limits that.
+
+### Pranks
+
+`hedgesync prank` reacts to what people type in a note. `--stutter <percent>`
+gives each typed character that chance of appearing twice; with
+`--stutter-deletes` a backspace may also eat one character too many. Pastes
+are left alone. Everyone is fair game, your own browser included, unless
+you pick victims with `--allow-user <id>` or `-U <name-regex>`.
+
+From code, `PrankEngine` runs any `Prank`: a function from the pieces of a
+remote edit to edits of its own.
+
+```ts
+import { PrankEngine, stutter } from 'hedgesync';
+
+const pranks = new PrankEngine(client, { userFilter: /^Bob/ });
+pranks.add(stutter({ probability: 0.15, deletes: true }));
+pranks.add({
+  name: 'shout',
+  react: (pieces) => pieces.flatMap(p =>
+    p.type === 'insert' && p.text === '.' ? [{ type: 'insert' as const, index: p.index + 1, text: '!!' }] : []),
+});
+pranks.start();
+```
 
 ### Writing into notes over HTTP
 

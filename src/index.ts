@@ -130,6 +130,8 @@ export type {
 } from './browser-cookies.js';
 
 // Note mirroring
+export { PrankEngine, stutter, editPieces } from './prank.js';
+export type { Prank, PrankContext, PrankEdit, PrankEvent, EditPiece, PrankEngineOptions, StutterOptions, PrankClientLike } from './prank.js';
 export { NoteMirror, mergeText, createMirrorTransform } from './mirror.js';
 export type { MirrorClient, MirrorOptions, MirrorSyncEvent, MirrorDirection, MirrorTransformOptions } from './mirror.js';
 

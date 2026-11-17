@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hedgesync prank`: annoys people typing in a note. `--stutter <percent>`
+  doubles typed characters at random (`--stutter-deletes` doubles
+  backspaces too); `--allow-user` and `-U` pick the victims. The library
+  exports `PrankEngine` for writing your own.
+
 ## 2.5.0 (2026-11-16)
 
 ### Added

@@ -9,6 +9,7 @@ import { watch } from './commands/watch.js';
 import { info, users, authors } from './commands/info.js';
 import { transform } from './commands/transform.js';
 import { macro } from './commands/macro.js';
+import { prank } from './commands/prank.js';
 import { mirror } from './commands/mirror.js';
 import { exec } from './commands/exec.js';
 import { terminal } from './commands/terminal.js';
@@ -32,7 +33,7 @@ import { CliError, c, eprint, print, printJson, setColor } from './ui.js';
 import { VERSION } from '../version.js';
 
 const realtimeCommands: Command[] = [
-  edit, share, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, assistant, bridge,
+  edit, share, ...documentCommands, watch, info, users, authors, meta, permission, deleteNote, transform, macro, mirror, exec, terminal, assistant, prank, bridge,
 ];
 /** Long-running helpers that take no note URL. */
 const toolCommands: Command[] = [clip, serve, mcp];

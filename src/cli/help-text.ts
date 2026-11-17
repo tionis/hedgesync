@@ -287,6 +287,31 @@ ${c('yellow', 'SECURITY NOTE:')}
   can trigger macros, and only template commands that are safe for any input.
 `,
 
+  prank: () => `
+${c('bold', 'hedgesync prank')} - Annoy people typing in a note
+
+Watches a note and reacts to what people type in it. Everyone is fair game,
+your own browser included, unless you pick victims with --allow-user or -U.
+
+${c('yellow', 'USAGE:')}
+  hedgesync prank <url> [pranks] [options]
+
+${c('yellow', 'PRANKS:')}
+  ${c('cyan', '--stutter')} <percent>   Each typed character has this chance of appearing
+                        twice ("hello" -> "hhello"). Pastes are left alone.
+  ${c('cyan', '--stutter-deletes')}     With --stutter: each backspace has the same chance
+                        of eating one more character.
+
+${c('yellow', 'TARGETING:')}
+  ${c('cyan', '--allow-user')} <id>     Only prank this HedgeDoc account id (repeatable)
+  ${c('cyan', '-U, --user-filter')} <re> Only prank users whose display name matches
+                        (names can be faked; ids cannot)
+
+${c('yellow', 'EXAMPLES:')}
+  hedgesync prank https://md.example.com/abc123 --stutter 15
+  hedgesync prank https://md.example.com/abc123 --stutter 30 --stutter-deletes -U '^Bob'
+`,
+
   watch: () => `
 ${c('bold', 'hedgesync watch')} - Watch document for changes in real-time
 
