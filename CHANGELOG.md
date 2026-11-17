@@ -26,6 +26,16 @@
   Claude Code without tools or MCP servers, since anyone who can edit the
   note writes part of its prompt.
 
+### Fixed
+
+- Editing a note from inside a `change` handler (say, answering a remote
+  edit as it arrives) no longer desynchronizes the client. Such edits used
+  to be overwritten by the OT state change still in progress, which could
+  lose text. They are now applied at once and sent once the state has
+  settled, past any further remote operations in the same server message.
+  The `change` event for an edit made inside a handler is delivered after
+  the current one, so every listener sees changes in order.
+
 ## 2.5.0 (2026-11-16)
 
 ### Added

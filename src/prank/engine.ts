@@ -6,10 +6,9 @@
  * ever see remote edits (optionally only from chosen users), so the engine's
  * own output never feeds back into it.
  *
- * Editing inside the client's change event would corrupt its OT state, so
- * answers made there are applied in a microtask, rebased past anything that
- * arrived meanwhile. Positions and operations a prank keeps for later
- * (anchors, tracked operations) follow every edit to the note.
+ * Answers are applied right away, from inside the client's change event
+ * (HedgeDocClient supports that). Positions and operations a prank keeps
+ * for later (anchors, tracked operations) follow every edit to the note.
  */
 
 import { TextOperation } from '../text-operation.js';
@@ -224,9 +223,6 @@ export class PrankEngine {
   private readonly changeHandler = (event: ChangeEvent) => this.onChange(event);
   private readonly resetHandler = () => { this.shadow = this.client.getDocument(); };
   private running = false;
-  private pending: { op: TextOperation; events: PrankEvent[] } | null = null;
-  /** True while handling a change event: edits must wait for the microtask. */
-  private inEvent = false;
   /** The document as of the last change event, to recover deleted text. */
   private shadow = '';
   private readonly anchors = new Set<Anchor>();
@@ -282,7 +278,6 @@ export class PrankEngine {
     this.timers.clear();
     this.anchors.clear();
     this.tracked.clear();
-    this.pending = null;
     this.victim = null;
   }
 
@@ -311,16 +306,7 @@ export class PrankEngine {
     this.shadow = this.client.getDocument();
     for (const a of this.anchors) a.transform(operation);
     for (const t of this.tracked) t.op = TextOperation.transform(t.op, operation)[0];
-    // Anything that lands before the flush (ours or anyone's) moves the pending edits.
-    if (this.pending) this.pending.op = TextOperation.transform(this.pending.op, operation)[0];
-    if (event.type !== 'remote' || !this.running) return;
-
-    this.inEvent = true;
-    try {
-      this.react(event, operation, previous);
-    } finally {
-      this.inEvent = false;
-    }
+    if (event.type === 'remote' && this.running) this.react(event, operation, previous);
   }
 
   private react(event: ChangeEvent, operation: TextOperation, previous: string | undefined): void {
@@ -355,20 +341,8 @@ export class PrankEngine {
     if (fired.length > 0) this.submit(op, fired);
   }
 
-  /** Apply now, or (inside a change event) right after it. */
+  /** Apply an operation based on the current document. */
   private submit(op: TextOperation, events: PrankEvent[]): boolean {
-    if (this.inEvent || this.pending) {
-      if (this.pending) {
-        // Both are based on the current document; merge them.
-        const ownOp = TextOperation.transform(this.pending.op, op)[1];
-        this.pending.op = this.pending.op.compose(ownOp);
-        this.pending.events.push(...events);
-      } else {
-        this.pending = { op, events };
-        queueMicrotask(() => this.flush());
-      }
-      return true;
-    }
     try {
       if (!op.isNoop()) this.client.applyOperation(op);
     } catch {
@@ -376,13 +350,6 @@ export class PrankEngine {
     }
     for (const e of events) this.emit(e);
     return true;
-  }
-
-  private flush(): void {
-    const pending = this.pending;
-    this.pending = null;
-    if (!pending || !this.running) return;
-    this.submit(pending.op, pending.events);
   }
 
   private makeApi(): PrankApi {

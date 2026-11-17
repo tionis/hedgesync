@@ -90,7 +90,7 @@ class Synchronized implements OTState {
     checkNextRevision(client, revision);
     client.revision = revision;
     client.serverDocument = operation.apply(client.serverDocument);
-    client.applyOperation(operation);
+    client.applyRemote(operation);
     return this;
   }
 
@@ -130,7 +130,7 @@ class AwaitingConfirm implements OTState {
     client.revision = revision;
     client.serverDocument = operation.apply(client.serverDocument);
     const [outstanding, serverOp] = TextOperation.transform(this.outstanding, operation);
-    client.applyOperation(serverOp);
+    client.applyRemote(serverOp);
     return new AwaitingConfirm(outstanding);
   }
 
@@ -176,7 +176,7 @@ class AwaitingWithBuffer implements OTState {
     client.serverDocument = operation.apply(client.serverDocument);
     const [outstanding, op1] = TextOperation.transform(this.outstanding, operation);
     const [buffer, op2] = TextOperation.transform(this.buffer, op1);
-    client.applyOperation(op2);
+    client.applyRemote(op2);
     return new AwaitingWithBuffer(outstanding, buffer);
   }
 
@@ -245,7 +245,7 @@ class Stale implements OTState {
     for (const pending of this.pendingOps) {
       client.revision = pending.revision;
       client.serverDocument = pending.operation.apply(client.serverDocument);
-      client.applyOperation(pending.operation);
+      client.applyRemote(pending.operation);
     }
     return synchronized;
   }
@@ -273,9 +273,9 @@ class Stale implements OTState {
       if (buffer) {
         const [bufferPrime, opPrime2] = TextOperation.transform(buffer.op, opPrime);
         buffer.op = bufferPrime;
-        client.applyOperation(opPrime2);
+        client.applyRemote(opPrime2);
       } else {
-        client.applyOperation(opPrime);
+        client.applyRemote(opPrime);
       }
       client.revision++;
     }
@@ -324,7 +324,7 @@ class StaleWithBuffer extends Stale {
       buffer.op = bufferPrime;
       client.revision = pending.revision;
       client.serverDocument = pending.operation.apply(client.serverDocument);
-      client.applyOperation(opPrime);
+      client.applyRemote(opPrime);
     }
     client.sendOperation(client.revision, buffer.op);
     return new AwaitingConfirm(buffer.op);
@@ -358,7 +358,7 @@ function rebaseOntoDocument(
   const [pendingPrime, localChange] = TextOperation.transform(pending, serverChange);
   client.revision = revision;
   client.serverDocument = document;
-  client.applyOperation(localChange);
+  client.applyRemote(localChange);
   return pendingPrime;
 }
 
@@ -424,7 +424,7 @@ class CatchingUp implements OTState {
       for (const op of missed) {
         const [pendingPrime, opPrime] = TextOperation.transform(pending, op);
         pending = pendingPrime;
-        client.applyOperation(opPrime);
+        client.applyRemote(opPrime);
       }
       client.revision = this.targetRevision;
       client.serverDocument = this.targetDocument;
@@ -437,7 +437,7 @@ class CatchingUp implements OTState {
       pending = pendingPrime;
       client.revision = p.revision;
       client.serverDocument = p.operation.apply(client.serverDocument);
-      client.applyOperation(opPrime);
+      client.applyRemote(opPrime);
     }
     return sendPending(client, pending);
   }
@@ -482,6 +482,14 @@ export abstract class OTClient {
   /** Server document at `revision` (local document minus unconfirmed edits). */
   serverDocument: string;
   private state: OTState;
+  /** Depth of state transitions in progress (they can nest). */
+  private busy = 0;
+  /**
+   * Local edits made while a transition was in progress (from a callback
+   * such as a change handler), composed. They are already in the local
+   * document but not yet known to the state; based on the local document.
+   */
+  private deferred: TextOperation | null = null;
 
   constructor(revision: number, document: string) {
     this.revision = revision;
@@ -502,24 +510,61 @@ export abstract class OTClient {
     }
   }
 
+  /**
+   * Run a state transition. Callbacks during it (applyOperation and the
+   * change handlers behind it) may make local edits; those are held back
+   * and handed to the state once it is settled, since the state in effect
+   * mid-transition is about to be replaced.
+   */
+  private transition(step: () => void): void {
+    this.busy++;
+    try {
+      step();
+    } finally {
+      this.busy--;
+    }
+    if (this.busy === 0 && this.deferred) {
+      const op = this.deferred;
+      this.deferred = null;
+      if (!op.isNoop()) this.applyClient(op);
+    }
+  }
+
+  /**
+   * Deliver a remote operation (based on the local document as the state
+   * knows it) to the local document, past any deferred local edits.
+   */
+  applyRemote(operation: TextOperation): void {
+    if (this.deferred) {
+      const [deferred, remote] = TextOperation.transform(this.deferred, operation);
+      this.deferred = deferred;
+      operation = remote;
+    }
+    this.applyOperation(operation);
+  }
+
   /** Called when the local user makes an edit (already applied locally). */
   applyClient(operation: TextOperation): void {
-    this.setState(this.state.applyClient(this, operation));
+    if (this.busy > 0) {
+      this.deferred = this.deferred ? this.deferred.compose(operation) : operation;
+      return;
+    }
+    this.transition(() => this.setState(this.state.applyClient(this, operation)));
   }
 
   /** Called when receiving an operation from the server. */
   applyServer(revision: number, operation: TextOperation): void {
-    this.setState(this.state.applyServer(this, revision, operation));
+    this.transition(() => this.setState(this.state.applyServer(this, revision, operation)));
   }
 
   /** Called with the response to a get_operations request. */
   applyOperations(head: number, operations: OperationJSON[]): void {
-    this.setState(this.state.applyOperations(this, head, operations));
+    this.transition(() => this.setState(this.state.applyOperations(this, head, operations)));
   }
 
   /** Called when the server acknowledges our operation. */
   serverAck(revision: number): void {
-    this.setState(this.state.serverAck(this, revision));
+    this.transition(() => this.setState(this.state.serverAck(this, revision)));
   }
 
   /**
@@ -530,6 +575,12 @@ export abstract class OTClient {
    * how to bring the local document in line.
    */
   serverReconnect(revision: number, document: string, force: boolean): ReconnectOutcome {
+    let outcome!: ReconnectOutcome;
+    this.transition(() => { outcome = this.reconnect(revision, document, force); });
+    return outcome;
+  }
+
+  private reconnect(revision: number, document: string, force: boolean): ReconnectOutcome {
     const unconfirmed = this.state.unconfirmed(this);
     const pendingOp = unconfirmed?.pending ?? null;
 
@@ -537,6 +588,8 @@ export abstract class OTClient {
       this.revision = revision;
       this.serverDocument = document;
       this.setState(synchronized);
+      // Edits deferred so far were made to the document being replaced.
+      this.deferred = null;
       this.resetDocument(document);
     };
 

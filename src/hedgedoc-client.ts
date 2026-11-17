@@ -165,6 +165,8 @@ export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
 
   // Batch
   private _batch: { op: TextOperation } | null;
+  /** Change events waiting while another is being delivered (see _emitChange). */
+  private _changeQueue: ChangeEvent[] | null = null;
 
   // Undo/Redo (stacks of inverse operations, transformed against remote edits)
   private _undoStack: TextOperation[];
@@ -758,7 +760,26 @@ export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
     this._recordUndo(operation, oldDocument);
     this.driver.submit(operation);
     this.emit('document', this.document);
-    this.emit('change', { type: 'local', operation } satisfies ChangeEvent);
+    this._emitChange({ type: 'local', operation });
+  }
+
+  /**
+   * Emit a change event. A change made by a listener while one is being
+   * delivered (say, an edit answering a remote edit) is delivered after it,
+   * so every listener sees changes in the order they happened.
+   */
+  private _emitChange(event: ChangeEvent): void {
+    if (this._changeQueue) {
+      this._changeQueue.push(event);
+      return;
+    }
+    const queue: ChangeEvent[] = [event];
+    this._changeQueue = queue;
+    try {
+      for (let next = queue.shift(); next; next = queue.shift()) this.emit('change', next);
+    } finally {
+      this._changeQueue = null;
+    }
   }
 
   /** @internal DriverHost: first document of a session. */
@@ -773,7 +794,7 @@ export class HedgeDocClient extends SimpleEventEmitter implements DriverHost {
     this.document = operation.apply(this.document);
     this._transformUndoStacks(operation);
     this.emit('document', this.document);
-    this.emit('change', { type: 'remote', operation, clientId: origin.clientId, user: origin.user } satisfies ChangeEvent);
+    this._emitChange({ type: 'remote', operation, clientId: origin.clientId, user: origin.user });
   }
 
   /** @internal DriverHost: the server replaced the document; history is dropped. */

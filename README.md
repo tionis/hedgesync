@@ -646,6 +646,8 @@ client.on('error', (error) => { /* Error occurred */ });
 client.on('document', (content) => { /* Document content changed */ });
 client.on('change', ({ type, operation, clientId, user }) => { /* Local/remote change */ });
 client.on('synchronized', () => { /* All local edits acknowledged */ });
+// Handlers may edit right away, e.g. to answer a remote edit. Such an edit's
+// own 'change' event follows once every listener has seen the current one.
 client.on('resync', (outcome) => {
   // A fresh document arrived after a reconnect. outcome.kind is one of:
   // 'reset' (nothing pending), 'resent', 'acked', 'catchup' (missed ops verified
@@ -1136,10 +1138,7 @@ pranks.onPrank(e => console.log(e.prank, e.message ?? e.edits));
 pranks.start();
 ```
 
-Pranks answer inside the client's change event, but the engine applies
-their edits right after it: editing a `HedgeDocClient` synchronously from a
-remote `change` handler corrupts its OT state. Timers and anchors are
-cleaned up by `pranks.stop()`.
+Timers and anchors are cleaned up by `pranks.stop()`.
 
 ### Writing into notes over HTTP
 
