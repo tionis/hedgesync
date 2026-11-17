@@ -33,6 +33,10 @@ export interface AgentRequest {
   /** The assistant's name, as mentioned. */
   name: string;
   signal: AbortSignal;
+  /** Replace the assistant's system prompt (for other uses of an agent). */
+  system?: string;
+  /** Replace the user prompt built from note and request. */
+  prompt?: string;
 }
 
 /** Produces the answer as it is generated. */

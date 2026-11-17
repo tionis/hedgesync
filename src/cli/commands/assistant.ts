@@ -3,30 +3,19 @@
  * choice (see src/note-assistant.ts and src/agents.ts).
  */
 
-import { agentPreset, commandAgent, openAiAgent } from '../../agents.js';
-import { NoteAssistant, type Agent } from '../../note-assistant.js';
+import { NoteAssistant } from '../../note-assistant.js';
+import { agentFromOptions, agentOptions, seconds } from '../agent-options.js';
 import { assertEditable, connectionOptions, type Command } from '../context.js';
 import { CliError, c } from '../ui.js';
-
-function seconds(value: string | undefined, fallback: number, option: string): number {
-  if (value === undefined) return fallback;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) throw new CliError(`${option} must be a number of seconds, got '${value}'`);
-  return n;
-}
 
 export const assistant: Command = {
   name: 'assistant',
   summary: 'Answer @mentions in a note with an AI agent (any CLI or API)',
   options: [
     ...connectionOptions,
-    { name: 'agent', short: 'a', type: 'value' },
-    { name: 'api', type: 'value' },
-    { name: 'model', short: 'm', type: 'value' },
-    { name: 'api-key-env', type: 'value' },
+    ...agentOptions,
     { name: 'name', type: 'value' },
     { name: 'allow', type: 'multi' },
-    { name: 'timeout', type: 'value' },
     { name: 'settle', type: 'value' },
     { name: 'answer-existing', type: 'flag' },
   ],
@@ -87,25 +76,8 @@ ${c('yellow', 'EXAMPLES:')}
   async run(ctx) {
     const usage = 'hedgesync assistant <url> (--agent <preset | command> | --api <url> --model <m>)';
     const { url } = ctx.note(0, usage);
-    const agentSpec = ctx.str('agent');
-    const api = ctx.str('api');
-    if (!agentSpec === !api) throw new CliError('Which agent?', `Pass either --agent or --api. Usage: ${usage}`);
-    const timeoutMs = seconds(ctx.str('timeout'), 300, '--timeout') * 1000;
-    let agent: Agent;
-    let defaultName = 'ai';
-    let described: string;
-    if (api) {
-      const model = ctx.str('model');
-      if (!model) throw new CliError('--api needs --model');
-      const keyVar = ctx.str('api-key-env') ?? 'OPENAI_API_KEY';
-      agent = openAiAgent({ baseUrl: api, model, apiKey: process.env[keyVar], timeoutMs });
-      described = `${model} at ${api}${process.env[keyVar] ? '' : ` (no ${keyVar})`}`;
-    } else {
-      const preset = agentPreset(agentSpec!);
-      agent = commandAgent(preset?.command ?? agentSpec!, { timeoutMs });
-      if (preset) defaultName = preset.name;
-      described = preset?.command ?? agentSpec!;
-    }
+    const { agent, described, presetName } = agentFromOptions(ctx, usage, 300);
+    const defaultName = presetName ?? 'ai';
     const name = ctx.str('name') ?? defaultName;
     if (!/^[\w-]+$/.test(name)) throw new CliError(`Invalid name "${name}" (letters, digits, _ and - only)`);
     const allowed = ctx.list('allow').map(a => a.toLowerCase());

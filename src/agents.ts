@@ -44,7 +44,7 @@ export function commandAgent(command: string, options: { timeoutMs?: number } = 
     writeFileSync(noteFile, req.note);
     const proc = spawnShell({
       command,
-      stdin: `${systemPrompt(req.name)}\n\n${userPrompt(req)}\n`,
+      stdin: `${req.system ?? systemPrompt(req.name)}\n\n${req.prompt ?? userPrompt(req)}\n`,
       env: {
         HEDGESYNC_NOTE_URL: req.url,
         HEDGESYNC_NOTE_FILE: noteFile,
@@ -85,7 +85,10 @@ export function openAiAgent(options: { baseUrl: string; model: string; apiKey?: 
       body: JSON.stringify({
         model: options.model,
         stream: true,
-        messages: [{ role: 'system', content: systemPrompt(req.name) }, { role: 'user', content: userPrompt(req) }],
+        messages: [
+          { role: 'system', content: req.system ?? systemPrompt(req.name) },
+          { role: 'user', content: req.prompt ?? userPrompt(req) },
+        ],
       }),
     });
     if (!res.ok || !res.body) {
