@@ -24,14 +24,15 @@ afterAll(async () => {
 });
 
 /** A running `hedgesync mcp` and a way to call it. */
-function startMcp() {
-  const proc = Bun.spawn(['bun', CLI, 'mcp', '--server', server.url], {
+function startMcp(...args: string[]) {
+  const proc = Bun.spawn(['bun', CLI, 'mcp', '--server', server.url, ...args], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
     env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1', HEDGESYNC_COOKIE_FILE: join(tmp, 'cookies.json'), HEDGEDOC_COOKIE: 'connect.sid=good' },
   });
   const waiting = new Map<number, (msg: any) => void>();
+  const notifications: any[] = [];
   let buffer = '';
   (async () => {
     const decoder = new TextDecoder();
@@ -41,7 +42,8 @@ function startMcp() {
       while ((nl = buffer.indexOf('\n')) >= 0) {
         const msg = JSON.parse(buffer.slice(0, nl));
         buffer = buffer.slice(nl + 1);
-        waiting.get(msg.id)?.(msg);
+        if (msg.id === undefined) notifications.push(msg);
+        else waiting.get(msg.id)?.(msg);
       }
     }
   })();
@@ -54,9 +56,10 @@ function startMcp() {
   };
   const call = async (name: string, args: object) => {
     const res = await request('tools/call', { name, arguments: args });
-    return { text: res.result.content[0].text as string, isError: res.result.isError as boolean };
+    if (res.error) return { text: res.error.message as string, isError: true, structured: undefined };
+    return { text: res.result.content[0].text as string, isError: res.result.isError === true, structured: res.result.structuredContent };
   };
-  return { proc, request, call };
+  return { proc, request, call, notifications };
 }
 
 describe('hedgesync mcp', () => {
@@ -68,8 +71,11 @@ describe('hedgesync mcp', () => {
       proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
       const list = await request('tools/list');
       expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
-        'list_notes', 'search_notes', 'read_note', 'edit_note', 'append_to_note', 'write_note', 'create_note', 'wait_for_change',
+        'list_notes', 'search_notes', 'read_note', 'edit_note', 'edit_section', 'append_to_note', 'write_note', 'create_note', 'wait_for_change',
       ]);
+      const read = list.result.tools.find((t: { name: string }) => t.name === 'read_note');
+      expect(read).toMatchObject({ title: 'Read a note', annotations: { readOnlyHint: true }, outputSchema: { type: 'object' } });
+      expect((await request('prompts/list')).result.prompts.map((p: { name: string }) => p.name)).toEqual(['work_in_note']);
       expect((await request('nope')).error.code).toBe(-32601);
     } finally {
       proc.stdin.end();
@@ -93,7 +99,7 @@ describe('hedgesync mcp', () => {
       person.insert(person.getDocument().length, '- [ ] ship\n'); // typed meanwhile
       await person.flush();
       const edit = await call('edit_note', { url, old_text: '- [ ] write tests', new_text: '- [x] write tests' });
-      expect(edit).toEqual({ text: 'Replaced at line 3.', isError: false });
+      expect(edit).toMatchObject({ text: 'Replaced at line 3.', isError: false });
       expect(server.note(id).document).toBe('# Plan\n\n- [x] write tests\n- [ ] ship\n');
 
       expect((await call('edit_note', { url, old_text: 'missing', new_text: 'x' })).isError).toBe(true);
@@ -152,6 +158,124 @@ describe('hedgesync mcp', () => {
     } finally {
       proc.stdin.end();
       await proc.exited;
+    }
+  });
+
+  test('sections and line ranges', async () => {
+    const id = 'mcp-sections';
+    Object.assign(server.note(id), { document: '# Notes\n\n## Tasks\n\n- one\n\n## Log\n\nstarted\n', permission: 'freely' });
+    const { proc, call } = startMcp();
+    try {
+      const url = `${server.url}/${id}`;
+      const tasks = await call('read_note', { url, section: 'tasks' });
+      expect(tasks.text).toContain('Lines 3-6 of 10:');
+      expect(tasks.structured).toMatchObject({ from_line: 3, to_line: 6, text: '## Tasks\n\n- one\n', can_edit: true });
+      expect((await call('read_note', { url, lines: '9-' })).structured.text).toBe('started\n');
+      expect((await call('read_note', { url, section: 'Nope' })).text).toContain('## Tasks');
+      expect((await call('read_note', { url, lines: 'x' })).isError).toBe(true);
+
+      await call('edit_section', { url, heading: 'Tasks', text: '- two', mode: 'append' });
+      await call('edit_section', { url, heading: '## Log', text: 'done' });
+      expect((await call('edit_section', { url, heading: 'Ideas', text: '- fly' })).isError).toBe(true);
+      await call('edit_section', { url, heading: 'Ideas', text: '- fly', create: true });
+      expect(server.note(id).document).toBe('# Notes\n\n## Tasks\n\n- one\n- two\n\n## Log\n\ndone\n\n## Ideas\n\n- fly\n');
+    } finally {
+      proc.stdin.end();
+      await proc.exited;
+    }
+  });
+
+  test('--read-only, --tools and --note limit what an agent can do', async () => {
+    const id = 'mcp-limited';
+    Object.assign(server.note(id), { document: 'allowed\n', permission: 'freely' });
+    Object.assign(server.note('mcp-other'), { document: 'secret\n', permission: 'freely' });
+    const url = `${server.url}/${id}`;
+    const names = async (m: ReturnType<typeof startMcp>) => (await m.request('tools/list')).result.tools.map((t: { name: string }) => t.name);
+
+    const readOnly = startMcp('--read-only');
+    try {
+      expect(await names(readOnly)).toEqual(['list_notes', 'search_notes', 'read_note', 'wait_for_change']);
+      expect((await readOnly.request('prompts/list')).error.code).toBe(-32601); // no prompts without edit tools
+      expect((await readOnly.call('edit_note', { url, old_text: 'a', new_text: 'b' })).isError).toBe(true);
+    } finally {
+      readOnly.proc.stdin.end();
+      await readOnly.proc.exited;
+    }
+
+    const oneNote = startMcp('--note', url, '--tools', 'read,edit,create');
+    try {
+      expect(await names(oneNote)).not.toContain('create_note');
+      expect((await oneNote.call('read_note', { url })).text).toContain('allowed');
+      const other = await oneNote.call('read_note', { url: `${server.url}/mcp-other` });
+      expect(other).toMatchObject({ isError: true });
+      expect(other.text).toContain(`only gives access to: ${url}`);
+      await oneNote.call('append_to_note', { url, text: 'more' });
+      expect(server.note(id).document).toBe('allowed\nmore');
+    } finally {
+      oneNote.proc.stdin.end();
+      await oneNote.proc.exited;
+    }
+
+    const bad = Bun.spawnSync(['bun', CLI, 'mcp', '--tools', 'read,nuke'], { env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' } });
+    expect(bad.exitCode).not.toBe(0);
+    expect(bad.stderr.toString()).toContain('Unknown tool group: nuke');
+  });
+
+  test('notes are resources, with updates for subscribers', async () => {
+    const id = 'mcp-resource';
+    Object.assign(server.note(id), { document: 'v1\n', permission: 'freely' });
+    const person = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+    await person.connect();
+    const m = startMcp();
+    try {
+      const url = `${server.url}/${id}`;
+      await m.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+      m.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+      const templates = (await m.request('resources/templates/list')).result.resourceTemplates;
+      expect(templates[0]).toMatchObject({ name: 'note', uriTemplate: '{+url}' });
+      const read = await m.request('resources/read', { uri: url });
+      expect(read.result.contents[0]).toMatchObject({ uri: url, mimeType: 'text/markdown', text: 'v1\n' });
+
+      expect((await m.request('resources/subscribe', { uri: url })).result).toEqual({});
+      person.insert(person.getDocument().length, 'v2\n');
+      await person.flush();
+      for (let i = 0; i < 50 && !m.notifications.some(n => n.method === 'notifications/resources/updated'); i++) await Bun.sleep(50);
+      expect(m.notifications.find(n => n.method === 'notifications/resources/updated')?.params).toEqual({ uri: url });
+    } finally {
+      m.proc.stdin.end();
+      await m.proc.exited;
+      person.disconnect();
+    }
+  });
+
+  test('2026-07-28 clients hear about changes on subscriptions/listen', async () => {
+    const id = 'mcp-listen';
+    Object.assign(server.note(id), { document: 'v1\n', permission: 'freely' });
+    const person = new HedgeDocClient({ serverUrl: server.url, noteId: id });
+    await person.connect();
+    const m = startMcp();
+    const _meta = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {},
+      'io.modelcontextprotocol/clientInfo': { name: 'test', version: '0' },
+    };
+    try {
+      const url = `${server.url}/${id}`;
+      const discover = await m.request('server/discover', { _meta });
+      expect(discover.result.capabilities.resources).toMatchObject({ subscribe: true });
+      expect(discover.result.instructions).toStartWith('HedgeDoc notes');
+      expect((await m.request('resources/read', { uri: url, _meta })).result.contents[0].text).toBe('v1\n');
+      void m.request('subscriptions/listen', { _meta, notifications: { resourceSubscriptions: [url] } });
+      await Bun.sleep(300);
+      person.insert(person.getDocument().length, 'v2\n');
+      await person.flush();
+      const updated = () => m.notifications.find(n => n.method === 'notifications/resources/updated');
+      for (let i = 0; i < 50 && !updated(); i++) await Bun.sleep(50);
+      expect(updated()?.params).toMatchObject({ uri: url });
+    } finally {
+      m.proc.stdin.end();
+      await m.proc.exited;
+      person.disconnect();
     }
   });
 });

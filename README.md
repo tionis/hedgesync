@@ -1184,13 +1184,30 @@ server on stdio, so agents can work in notes next to people:
 claude mcp add hedgesync -- hedgesync mcp --server https://md.example.com
 ```
 
-Tools: `list_notes`, `search_notes`, `read_note`, `edit_note`,
-`append_to_note`, `write_note`, `create_note` and `wait_for_change`. Edits go
-through live sessions, like typing: they merge with what people write at the
-same moment, show up in their editors at once, and the agent's cursor marks
-where it worked. `wait_for_change` returns what people changed since the
-agent last looked (optionally once some text such as `@claude` appears), so
-an agent can take requests written into a note. Logins are the CLI's.
+| Group | Tools |
+|---|---|
+| `read` | `list_notes`, `search_notes`, `read_note` (whole, by `section` or by `lines`), `wait_for_change` |
+| `edit` | `edit_note` (replace exact text), `edit_section` (replace or add to the section under a heading), `append_to_note`, `write_note` |
+| `create` | `create_note` |
+
+Edits go through live sessions, like typing: they merge with what people write
+at the same moment, show up in their editors at once, and the agent's cursor
+marks where it worked. `wait_for_change` returns what people changed since the
+agent last looked (optionally once some text such as `@claude` appears), so an
+agent can take requests written into a note; the `work_in_note` prompt sets
+that up. Notes are also resources (the note URL is the resource URI), and
+subscribers are told when they change. Logins are the CLI's.
+
+Limit what an agent can do:
+
+```sh
+hedgesync mcp --read-only                         # read tools only
+hedgesync mcp --tools read,edit                   # no creating notes
+hedgesync mcp --note https://md.example.com/plan  # only this note (repeatable)
+```
+
+The server speaks the current protocol revision (2026-07-28) and the 2025
+revisions, so newer and older clients both work.
 
 ### CLI Macro Command
 

@@ -7,7 +7,21 @@
 - `hedgesync mcp` is built on the official MCP SDK (v2). It speaks the
   current protocol revision (2026-07-28: no handshake, `server/discover`,
   cache hints) as well as the 2025 revisions, so older and newer clients
-  both work. Tools have display titles.
+  both work.
+
+### Added
+
+- MCP: `edit_section` changes or adds to the section under a Markdown
+  heading; `read_note` reads one `section` or a range of `lines`, and cuts
+  notes over 40,000 characters with an outline of their headings.
+- MCP: notes are resources (the note URL is the URI) with change
+  notifications for subscribers, and a `work_in_note` prompt has an agent
+  take requests written into a note.
+- MCP: `--read-only`, `--tools <groups>` (read, edit, create) and
+  `--note <url>` (repeatable) limit what an agent can do.
+- MCP: tools have titles, annotations and structured results;
+  `search_notes` reports progress and can be cancelled; errors say how to
+  recover (e.g. the note's headings when a section is not found).
 
 ## 2.6.0 (2026-11-17)
 
