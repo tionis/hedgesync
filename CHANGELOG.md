@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `hedgesync mcp` is built on the official MCP SDK (v2). It speaks the
+  current protocol revision (2026-07-28: no handshake, `server/discover`,
+  cache hints) as well as the 2025 revisions, so older and newer clients
+  both work. Tools have display titles.
+
 ## 2.6.0 (2026-11-17)
 
 ### Added
