@@ -515,6 +515,43 @@ describe('serve', () => {
   });
 });
 
+describe('prank ghost with a persona', () => {
+  test('--ghost-persona needs an agent and no --ghost-message', async () => {
+    const url = newNote('').url;
+    let r = await cli(['prank', url, '--ghost', '5', '--ghost-persona', 'snarky']);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain('--agent');
+    r = await cli(['prank', url, '--ghost', '5', '--ghost-persona', 'snarky', '--ghost-message', 'hi', '--agent', 'cat']);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("--ghost-message and --ghost-persona don't go together");
+    r = await cli(['prank', url, '--ghost-persona', 'snarky', '--agent', 'cat']);
+    expect(r.stderr).toContain('--ghost-persona goes with --ghost');
+  });
+
+  test.skipIf(process.platform === 'win32')('the agent\'s remark is typed inline after its quote', async () => {
+    const note = newNote('# Plan\n\nShip on Friday.\n');
+    const agent = `sh -c 'cat > /dev/null; printf "%s" "{\\"quote\\": \\"Friday.\\", \\"say\\": \\"sure.\\", \\"inline\\": true}"'`;
+    const proc = Bun.spawn(['bun', CLI, 'prank', note.url, '--ghost', '1', '--ghost-persona', 'a snarky ghost',
+      '--ghost-linger', '--agent', agent, '--settle', '0.3'], {
+      stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', HOME: tmp, NO_COLOR: '1' },
+    });
+    try {
+      const person = new HedgeDocClient({ serverUrl: server.url, noteId: note.id });
+      await person.connect();
+      await Bun.sleep(1200);
+      person.insert(person.getDocument().length, '\nNext');
+      await person.flush();
+      for (let i = 0; i < 400 && !server.note(note.id).document.includes('Friday. sure.'); i++) await Bun.sleep(25);
+      expect(server.note(note.id).document).toBe('# Plan\n\nShip on Friday. sure.\n\nNext');
+      person.disconnect();
+    } finally {
+      proc.kill('SIGINT');
+      await proc.exited;
+    }
+    expect(await new Response(proc.stderr).text()).toContain('The ghost is a snarky ghost');
+  });
+});
+
 describe('assistant', () => {
   const waitFor = async (cond: () => boolean, tries = 400) => {
     for (let i = 0; i < tries && !cond(); i++) await Bun.sleep(25);

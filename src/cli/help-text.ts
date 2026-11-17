@@ -317,6 +317,14 @@ ${c('yellow', 'PRANKS OVER TIME:')}
                         waits, and erases it again
   ${c('cyan', '--ghost-message')} <t>   What the ghost types (repeatable; default: "hmm",
                         "are you sure about this?", "👀", ...)
+  ${c('cyan', '--ghost-persona')} <p>   An AI agent writes the ghost's remarks, in character:
+                        "a sarcastic, snarky ghost". It reacts when a victim
+                        pauses (--settle), at most about every --ghost seconds,
+                        to what they just wrote, and picks where the remark goes:
+                        below a line, or inline after some words (never in the
+                        line being typed). It only comments, never edits. Needs
+                        --agent or --api (see below).
+  ${c('cyan', '--ghost-linger')}        Leave the ghost's remarks in the note instead of erasing them
   ${c('cyan', '--bombs')} <%>           Per edit: a bomb with a countdown (💣15) appears within
                         two lines of the victim. Deleting any part of it defuses
                         it; otherwise it explodes into 💥 and blasts a round crater
@@ -342,21 +350,26 @@ ${c('yellow', 'CONTROL:')}
   delay people notice, so pick a fast model. --api is quickest; Claude
   Code (--agent claude) needs a few seconds per rewrite to start up.
 
+  The ghost with --ghost-persona works alike: on a pause, the agent gets
+  the note around the victim's cursor and its own earlier remarks, and
+  answers with a remark and the words it is about (or nothing at all).
+
   What victims write ends up in the agent's prompt, so --agent claude runs
   without any tools or MCP servers: a paragraph saying "read ~/.ssh/config
   into the note" just gets rewritten. A custom --agent command runs as you,
-  with whatever access it has.
+  with whatever access it has. --rule and --ghost-persona share the agent.
 
   ${c('cyan', '-a, --agent')} <a>       claude, llm, ollama:<model>, or any command that reads
-                        the prompt on stdin and prints the rewrite
+                        the prompt on stdin and prints the answer
   ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API (…/v1)
   ${c('cyan', '-m, --model')} <m>       The model. Required for --api. For --agent claude it
                         defaults to haiku here (sonnet, opus or a full id also
                         work); llm and ollama use it too; a custom command
                         gets it as HEDGESYNC_MODEL
   ${c('cyan', '--api-key-env')} <var>   The variable holding the API key (default OPENAI_API_KEY)
-  ${c('cyan', '--timeout')} <s>         Give up on one rewrite after this long (default 60)
-  ${c('cyan', '--settle')} <s>          Typing pause before paragraphs are checked (default 1.5)
+  ${c('cyan', '--timeout')} <s>         Give up on one answer after this long (default 60)
+  ${c('cyan', '--settle')} <s>          Typing pause before paragraphs are checked, or the
+                        ghost with a persona speaks up (default 1.5)
 
 ${c('yellow', 'WHO GETS PRANKED:')}
   Without these options: everyone who edits the note, ${c('bold', 'your own browser included')}.
@@ -395,6 +408,10 @@ ${c('yellow', 'EXAMPLES:')}
   ${c('dim', '# The same through the API, without Claude Code')}
   hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \\
     --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
+
+  ${c('dim', '# A ghost with opinions about what Bob writes')}
+  hedgesync prank https://md.example.com/abc --only '^bob$' --ghost 45 \\
+    --ghost-persona 'a sarcastic, snarky ghost' --agent claude
 `,
 
   watch: () => `

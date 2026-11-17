@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { HedgeDocClient } from '../../src/hedgedoc-client.js';
 import type { Agent } from '../../src/note-assistant.js';
 import {
-  BLAST, BOMB, HOMOGLYPHS, crater, PrankEngine, RUBBLE, bombs, cleanAnswer, deny, echo, fatFingers, ghostTypist,
+  BLAST, BOMB, HOMOGLYPHS, crater, PrankEngine, RUBBLE, bombs, cleanAnswer, deny, echo, fatFingers, findQuote, ghostAgent,
+  ghostTypist, parseGhostReply,
   hauntedUndo, homoglyphs, keyNeighbours, paragraphAt, rulesKeeper, stickyCaps, stutter, transposer, userMatcher,
   type PrankEngineOptions,
 } from '../../src/prank/index.js';
@@ -404,6 +405,70 @@ describe('ghost typist', () => {
     await new Promise(r => setTimeout(r, 50));
     await sync();
     expect(server.document).toBe('quiet');
+  });
+});
+
+describe('ghost agent', () => {
+  test('parseGhostReply reads JSON, fenced or with chatter, and skips', () => {
+    expect(parseGhostReply('{"quote": "x", "say": "nice", "inline": true}')).toEqual({ say: 'nice', quote: 'x', inline: true });
+    expect(parseGhostReply('```json\n{"say": "> **wow**"}\n```')).toEqual({ say: 'wow' });
+    expect(parseGhostReply('Sure! {"say": "hm", "inline": "yes"}')).toEqual({ say: 'hm' });
+    expect(parseGhostReply('{"skip": true}')).toBeNull();
+    expect(parseGhostReply('"just this"')).toEqual({ say: 'just this' });
+    expect(parseGhostReply('Here is my thinking.\nAnd more of it.')).toBeNull();
+    expect(parseGhostReply('{"say": "' + 'a'.repeat(50) + '"}', 10)).toEqual({ say: 'aaaaaaaaa…' });
+    expect(parseGhostReply('{broken')).toBeNull();
+  });
+
+  test('findQuote prefers the occurrence nearest the victim, then ignores case', () => {
+    const doc = 'the cat\nthe dog\nthe cat';
+    expect(findQuote(doc, 'the cat', 20)).toBe(23);
+    expect(findQuote(doc, 'the cat', 0)).toBe(7);
+    expect(findQuote(doc, 'THE DOG', 0)).toBe(15);
+    expect(findQuote(doc, 'bird', 0)).toBeUndefined();
+  });
+
+  test('the agent sees the note around the cursor and its history, and places the remark by quote', async () => {
+    const { human, engine, sync, waitFor } = await setup('Intro line.\n\nWe ship Friday.\n\n');
+    const requests: { system?: string; prompt?: string }[] = [];
+    const agent: Agent = async function* (req) {
+      requests.push({ system: req.system, prompt: req.prompt });
+      yield '{"quote": "ship Friday.", "say": "sure you do", ';
+      yield '"inline": true}';
+    };
+    engine.add(ghostTypist({
+      everySeconds: 60, settleMs: 20, keystrokeMs: [1, 1], pauseMs: [5, 5], linger: true,
+      speak: ghostAgent({ agent, persona: 'a snarky ghost', linger: true }),
+    })).start();
+    human.insert(30, 'Next');
+    await sync();
+    await waitFor(doc => doc === 'Intro line.\n\nWe ship Friday. sure you do\n\nNext');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].system).toContain('a snarky ghost');
+    expect(requests[0].system).toContain('leave it there');
+    expect(requests[0].prompt).toContain('We ship Friday.\n\nNext<|cursor|>');
+  });
+
+  test('a quote that is gone, or no quote, puts the remark at the victim', async () => {
+    const { human, engine, sync, waitFor } = await setup('a\nb');
+    const agent: Agent = async function* () { yield '{"quote": "nowhere", "say": "boo", "inline": true}'; };
+    engine.add(ghostTypist({
+      everySeconds: 60, settleMs: 20, keystrokeMs: [1, 1], pauseMs: [5, 5], linger: true,
+      speak: ghostAgent({ agent, persona: 'p' }),
+    })).start();
+    human.insert(1, '!');
+    await sync();
+    await waitFor(doc => doc === 'a!\nboo\nb');
+  });
+
+  test('agent errors keep the ghost quiet and are reported', async () => {
+    const { human, engine, sync, waitFor, server, messages } = await setup('x');
+    const agent: Agent = async function* () { throw new Error('rate limited'); };
+    engine.add(ghostTypist({ everySeconds: 60, settleMs: 20, speak: ghostAgent({ agent, persona: 'p' }) })).start();
+    human.insert(1, 'y');
+    await sync();
+    await waitFor(() => messages.some(m => m.includes('stays quiet: rate limited')));
+    expect(server.document).toBe('xy');
   });
 });
 

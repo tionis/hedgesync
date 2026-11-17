@@ -1054,6 +1054,7 @@ in real time, until Ctrl+C. Combine any of:
 | `--homoglyphs <%>` | letters become identical-looking Cyrillic ones; search and spell checking break |
 | `--haunt <%>` | a burst of typing quietly disappears 3-10 s after it ends |
 | `--ghost <seconds>` | about this often, your cursor appears below the victim, types a remark (`--ghost-message`) and erases it |
+| `--ghost-persona <text>` | an AI agent writes the ghost's remarks in character, reacting to what the victim just wrote (see below); `--ghost-linger` leaves remarks in |
 | `--bombs <%>` | a ticking `💣15` appears near the victim; deleting it defuses it, otherwise it blasts a round crater of `▓▒░` rubble across the surrounding lines (`--fuse`, `--blast`) |
 | `--deny <user>` | everything that user types is reverted at once |
 | `--rule <text>` | an AI agent rewrites what victims write to follow the rule |
@@ -1114,6 +1115,26 @@ What victims write ends up in the agent's prompt, so `--agent claude` runs
 without tools or MCP servers (`--tools "" --strict-mcp-config`): a paragraph
 asking it to paste your files into the note just gets rewritten. A custom
 `--agent` command runs as you, with whatever access it has.
+
+#### A ghost with a persona
+
+With `--ghost-persona`, the ghost's remarks come from the same agents as
+`--rule` (the two share one agent):
+
+```sh
+hedgesync prank https://md.example.com/abc --only '^bob$' --ghost 45 \
+  --ghost-persona 'a sarcastic, snarky ghost' --agent claude
+```
+
+When a victim pauses (`--settle`), at most about every `--ghost` seconds,
+the agent gets the note around their cursor (2000 characters before, 1000
+after) and its own earlier remarks. It answers with a remark and the words
+of the note it is about, or chooses to stay quiet. The ghost types the
+remark on a new line below those words, or inline right after them; never
+inside the line the victim is typing on, and if the words are gone by then,
+next to the victim. Then it erases the remark, unless `--ghost-linger` is
+given. The ghost only comments: it never changes what people wrote. If the
+agent fails, the ghost stays quiet and the error is logged.
 
 #### From code
 

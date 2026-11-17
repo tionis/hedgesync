@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hedgesync prank --ghost-persona <text>`: an AI agent (`--agent`/`--api`,
+  as for `--rule`) writes the ghost's remarks in character, reacting to what
+  the victim just wrote. It picks the words a remark is about, and the ghost
+  types it below that line or inline after them. `--ghost-linger` leaves
+  remarks in the note instead of erasing them.
+- Library: `ghostTypist` takes a `speak` function deciding what the ghost
+  says and where (`ghostAgent()` for an agent, `cannedGhost()` for fixed
+  messages), plus `settleMs` (haunt when a victim pauses) and `linger`.
+
 ## 2.7.0 (2026-11-17)
 
 hedgesync for AI agents: a new MCP server with HTTP and OAuth, an Agent

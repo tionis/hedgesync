@@ -3,10 +3,10 @@
  */
 
 import {
-  PrankEngine, bombs, deny, echo, fatFingers, ghostTypist, hauntedUndo, homoglyphs, keyboardLayouts,
+  PrankEngine, bombs, deny, echo, fatFingers, ghostAgent, ghostTypist, hauntedUndo, homoglyphs, keyboardLayouts,
   rulesKeeper, stickyCaps, stutter, transposer, userMatcher, type KeyboardLayout, type Prank, type PrankEvent,
 } from '../../prank/index.js';
-import { agentFromOptions, agentOptions, seconds } from '../agent-options.js';
+import { agentFromOptions, agentOptions, seconds, type AgentChoice } from '../agent-options.js';
 import { assertEditable, connectionOptions, type Command, type Context } from '../context.js';
 import { helpText } from '../help-text.js';
 import { CliError, c } from '../ui.js';
@@ -54,6 +54,8 @@ export const prank: Command = {
     { name: 'blast', type: 'value' },
     { name: 'ghost', type: 'value' },
     { name: 'ghost-message', type: 'multi' },
+    { name: 'ghost-persona', type: 'value' },
+    { name: 'ghost-linger', type: 'flag' },
     { name: 'deny', type: 'multi' },
     { name: 'rule', type: 'multi' },
     ...agentOptions,
@@ -82,37 +84,51 @@ export const prank: Command = {
     needs('fuse', 'bombs');
     needs('blast', 'bombs');
     needs('ghost-message', 'ghost');
+    needs('ghost-persona', 'ghost');
+    needs('ghost-linger', 'ghost');
+    const persona = ctx.str('ghost-persona');
+    if (persona !== undefined && ctx.list('ghost-message').length) {
+      throw new CliError('--ghost-message and --ghost-persona don\'t go together', 'With a persona, the agent writes the remarks.');
+    }
+    if (persona !== undefined && !persona.trim()) throw new CliError('--ghost-persona is empty');
+
+    const rules = ctx.list('rule');
+    let agentChoice: AgentChoice | undefined;
+    if (rules.length || persona !== undefined) {
+      agentChoice = agentFromOptions(ctx, usage, {
+        timeoutSeconds: 60,
+        // Rewrites and remarks must be quick; Haiku is plenty for them.
+        model: (spec) => spec === 'claude' ? 'haiku' : undefined,
+        // Victims' text goes into the prompt; with tools, they could make
+        // the agent read your files into the note.
+        noTools: true,
+      });
+    } else if (ctx.str('agent') !== undefined || ctx.str('api') !== undefined) {
+      throw new CliError('--agent and --api go with --rule or --ghost-persona');
+    }
+    const settleMs = seconds(ctx.str('settle'), 1.5, '--settle') * 1000;
 
     const ghost = ctx.str('ghost');
     if (ghost !== undefined) {
       const messages = ctx.list('ghost-message');
+      const linger = ctx.flag('ghost-linger');
       pranks.push(ghostTypist({
         everySeconds: seconds(ghost, 60, '--ghost'),
         messages: messages.length ? messages : undefined,
+        linger,
+        ...(persona !== undefined && agentChoice ? {
+          speak: ghostAgent({ agent: agentChoice.agent, persona, url: ctx.positional[0], linger }),
+          // React to what was just written.
+          settleMs,
+        } : {}),
       }));
     }
 
     const denied = ctx.list('deny');
     if (denied.length) pranks.push(deny({ targets: userMatcher(denied) }));
 
-    const rules = ctx.list('rule');
-    let agentDescription: string | undefined;
-    if (rules.length) {
-      const { agent, described } = agentFromOptions(ctx, usage, {
-        timeoutSeconds: 60,
-        // Rewrites must be quick; Haiku is plenty for them.
-        model: (spec) => spec === 'claude' ? 'haiku' : undefined,
-        // Victims' text goes into the prompt; with tools, they could make
-        // the agent read your files into the note.
-        noTools: true,
-      });
-      agentDescription = described;
-      pranks.push(rulesKeeper({
-        rules, agent, url: ctx.positional[0],
-        settleMs: seconds(ctx.str('settle'), 1.5, '--settle') * 1000,
-      }));
-    } else if (ctx.str('agent') !== undefined || ctx.str('api') !== undefined) {
-      throw new CliError('--agent and --api go with --rule');
+    if (rules.length && agentChoice) {
+      pranks.push(rulesKeeper({ rules, agent: agentChoice.agent, url: ctx.positional[0], settleMs }));
     }
 
     if (pranks.length === 0) throw new CliError('No prank chosen', `Try: ${usage}`);
@@ -179,7 +195,8 @@ export const prank: Command = {
       ctx.info(`${c('green', '✓ Denying')} edits by ${denied.join(', ')}`
         + `${except.length ? ` except ${except.join(', ')}` : ''} ${c('dim', '(Ctrl+C stops)')}`);
     }
-    if (agentDescription) ctx.info(c('dim', `  Rules enforced by ${agentDescription}: ${rules.join('; ')}`));
+    if (agentChoice && rules.length) ctx.info(c('dim', `  Rules enforced by ${agentChoice.described}: ${rules.join('; ')}`));
+    if (agentChoice && persona !== undefined) ctx.info(c('dim', `  The ghost is ${persona} (${agentChoice.described})`));
 
     // Who is here, so you can pick victims by name or account id next time.
     const online = client.getOnlineUsers().filter(u => u.id !== client.socket?.id);
