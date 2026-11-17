@@ -133,13 +133,13 @@ export type {
 export {
   PrankEngine, Anchor, editPieces, editsToOperation,
   stutter, fatFingers, transposer, stickyCaps, echo, homoglyphs, keyNeighbours, keyboardLayouts, HOMOGLYPHS,
-  hauntedUndo, ghostTypist, bombs, GHOST_MESSAGES,
+  hauntedUndo, ghostTypist, cannedGhost, bombs, GHOST_MESSAGES,
   deny, userMatcher, rulesKeeper, paragraphAt,
 } from './prank/index.js';
 export type {
   Prank, PrankApi, PrankContext, PrankEdit, PrankEvent, PrankUser, EditPiece, PrankEngineOptions, PrankClientLike,
   TrackedOperation, StutterOptions, ChanceOptions, FatFingersOptions, KeyboardLayout, StickyCapsOptions,
-  HauntedUndoOptions, GhostTypistOptions, BombOptions, DenyOptions, RulesOptions,
+  HauntedUndoOptions, GhostTypistOptions, GhostRemark, GhostSituation, GhostSpeaker, BombOptions, DenyOptions, RulesOptions,
 } from './prank/index.js';
 export { NoteMirror, mergeText, createMirrorTransform } from './mirror.js';
 export type { MirrorClient, MirrorOptions, MirrorSyncEvent, MirrorDirection, MirrorTransformOptions } from './mirror.js';

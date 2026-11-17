@@ -83,10 +83,59 @@ export const GHOST_MESSAGES = [
   'source?',
 ];
 
+/** What the ghost says, and where. */
+export interface GhostRemark {
+  say: string;
+  /**
+   * A document offset (in the document current when the speaker returns).
+   * Without `inline`, the remark goes on a new line below the line holding
+   * it; default: the victim's line.
+   */
+  at?: number;
+  /**
+   * Type the remark right at `at`, in the line, instead of on a line of its
+   * own. Never on the line the victim is on: there it goes below instead.
+   */
+  inline?: boolean;
+}
+
+export interface GhostSituation {
+  /** The note when the ghost decided to haunt. */
+  document: string;
+  /** Where the victim is in it. */
+  victimAt: number;
+  user?: PrankUser;
+  /** The ghost's earlier remarks, oldest first. */
+  history: string[];
+  /** Aborted when the prank stops. */
+  signal: AbortSignal;
+  /** The note and the victim's position now (they change while an async speaker thinks). */
+  current(): { document: string; victimAt?: number };
+}
+
+/** Decides what the ghost says and where; null stays quiet this time. */
+export type GhostSpeaker = (situation: GhostSituation) => GhostRemark | null | Promise<GhostRemark | null>;
+
+/** A speaker picking one of `messages` at random, on the victim's line. */
+export function cannedGhost(messages: string[] = GHOST_MESSAGES, random: () => number = Math.random): GhostSpeaker {
+  return () => ({ say: messages[Math.floor(random() * messages.length)] ?? '...' });
+}
+
 export interface GhostTypistOptions {
   /** Average seconds between appearances (default 60). */
   everySeconds?: number;
+  /** What the ghost types, picked at random (ignored with `speak`). */
   messages?: string[];
+  /** Decides what to say and where, e.g. ghostAgent(); default: one of `messages`. */
+  speak?: GhostSpeaker;
+  /**
+   * Haunt when a victim pauses typing this long (at most once per
+   * `everySeconds`, on average), so remarks follow what was just written.
+   * Default: on a timer, wherever the victim is.
+   */
+  settleMs?: number;
+  /** Leave the remark in the note instead of erasing it. */
+  linger?: boolean;
   /** Only haunt while a victim typed within this long (default 120 s). */
   activeWithinMs?: number;
   /** Milliseconds per keystroke (default 90 to 220). */
@@ -96,36 +145,106 @@ export interface GhostTypistOptions {
 }
 
 /**
- * Our cursor appears next to a victim, types a remark on a new line,
- * thinks better of it and deletes it again.
+ * Our cursor appears next to a victim, types a remark on a new line (or
+ * inline, if the speaker says so), thinks better of it and deletes it again.
  */
 export function ghostTypist(options: GhostTypistOptions = {}): Prank {
   const {
     everySeconds = 60, messages = GHOST_MESSAGES, activeWithinMs = 120_000, keystrokeMs = [90, 220],
-    pauseMs = [1500, 3500],
+    pauseMs = [1500, 3500], settleMs, linger = false,
   } = options;
   let api: PrankApi;
+  let speak: GhostSpeaker;
   let busy = false;
+  let abort = new AbortController();
+  let history: string[] = [];
+  /** Pause mode: no haunting before this (ms since epoch). */
+  let nextAllowed = 0;
+  let cancelPause: (() => void) | undefined;
+  let lastUser: PrankUser | undefined;
+
+  const cooldown = () => everySeconds * (0.5 + api.random()) * 1000;
 
   const schedule = () => {
     // Spread evenly around the average.
-    api.later(haunt, everySeconds * (0.5 + api.random()) * 1000);
+    api.later(() => {
+      schedule();
+      haunt();
+    }, cooldown());
   };
 
-  const haunt = () => {
-    schedule();
-    const at = api.victimPosition();
-    if (busy || at === undefined || Date.now() - api.lastVictimActivity() > activeWithinMs) return;
-    const doc = api.document();
-    const line = lineAt(doc, Math.min(at, doc.length));
-    // On a new line below theirs, so their cursor doesn't move; above it if theirs is the last.
-    const below = line.end < doc.length;
-    const pos = below ? line.end + 1 : line.start;
-    if (!api.apply(new TextOperation().retain(pos).insert('\n').retain(doc.length - pos))) return;
+  const onPause = () => {
+    cancelPause = undefined;
+    const wait = nextAllowed - Date.now();
+    if (wait > 0) {
+      cancelPause = api.later(onPause, wait);
+      return;
+    }
+    if (haunt()) nextAllowed = Date.now() + cooldown();
+  };
+
+  /** Starts haunting, unless busy or nobody is around. */
+  const haunt = (): boolean => {
+    const victimAt = api.victimPosition();
+    if (busy || victimAt === undefined || Date.now() - api.lastVictimActivity() > activeWithinMs) return false;
     busy = true;
-    // The ghost's text lives in [start, end) on its own line.
+    const document = api.document();
+    const signal = abort.signal;
+    Promise.resolve()
+      .then(() => speak({
+        document, victimAt: Math.min(victimAt, document.length), user: lastUser, history: [...history], signal,
+        current: () => ({ document: api.document(), victimAt: api.victimPosition() }),
+      }))
+      .then((remark) => {
+        // Runs right after the speaker returns, before any further edit arrives.
+        if (signal.aborted || !remark?.say) {
+          busy = false;
+          return;
+        }
+        history = [...history, remark.say].slice(-10);
+        perform(remark);
+      })
+      .catch((err) => {
+        busy = false;
+        if (!signal.aborted) api.report({ prank: 'ghost', message: `stays quiet: ${(err as Error).message}` });
+      });
+    return true;
+  };
+
+  const perform = (remark: GhostRemark) => {
+    const doc = api.document();
+    const victimAt = api.victimPosition();
+    const at = Math.min(remark.at ?? victimAt ?? doc.length, doc.length);
+    const line = lineAt(doc, at);
+    const victimLine = victimAt === undefined ? undefined : lineAt(doc, Math.min(victimAt, doc.length));
+    const onVictimLine = victimLine?.start === line.start;
+    let pos: number;
+    let text = remark.say.replace(/\s+/g, ' ').trim();
+    /** Where our line break went, relative to the ghost's text, if we added one. */
+    let newline: 'before' | 'after' | undefined;
+    if (remark.inline && !onVictimLine) {
+      pos = at;
+      if (pos > 0 && !/\s/.test(doc[pos - 1])) text = ' ' + text;
+    } else if (line.end < doc.length) {
+      // On a new line below, so the victim's cursor doesn't move.
+      pos = line.end + 1;
+      newline = 'after';
+    } else if (onVictimLine) {
+      // Theirs is the last line: above it.
+      pos = line.start;
+      newline = 'after';
+    } else {
+      pos = line.end;
+      newline = 'before';
+    }
+    if (newline && !api.apply(new TextOperation().retain(pos).insert('\n').retain(doc.length - pos))) {
+      busy = false;
+      return;
+    }
+    if (newline === 'before') pos++;
+    // The ghost's text lives in [start, end).
     const ghost = api.anchor(pos, pos);
-    const message = Array.from(messages[Math.floor(api.random() * messages.length)] ?? '...');
+    const message = Array.from(text);
     let typed = 0;
 
     const done = () => {
@@ -137,7 +256,11 @@ export function ghostTypist(options: GhostTypistOptions = {}): Prank {
 
     const type = () => {
       if (!ghost.alive) return done();
-      if (typed === message.length) return step(erase, between(api, pauseMs));
+      if (typed === message.length) {
+        if (!linger) return step(erase, between(api, pauseMs));
+        api.report({ prank: 'ghost', message: `typed "${remark.say}"` });
+        return step(done, between(api, pauseMs));
+      }
       const ch = message[typed++];
       const len = api.document().length;
       const { start, end } = ghost;
@@ -155,10 +278,10 @@ export function ghostTypist(options: GhostTypistOptions = {}): Prank {
         api.setCursor(ghost.end);
         return step(erase, between(api, keystrokeMs) / 2);
       }
-      // Finally the line break we added, which follows the ghost's text.
-      const nl = ghost.start;
-      if (doc[nl] === '\n') api.apply(new TextOperation().retain(nl).delete(1).retain(doc.length - nl - 1));
-      api.report({ prank: 'ghost', message: `typed and erased "${message.join('')}"` });
+      // Finally the line break we added.
+      const nl = newline === 'after' ? ghost.start : ghost.start - 1;
+      if (newline && doc[nl] === '\n') api.apply(new TextOperation().retain(nl).delete(1).retain(doc.length - nl - 1));
+      api.report({ prank: 'ghost', message: `typed and erased "${remark.say}"` });
       done();
     };
     api.report({ prank: 'ghost', message: 'appears' });
@@ -171,7 +294,23 @@ export function ghostTypist(options: GhostTypistOptions = {}): Prank {
     start(a) {
       api = a;
       busy = false;
-      schedule();
+      history = [];
+      nextAllowed = 0;
+      abort = new AbortController();
+      speak = options.speak ?? cannedGhost(messages, () => api.random());
+      if (settleMs === undefined) schedule();
+    },
+    stop() {
+      abort.abort();
+      cancelPause = undefined;
+    },
+    react(_pieces, ctx) {
+      lastUser = ctx.user;
+      if (settleMs !== undefined) {
+        cancelPause?.();
+        cancelPause = api.later(onPause, settleMs);
+      }
+      return [];
     },
   };
 }

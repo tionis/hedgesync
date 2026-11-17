@@ -335,6 +335,69 @@ describe('ghost typist', () => {
     await waitFor(doc => doc === 'one!\ntwo\nthree' && messages.some(m => m.includes('erased')));
   });
 
+  test('places a remark where the speaker says: below a line, or inline', async () => {
+    const { human, engine, sync, waitFor } = await setup('alpha beta\ngamma\ndelta');
+    const remarks = [
+      { say: 'hmm', at: 3 },
+      { say: 'really?', at: 10, inline: true },
+    ];
+    engine.add(ghostTypist({
+      everySeconds: 0.03, keystrokeMs: [2, 2], pauseMs: [20, 20], speak: () => remarks.shift() ?? null,
+    })).start();
+    human.insert(22, '!');
+    await sync();
+    await waitFor(doc => doc === 'alpha beta\nhmm\ngamma\ndelta!');
+    await waitFor(doc => doc === 'alpha beta\ngamma\ndelta!');
+    await waitFor(doc => doc === 'alpha beta really?\ngamma\ndelta!');
+    await waitFor(doc => doc === 'alpha beta\ngamma\ndelta!');
+  });
+
+  test('never types inline on the victim\'s line, and adds a last line after the end', async () => {
+    const { human, engine, sync, waitFor } = await setup('one\ntwo');
+    const remarks = [{ say: 'no', at: 1, inline: true }, { say: 'end', at: 6 }];
+    engine.add(ghostTypist({
+      everySeconds: 0.03, keystrokeMs: [2, 2], pauseMs: [20, 20], speak: () => remarks.shift() ?? null,
+    })).start();
+    human.insert(0, '>');
+    await sync();
+    await waitFor(doc => doc === '>one\nno\ntwo');
+    await waitFor(doc => doc === '>one\ntwo\nend');
+    await waitFor(doc => doc === '>one\ntwo');
+  });
+
+  test('lingering remarks stay', async () => {
+    const { human, engine, sync, waitFor, messages } = await setup('one\ntwo');
+    let said = false;
+    engine.add(ghostTypist({
+      everySeconds: 0.03, keystrokeMs: [2, 2], pauseMs: [5, 5], linger: true,
+      speak: () => said ? null : (said = true, { say: 'boo' }),
+    })).start();
+    human.insert(3, '!');
+    await sync();
+    await waitFor(doc => doc === 'one!\nboo\ntwo' && messages.includes('ghost: typed "boo"'));
+  });
+
+  test('in pause mode, reacts once the victim stops typing, with an async speaker', async () => {
+    const { human, engine, sync, waitFor } = await setup('one');
+    const seen: string[] = [];
+    engine.add(ghostTypist({
+      everySeconds: 60, settleMs: 30, keystrokeMs: [1, 1], pauseMs: [10, 10], linger: true,
+      speak: async (s) => {
+        seen.push(s.document);
+        await new Promise(r => setTimeout(r, 20));
+        return { say: 'eh', at: s.current().document.indexOf('one') };
+      },
+    })).start();
+    human.insert(3, ' two');
+    await sync();
+    human.insert(7, ' three');
+    await sync();
+    // Theirs is the last line, so the remark goes above it.
+    await waitFor(doc => doc === 'eh\none two three');
+    // Only once: the next remark waits for the cooldown.
+    expect(seen).toEqual(['one two three']);
+  });
+
   test('stays away while nobody is typing', async () => {
     const { server, engine, sync } = await setup('quiet');
     engine.add(ghostTypist({ everySeconds: 0.01, keystrokeMs: [1, 1], pauseMs: [1, 1] })).start();
