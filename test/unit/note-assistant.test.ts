@@ -33,4 +33,17 @@ test('agent presets', () => {
   expect(agentPreset('claude')).toEqual({ command: 'claude -p', name: 'claude' });
   expect(agentPreset('ollama:llama3.2')).toEqual({ command: 'ollama run llama3.2', name: 'ai' });
   expect(agentPreset('./my-agent.sh')).toBeUndefined();
+  expect(agentPreset('claude', 'haiku')).toEqual({ command: 'claude -p --model haiku', name: 'claude' });
+  expect(agentPreset('llm', 'gpt-4o-mini')).toEqual({ command: 'llm -m gpt-4o-mini', name: 'ai' });
+  expect(agentPreset('ollama', 'qwen3:8b')).toEqual({ command: 'ollama run qwen3:8b', name: 'ai' });
+  expect(agentPreset('ollama:llama3.2', 'qwen3:8b')?.command).toBe('ollama run qwen3:8b');
+  expect(() => agentPreset('claude', 'haiku; rm -rf ~')).toThrow();
+});
+
+test.skipIf(process.platform === 'win32')('a command agent sees the chosen model as HEDGESYNC_MODEL', async () => {
+  const { commandAgent } = await import('../../src/agents.js');
+  const agent = commandAgent('cat >/dev/null; printf %s "$HEDGESYNC_MODEL"', { model: 'tiny-1' });
+  let out = '';
+  for await (const chunk of agent({ note: '', url: '', request: '', name: 'ai', signal: new AbortController().signal })) out += chunk;
+  expect(out).toBe('tiny-1');
 });

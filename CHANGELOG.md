@@ -18,6 +18,10 @@
 - `hedgesync prank --only <user>`, `--except <user>` and `--spare-me` pick
   who is pranked, by account id or display-name regex; `--except` also
   protects from `--deny`. The online users and their ids are listed at start.
+- `--model` works with `--agent` too (`assistant` and `prank --rule`):
+  `--agent claude --model haiku` runs `claude -p --model haiku`, `llm` and
+  `ollama` get it as well, and a custom command sees `HEDGESYNC_MODEL`.
+  `prank --rule --agent claude` uses Haiku unless told otherwise.
 
 ## 2.5.0 (2026-11-16)
 

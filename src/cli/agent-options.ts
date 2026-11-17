@@ -32,8 +32,19 @@ export interface AgentChoice {
   presetName?: string;
 }
 
-/** The agent picked with --agent or --api, or an error saying which is missing. */
-export function agentFromOptions(ctx: Context, usage: string, defaultTimeoutSeconds: number): AgentChoice {
+export interface AgentDefaults {
+  timeoutSeconds: number;
+  /** A model to use with this --agent when --model is not given. */
+  model?: (agentSpec: string) => string | undefined;
+}
+
+/**
+ * The agent picked with --agent or --api, or an error saying which is
+ * missing. --model applies to both: the API's model, or the preset's
+ * (claude, llm, ollama); a custom command sees it as HEDGESYNC_MODEL.
+ */
+export function agentFromOptions(ctx: Context, usage: string, defaults: AgentDefaults): AgentChoice {
+  const defaultTimeoutSeconds = defaults.timeoutSeconds;
   const agentSpec = ctx.str('agent');
   const api = ctx.str('api');
   if (!agentSpec === !api) throw new CliError('Which agent?', `Pass either --agent or --api. Usage: ${usage}`);
@@ -47,10 +58,18 @@ export function agentFromOptions(ctx: Context, usage: string, defaultTimeoutSeco
       described: `${model} at ${api}${process.env[keyVar] ? '' : ` (no ${keyVar})`}`,
     };
   }
-  const preset = agentPreset(agentSpec!);
+  const model = ctx.str('model') ?? defaults.model?.(agentSpec!);
+  let preset: ReturnType<typeof agentPreset>;
+  try {
+    preset = agentPreset(agentSpec!, model);
+  } catch (err) {
+    throw new CliError((err as Error).message);
+  }
+  if (agentSpec === 'ollama' && !preset) throw new CliError('--agent ollama needs a model', 'Use --agent ollama:<model> or --model <model>');
   return {
-    agent: commandAgent(preset?.command ?? agentSpec!, { timeoutMs }),
-    described: preset?.command ?? agentSpec!,
+    // A custom command gets the model as HEDGESYNC_MODEL.
+    agent: commandAgent(preset?.command ?? agentSpec!, { timeoutMs, model }),
+    described: preset?.command ?? (model ? `${agentSpec} (HEDGESYNC_MODEL=${model})` : agentSpec!),
     presetName: preset?.name,
   };
 }

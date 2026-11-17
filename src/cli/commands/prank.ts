@@ -98,7 +98,11 @@ export const prank: Command = {
     const rules = ctx.list('rule');
     let agentDescription: string | undefined;
     if (rules.length) {
-      const { agent, described } = agentFromOptions(ctx, usage, 60);
+      const { agent, described } = agentFromOptions(ctx, usage, {
+        timeoutSeconds: 60,
+        // Rewrites must be quick; Haiku is plenty for them.
+        model: (spec) => spec === 'claude' ? 'haiku' : undefined,
+      });
       agentDescription = described;
       pranks.push(rulesKeeper({
         rules, agent, url: ctx.positional[0],

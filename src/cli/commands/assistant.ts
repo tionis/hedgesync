@@ -52,7 +52,9 @@ ${c('yellow', 'AGENTS:')}
 ${c('yellow', 'OPTIONS:')}
   ${c('cyan', '-a, --agent <a>')}        The agent (see above)
   ${c('cyan', '--api <url>')}            OpenAI-compatible base URL
-  ${c('cyan', '-m, --model <m>')}        The model, for --api
+  ${c('cyan', '-m, --model <m>')}        The model: required for --api; for --agent claude
+                         (haiku, sonnet, opus or a full model id), llm and
+                         ollama it picks theirs; a command gets HEDGESYNC_MODEL
   ${c('cyan', '--api-key-env <var>')}    Environment variable with the API key (default
                          OPENAI_API_KEY; none is sent if it is unset)
   ${c('cyan', '--name <name>')}          The name to mention (default: claude for --agent
@@ -69,6 +71,7 @@ An agent command such as Claude Code may use tools, as configured for it.
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync assistant https://md.example.com/abc --agent claude
+  hedgesync assistant https://md.example.com/abc --agent claude --model haiku
   hedgesync assistant https://md.example.com/abc --api https://openrouter.ai/api/v1 \\
     --model anthropic/claude-sonnet-4.5 --api-key-env OPENROUTER_API_KEY --name ai
   hedgesync assistant https://md.example.com/abc --agent ollama:llama3.2 --allow alice
@@ -76,7 +79,7 @@ ${c('yellow', 'EXAMPLES:')}
   async run(ctx) {
     const usage = 'hedgesync assistant <url> (--agent <preset | command> | --api <url> --model <m>)';
     const { url } = ctx.note(0, usage);
-    const { agent, described, presetName } = agentFromOptions(ctx, usage, 300);
+    const { agent, described, presetName } = agentFromOptions(ctx, usage, { timeoutSeconds: 300 });
     const defaultName = presetName ?? 'ai';
     const name = ctx.str('name') ?? defaultName;
     if (!/^[\w-]+$/.test(name)) throw new CliError(`Invalid name "${name}" (letters, digits, _ and - only)`);

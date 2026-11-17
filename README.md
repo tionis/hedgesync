@@ -1084,7 +1084,7 @@ hedgesync prank https://md.example.com/abc --stutter 5 --fat-fingers 3 --spare-m
 hedgesync prank https://md.example.com/abc --only '^bob$' --transpose 5 --echo 10 --bombs 3 --ghost 90
 hedgesync prank https://md.example.com/abc --deny mallory
 hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \
-  --except alice --spare-me --agent claude --model haiku
+  --except alice --spare-me --agent claude                        # Claude Code with Haiku
 ```
 
 #### Rules enforced by an AI agent
@@ -1092,7 +1092,10 @@ hedgesync prank https://md.example.com/abc --rule 'Everything is written in pira
 `--rule` takes the same agents as `hedgesync assistant`: `--agent claude`,
 `--agent llm`, `--agent ollama:<model>`, any command reading the prompt on
 stdin, or `--api <url> --model <model>` for an OpenAI-compatible API.
-`--model` also picks the model for `claude` and `llm`.
+`--model` picks the model for any of them: required for `--api`; for
+`--agent claude` (where prank defaults to `haiku`; `sonnet`, `opus` or a full
+model id work too), `llm` and `ollama` it is passed on; a custom command
+gets it as `HEDGESYNC_MODEL`.
 
 It is built to be fast and cheap: once a victim pauses (`--settle`, default
 1.5 s), each paragraph they touched goes to the agent on its own, with up to

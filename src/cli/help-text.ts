@@ -341,9 +341,12 @@ ${c('yellow', 'CONTROL:')}
 
   ${c('cyan', '-a, --agent')} <a>       claude, llm, ollama:<model>, or any command that reads
                         the prompt on stdin and prints the rewrite
-  ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API (…/v1), with
-  ${c('cyan', '-m, --model')} <m>       the model and
-  ${c('cyan', '--api-key-env')} <var>   the variable holding the key (default OPENAI_API_KEY)
+  ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API (…/v1)
+  ${c('cyan', '-m, --model')} <m>       The model. Required for --api. For --agent claude it
+                        defaults to haiku here (sonnet, opus or a full id also
+                        work); llm and ollama use it too; a custom command
+                        gets it as HEDGESYNC_MODEL
+  ${c('cyan', '--api-key-env')} <var>   The variable holding the API key (default OPENAI_API_KEY)
   ${c('cyan', '--timeout')} <s>         Give up on one rewrite after this long (default 60)
   ${c('cyan', '--settle')} <s>          Typing pause before paragraphs are checked (default 1.5)
 
@@ -379,7 +382,10 @@ ${c('yellow', 'EXAMPLES:')}
 
   ${c('dim', '# Pirate speak for everyone except Alice and you')}
   hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \\
-    --except alice --spare-me \\
+    --except alice --spare-me --agent claude
+
+  ${c('dim', '# The same through the API, without Claude Code')}
+  hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \\
     --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
 `,
 

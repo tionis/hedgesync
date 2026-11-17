@@ -22,12 +22,26 @@ export function userPrompt(req: AgentRequest): string {
   return `The note (${req.url}):\n\n<note>\n${req.note}\n</note>\n\nThe request${req.user ? `, from ${req.user}` : ''}:\n\n${req.request}`;
 }
 
-/** Commands for well-known agent CLIs, by name. `ollama:<model>` picks a model. */
-export function agentPreset(spec: string): { command: string; name: string } | undefined {
-  if (spec === 'claude') return { command: 'claude -p', name: 'claude' };
-  if (spec === 'llm') return { command: 'llm', name: 'ai' };
+/** Model names safe to put in a command line as they are. */
+const SAFE_MODEL = /^[\w.:/@-]+$/;
+
+/**
+ * Commands for well-known agent CLIs, by name. `model` picks the model:
+ * `claude -p --model <m>` (aliases such as haiku, sonnet, opus work),
+ * `llm -m <m>`, and for Ollama either `ollama:<model>` or `model`.
+ */
+export function agentPreset(spec: string, model?: string): { command: string; name: string } | undefined {
+  if (model !== undefined && !SAFE_MODEL.test(model)) {
+    throw new Error(`Unexpected characters in model name '${model}'`);
+  }
+  if (spec === 'claude') return { command: model ? `claude -p --model ${model}` : 'claude -p', name: 'claude' };
+  if (spec === 'llm') return { command: model ? `llm -m ${model}` : 'llm', name: 'ai' };
+  if (spec === 'ollama' && model) return { command: `ollama run ${model}`, name: 'ai' };
   const ollama = /^ollama:(.+)$/.exec(spec);
-  if (ollama) return { command: `ollama run ${ollama[1]}`, name: 'ai' };
+  if (ollama) {
+    if (!SAFE_MODEL.test(ollama[1])) throw new Error(`Unexpected characters in model name '${ollama[1]}'`);
+    return { command: `ollama run ${model ?? ollama[1]}`, name: 'ai' };
+  }
   return undefined;
 }
 
@@ -35,9 +49,10 @@ export function agentPreset(spec: string): { command: string; name: string } | u
  * A shell command as the agent. The prompt (instructions, the note, the
  * request) goes to stdin; stdout is the answer, streamed. The request is also
  * in the environment: HEDGESYNC_NOTE_URL, HEDGESYNC_NOTE_FILE (the note's
- * text), HEDGESYNC_REQUEST, HEDGESYNC_REQUEST_USER, HEDGESYNC_ASSISTANT_NAME.
+ * text), HEDGESYNC_REQUEST, HEDGESYNC_REQUEST_USER, HEDGESYNC_ASSISTANT_NAME,
+ * and HEDGESYNC_MODEL when a model was chosen.
  */
-export function commandAgent(command: string, options: { timeoutMs?: number } = {}): Agent {
+export function commandAgent(command: string, options: { timeoutMs?: number; model?: string } = {}): Agent {
   return async function* (req) {
     const dir = mkdtempSync(join(tmpdir(), 'hedgesync-agent-'));
     const noteFile = join(dir, 'note.md');
@@ -51,6 +66,7 @@ export function commandAgent(command: string, options: { timeoutMs?: number } = 
         HEDGESYNC_REQUEST: req.request,
         HEDGESYNC_REQUEST_USER: req.user ?? '',
         HEDGESYNC_ASSISTANT_NAME: req.name,
+        ...(options.model ? { HEDGESYNC_MODEL: options.model } : {}),
       },
     }, { timeoutMs: options.timeoutMs });
     const onAbort = () => killShell(proc);
