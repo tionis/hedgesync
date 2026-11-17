@@ -102,6 +102,9 @@ export const prank: Command = {
         timeoutSeconds: 60,
         // Rewrites must be quick; Haiku is plenty for them.
         model: (spec) => spec === 'claude' ? 'haiku' : undefined,
+        // Victims' text goes into the prompt; with tools, they could make
+        // the agent read your files into the note.
+        noTools: true,
       });
       agentDescription = described;
       pranks.push(rulesKeeper({

@@ -38,6 +38,8 @@ test('agent presets', () => {
   expect(agentPreset('ollama', 'qwen3:8b')).toEqual({ command: 'ollama run qwen3:8b', name: 'ai' });
   expect(agentPreset('ollama:llama3.2', 'qwen3:8b')?.command).toBe('ollama run qwen3:8b');
   expect(() => agentPreset('claude', 'haiku; rm -rf ~')).toThrow();
+  expect(agentPreset('claude', { model: 'haiku', noTools: true })?.command).toBe('claude -p --model haiku --tools "" --strict-mcp-config --no-session-persistence');
+  expect(agentPreset('llm', { noTools: true })?.command).toBe('llm');
 });
 
 test.skipIf(process.platform === 'win32')('a command agent sees the chosen model as HEDGESYNC_MODEL', async () => {

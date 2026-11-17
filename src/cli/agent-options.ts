@@ -36,6 +36,8 @@ export interface AgentDefaults {
   timeoutSeconds: number;
   /** A model to use with this --agent when --model is not given. */
   model?: (agentSpec: string) => string | undefined;
+  /** Run presets without tools (see PresetOptions.noTools). */
+  noTools?: boolean;
 }
 
 /**
@@ -61,7 +63,7 @@ export function agentFromOptions(ctx: Context, usage: string, defaults: AgentDef
   const model = ctx.str('model') ?? defaults.model?.(agentSpec!);
   let preset: ReturnType<typeof agentPreset>;
   try {
-    preset = agentPreset(agentSpec!, model);
+    preset = agentPreset(agentSpec!, { model, noTools: defaults.noTools });
   } catch (err) {
     throw new CliError((err as Error).message);
   }

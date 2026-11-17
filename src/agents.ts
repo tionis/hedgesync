@@ -25,16 +25,29 @@ export function userPrompt(req: AgentRequest): string {
 /** Model names safe to put in a command line as they are. */
 const SAFE_MODEL = /^[\w.:/@-]+$/;
 
-/**
- * Commands for well-known agent CLIs, by name. `model` picks the model:
- * `claude -p --model <m>` (aliases such as haiku, sonnet, opus work),
- * `llm -m <m>`, and for Ollama either `ollama:<model>` or `model`.
- */
-export function agentPreset(spec: string, model?: string): { command: string; name: string } | undefined {
+export interface PresetOptions {
+  /** The model: `claude -p --model <m>` (haiku, sonnet, opus, ...), `llm -m <m>`, `ollama run <m>`. */
+  model?: string;
+  /**
+   * Run without tools: Claude Code gets `--tools ""` (no built-in tools),
+   * `--strict-mcp-config` (no MCP servers) and `--no-session-persistence`
+   * (no saved session per request). For agents that only
+   * transform text they are given: with tools, text written by anyone who
+   * can edit the note could make the agent read files or run commands.
+   * llm and Ollama have no tools to begin with.
+   */
+  noTools?: boolean;
+}
+
+/** Commands for well-known agent CLIs, by name. `ollama:<model>` also picks a model. */
+export function agentPreset(spec: string, options: PresetOptions | string = {}): { command: string; name: string } | undefined {
+  const { model, noTools = false } = typeof options === 'string' ? { model: options } : options;
   if (model !== undefined && !SAFE_MODEL.test(model)) {
     throw new Error(`Unexpected characters in model name '${model}'`);
   }
-  if (spec === 'claude') return { command: model ? `claude -p --model ${model}` : 'claude -p', name: 'claude' };
+  if (spec === 'claude') {
+    return { command: `claude -p${model ? ` --model ${model}` : ''}${noTools ? ' --tools "" --strict-mcp-config --no-session-persistence' : ''}`, name: 'claude' };
+  }
   if (spec === 'llm') return { command: model ? `llm -m ${model}` : 'llm', name: 'ai' };
   if (spec === 'ollama' && model) return { command: `ollama run ${model}`, name: 'ai' };
   const ollama = /^ollama:(.+)$/.exec(spec);

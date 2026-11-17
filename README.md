@@ -1103,7 +1103,14 @@ It is built to be fast and cheap: once a victim pauses (`--settle`, default
 as a minimal edit, and only if the paragraph is still unchanged; if they kept
 writing, it is tried again at the next pause. The agent's response time is
 the delay people notice, so a small model (Haiku, gpt-4o-mini, a local 8B)
-works best. A rule that depends on a distant part of the note may be missed.
+works best; `--api` is quickest, while Claude Code needs a few seconds per
+rewrite to start up. A rule that depends on a distant part of the note may be
+missed.
+
+What victims write ends up in the agent's prompt, so `--agent claude` runs
+without tools or MCP servers (`--tools "" --strict-mcp-config`): a paragraph
+asking it to paste your files into the note just gets rewritten. A custom
+`--agent` command runs as you, with whatever access it has.
 
 #### From code
 

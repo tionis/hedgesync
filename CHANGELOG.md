@@ -22,7 +22,9 @@
 - `--model` works with `--agent` too (`assistant` and `prank --rule`):
   `--agent claude --model haiku` runs `claude -p --model haiku`, `llm` and
   `ollama` get it as well, and a custom command sees `HEDGESYNC_MODEL`.
-  `prank --rule --agent claude` uses Haiku unless told otherwise.
+  `prank --rule --agent claude` uses Haiku unless told otherwise, and runs
+  Claude Code without tools or MCP servers, since anyone who can edit the
+  note writes part of its prompt.
 
 ## 2.5.0 (2026-11-16)
 
