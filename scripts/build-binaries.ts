@@ -25,6 +25,7 @@ if (unknown.length) {
 }
 
 await $`bun run scripts/gen-nvim-plugin.ts`.quiet();
+await $`bun run scripts/gen-skill.ts`.quiet();
 for (const target of wanted.length ? wanted : TARGETS) {
   const out = `dist/release/hedgesync-${target}${target.startsWith('windows') ? '.exe' : ''}`;
   await $`bun build bin/hedgesync.ts --compile --target=bun-${target} --outfile ${out}`.quiet();

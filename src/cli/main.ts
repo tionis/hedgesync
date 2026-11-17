@@ -14,6 +14,7 @@ import { mirror } from './commands/mirror.js';
 import { exec } from './commands/exec.js';
 import { terminal } from './commands/terminal.js';
 import { bridge } from './commands/bridge.js';
+import { agent } from './commands/agent.js';
 import { editor } from './commands/editor.js';
 import { edit } from './commands/edit.js';
 import { share } from './commands/share.js';
@@ -40,7 +41,7 @@ const toolCommands: Command[] = [clip, serve, mcp];
 const httpCommands: Command[] = [
   list, search, download, create, upload, publish, revisions, me, exportNotes, history, pin, unpin, historyDelete, status, login, logout, sessions,
 ];
-const setupCommands: Command[] = [editor, selfUpdate];
+const setupCommands: Command[] = [agent, editor, selfUpdate];
 /** Every command, in overview order. */
 export const allCommands: Command[] = [...realtimeCommands, ...httpCommands, ...toolCommands, ...setupCommands];
 const commands = new Map<string, Command>(allCommands

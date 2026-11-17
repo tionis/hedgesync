@@ -1175,7 +1175,17 @@ hedgesync clip > shot.png                       # an image entry, piped out
 `watch --from-clipboard` also adds what you copy on this machine to the
 note, skipping entries password managers mark as secret.
 
-### Notes for AI agents (MCP)
+### Notes for AI agents
+
+Agents can use the CLI directly; the bundled skill teaches them how (when to
+use it, safe live edits, the MCP server):
+
+```sh
+hedgesync agent install              # ~/.claude/skills and/or ~/.agents/skills
+hedgesync agent config codex         # MCP setup for claude, codex, cursor, gemini, vscode
+```
+
+#### MCP
 
 `hedgesync mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server on stdio, so agents can work in notes next to people:

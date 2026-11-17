@@ -152,7 +152,7 @@ export function installPlugin(dir: string, options: {
     throw new CliError(`${dir} exists but was not installed by hedgesync`, 'Remove it, pick another --dir, or pass --force to overwrite.');
   }
   if (before.edited.length && !options.force) {
-    throw new CliError(`The installed plugin has local changes: ${before.edited.join(', ')}`,
+    throw new CliError(`The installed copy has local changes: ${before.edited.join(', ')}`,
       'Pass --force to overwrite them.');
   }
   const old = readMarker(dir);
@@ -206,7 +206,7 @@ export function uninstallPlugin(dir: string, options: { force?: boolean } = {}):
   if (!marker) throw new CliError(`${dir} was not installed by hedgesync; remove it yourself if you want it gone`);
   const { edited } = inspectInstall(dir);
   if (edited.length && !options.force) {
-    throw new CliError(`The installed plugin has local changes: ${edited.join(', ')}`, 'Pass --force to remove it anyway.');
+    throw new CliError(`The installed copy has local changes: ${edited.join(', ')}`, 'Pass --force to remove it anyway.');
   }
   for (const path of Object.keys(marker.files)) {
     rmSync(join(dir, path), { force: true });

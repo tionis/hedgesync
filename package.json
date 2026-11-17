@@ -27,6 +27,7 @@
     "dist",
     "src",
     "deno.json",
+    "skills",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -36,7 +37,8 @@
     "test:unit": "bun test test/unit",
     "cli": "bun run bin/hedgesync.ts",
     "gen:nvim": "bun run scripts/gen-nvim-plugin.ts",
-    "build:cli": "bun run gen:nvim && bun build bin/hedgesync.ts --compile --outfile dist/hedgesync",
+    "gen:skill": "bun run scripts/gen-skill.ts",
+    "build:cli": "bun run gen:nvim && bun run gen:skill && bun build bin/hedgesync.ts --compile --outfile dist/hedgesync",
     "build:all": "bun run scripts/build-binaries.ts",
     "build": "tsc -p tsconfig.build.json && chmod +x dist/cli/bin.js",
     "prepublishOnly": "npm run build",
