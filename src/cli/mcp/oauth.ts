@@ -286,7 +286,8 @@ export class OAuthServer {
   /** Verifies an access token, for requireBearerAuth. */
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const stored = this.store.tokens[sha256(token)];
-    if (!stored || stored.kind !== 'access' || stored.expiresAt < now()) {
+    // Owners removed from --owner lose access at once.
+    if (!stored || stored.kind !== 'access' || stored.expiresAt < now() || !this.owners.has(stored.me)) {
       throw new OAuthError('invalid_token', 'The access token is unknown or expired');
     }
     return {

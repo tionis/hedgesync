@@ -28,6 +28,7 @@
     "src",
     "deno.json",
     "plugin",
+    "docs/agents.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

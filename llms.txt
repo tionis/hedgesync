@@ -1,0 +1,9 @@
+# hedgesync
+
+> A library and CLI for HedgeDoc 1 notes with live (realtime, OT) editing: edits merge with what people are typing. Includes an MCP server and an Agent Skill so AI agents can read, edit and collaborate in notes.
+
+- [README](https://github.com/tionis/hedgesync/blob/main/README.md): installation, CLI commands, library API
+- [HedgeDoc notes for AI agents](https://github.com/tionis/hedgesync/blob/main/docs/agents.md): skill, MCP server (stdio and HTTP with OAuth), per-client setup, limits
+- [Agent Skill](https://github.com/tionis/hedgesync/blob/main/plugin/skills/hedgesync/SKILL.md): how an agent uses the hedgesync CLI
+- [MCP reference](https://github.com/tionis/hedgesync/blob/main/plugin/skills/hedgesync/references/mcp.md): tools, modes and client registration
+- [Changelog](https://github.com/tionis/hedgesync/blob/main/CHANGELOG.md)

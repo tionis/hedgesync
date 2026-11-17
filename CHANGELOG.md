@@ -29,6 +29,9 @@
   `claude plugin marketplace add tionis/hedgesync`, then
   `claude plugin install hedgesync@hedgesync` installs the skill and
   registers the MCP server, asking for the HedgeDoc server and tool groups.
+- docs/agents.md: setting up agents (skill, MCP over stdio and HTTP, OAuth
+  with IndieAuth, per-client configs, security), AGENTS.md for contributors
+  and llms.txt.
 - `hedgesync agent config <client>` prints how to register the MCP server
   with Claude Code, Codex, Cursor, Gemini CLI or VS Code.
 - `hedgesync mcp --http [<host>:]<port>` serves MCP over Streamable HTTP:

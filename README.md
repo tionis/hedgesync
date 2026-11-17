@@ -20,6 +20,7 @@ A library and CLI to programmatically connect to a running [HedgeDoc](https://he
 - 📦 **Batch operations** - combine multiple edits into one
 - ↩️ **Undo/Redo** - track edit history with grouping
 - 💻 **CLI tool** - command-line interface for scripting
+- 🤖 **AI agents** - MCP server (stdio, or HTTP with OAuth), an Agent Skill and a Claude Code plugin ([docs/agents.md](docs/agents.md))
 
 ## Compatibility
 
@@ -1176,6 +1177,10 @@ hedgesync clip > shot.png                       # an image entry, piped out
 note, skipping entries password managers mark as secret.
 
 ### Notes for AI agents
+
+The full guide, with setups for Claude Code, Codex, Cursor, VS Code and
+Gemini, the security model and running the HTTP server, is
+[docs/agents.md](docs/agents.md).
 
 Agents can use the CLI directly; the bundled skill teaches them how (when to
 use it, safe live edits, the MCP server):
