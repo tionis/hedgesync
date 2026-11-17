@@ -1,30 +1,30 @@
 # Changelog
 
-## Unreleased
+## 2.6.0 (2026-11-17)
 
 ### Added
 
-- `hedgesync prank`: annoys people typing in a note. `--stutter <percent>`
-  doubles typed characters at random (`--stutter-deletes` doubles
-  backspaces too); `--allow-user` and `-U` pick the victims. The library
-  exports `PrankEngine` for writing your own.
-- More pranks: `--fat-fingers` (qwerty or `--keyboard qwertz`),
-  `--transpose`, `--sticky-caps`, `--echo`, `--homoglyphs`, `--haunt`
-  (typing disappears again a few seconds later), `--ghost` (a cursor types
-  remarks next to the victim and erases them), `--bombs` (defuse the
-  ticking bomb by deleting it, or it blasts a round crater across the
-  surrounding lines), `--deny <user>`
-  (reverts everything they type) and `--rule <text>` (an AI agent rewrites
-  paragraphs to follow rules, using the same agents as `assistant`).
-- `hedgesync prank --only <user>`, `--except <user>` and `--spare-me` pick
-  who is pranked, by account id or display-name regex; `--except` also
-  protects from `--deny`. The online users and their ids are listed at start.
+- `hedgesync prank`: annoys people typing in a note, live. Pranks combine:
+  - typos: `--stutter` (`--stutter-deletes` for backspaces too),
+    `--fat-fingers` (`--keyboard qwerty|qwertz`), `--transpose`,
+    `--sticky-caps`, `--echo` and `--homoglyphs`;
+  - over time: `--haunt` (typing disappears again a few seconds later),
+    `--ghost` (a cursor types remarks next to the victim and erases them)
+    and `--bombs` (defuse the ticking bomb by deleting it, or it blasts a
+    round crater across the surrounding lines; `--fuse`, `--blast`);
+  - control: `--deny <user>` reverts everything they type, and
+    `--rule <text>` has an AI agent rewrite paragraphs to follow rules,
+    using the same agents as `assistant`. With `--agent claude` it runs
+    Haiku, without tools or MCP servers, since anyone who can edit the note
+    writes part of its prompt.
+
+  `--only <user>`, `--except <user>` and `--spare-me` pick who is pranked,
+  by account id or display-name regex; `--except` also protects from
+  `--deny`. The online users and their ids are listed at start. The library
+  exports `PrankEngine` and every prank, for writing your own.
 - `--model` works with `--agent` too (`assistant` and `prank --rule`):
   `--agent claude --model haiku` runs `claude -p --model haiku`, `llm` and
   `ollama` get it as well, and a custom command sees `HEDGESYNC_MODEL`.
-  `prank --rule --agent claude` uses Haiku unless told otherwise, and runs
-  Claude Code without tools or MCP servers, since anyone who can edit the
-  note writes part of its prompt.
 
 ### Fixed
 
