@@ -40,6 +40,12 @@
   a built-in authorization server (PKCE, resource indicators, refresh token
   rotation, Client ID Metadata Documents and dynamic registration) where
   people sign in with IndieAuth, and token scopes select the tool groups.
+  Client ID Metadata Documents, the way current MCP clients identify
+  themselves, are checked as the MCP spec asks: exact `client_id`, required
+  `client_name` and `redirect_uris`, public clients only, a size limit, no
+  fetches from private addresses, caching by HTTP headers, and a consent page
+  that shows where the client comes from and warns about localhost-only
+  clients.
 - MCP: tools have titles, annotations and structured results;
   `search_notes` reports progress and can be cancelled; errors say how to
   recover (e.g. the note's headings when a section is not found).

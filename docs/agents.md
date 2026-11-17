@@ -164,8 +164,10 @@ MCP authorization spec expects:
   challenge pointing there;
 - authorization code flow with PKCE (S256 only), resource indicators, and
   rotating refresh tokens (access tokens last an hour, refresh tokens 30 days);
-- clients identified by a Client ID Metadata Document (an https URL as
-  `client_id`) or registered dynamically (`/oauth/register`);
+- clients identified by a **Client ID Metadata Document** (CIMD: an https
+  URL as `client_id`, where the client publishes its name and redirect URIs),
+  which is what current MCP clients use, or, for older clients, registered
+  dynamically (`/oauth/register`);
 - revocation at `/oauth/revoke`.
 
 To approve an agent, you prove who you are with
@@ -196,6 +198,30 @@ clients, in `mcp-oauth.json` next to the CLI's saved logins
 (`~/.config/hedgesync/`), so restarts keep agents signed in. Deleting that
 file signs every agent out. Removing someone from `--owner` (and
 restarting) ends their agents' access.
+
+### Client ID Metadata Documents
+
+When a client's `client_id` is an https URL, hedgesync fetches the document
+there and checks it before showing the consent page:
+
+- `client_id` in the document is exactly the URL, and it has a
+  `client_name` and `redirect_uris` (https, or on the user's computer);
+- the redirect URI of the request is one of them (on `localhost` /
+  `127.0.0.1`, with any port);
+- the client is public (`token_endpoint_auth_method` absent or `none`;
+  `private_key_jwt` is not supported) and uses the authorization code flow;
+- the document is at most 16 KB, served without redirects, from a public
+  address: client ids on private, loopback or link-local addresses are
+  refused, so a client id can't make the server probe your network. (A
+  server that itself runs on loopback accepts `http://localhost` client ids,
+  for development.)
+
+Documents are cached as their `Cache-Control` / `Expires` headers allow (10
+minutes without, a day at most). The consent page shows the client's name
+together with the host its document comes from, since the name is the
+client's own claim, and the host you'll be sent back to. When a client only
+redirects to your own computer, it warns that any local program could pose as
+it.
 
 ### Running it on a server
 

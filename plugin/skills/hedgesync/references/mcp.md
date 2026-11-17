@@ -69,7 +69,8 @@ hedgesync mcp --http 8788 --public-url https://mcp.example.com --owner https://y
 ```
 
 With `--owner`, the server is an OAuth 2.1 authorization server: clients
-register themselves, the owner approves them in a browser and signs in with
+identify themselves with a Client ID Metadata Document (or register
+dynamically), the owner approves them in a browser and signs in with
 IndieAuth (their website names their IndieAuth server), and token scopes
 (`read`, `edit`, `create`) pick the tools. Connect with, e.g.,
 `claude mcp add --transport http hedgedoc https://mcp.example.com/mcp`.

@@ -107,6 +107,8 @@ export function mcpHttpHandler(tools: HedgeDocTools, options: HttpOptions): { fe
     oauth = new OAuthServer({
       issuer: base.origin, resource: resource.href, owners: options.owners, scopes: options.groups,
       storePath: options.oauthStorePath, fetch: options.fetch,
+      // Local client ids only for a server that is itself local (development).
+      allowLocalClients: base.protocol === 'http:' && isLoopback(base.hostname),
     });
     gate = requireBearerAuth({ verifier: oauth, resourceMetadataUrl, expectedResource: resource });
   } else if (options.token) {

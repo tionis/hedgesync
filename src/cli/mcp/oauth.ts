@@ -16,6 +16,8 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { OAuthError, type AuthInfo } from '@modelcontextprotocol/server';
@@ -26,7 +28,11 @@ const REFRESH_TTL_S = 30 * 24 * 60 * 60;
 const CODE_TTL_MS = 5 * 60_000;
 /** How long someone has to approve and sign in. */
 const PENDING_TTL_MS = 15 * 60_000;
-const CLIENT_DOC_TTL_MS = 10 * 60_000;
+/** Client ID Metadata Documents: cached as their HTTP headers allow, 10 minutes without any, a day at most. */
+const CLIENT_DOC_DEFAULT_TTL_MS = 10 * 60_000;
+const CLIENT_DOC_MAX_TTL_MS = 24 * 60 * 60_000;
+/** The CIMD draft suggests a limit of about 5 KB; a little more room for long redirect URI lists. */
+const MAX_CLIENT_DOC_BYTES = 16 * 1024;
 const FETCH_TIMEOUT_MS = 8000;
 const MAX_DOC_BYTES = 256 * 1024;
 /** Anyone can start an authorization or name a client document: keep at most this many of each. */
@@ -45,9 +51,23 @@ export interface OAuthOptions {
   storePath?: string;
   /** Replaces fetch, for tests. */
   fetch?: typeof fetch;
+  /** Replaces DNS resolution of client metadata document hosts, for tests. */
+  lookup?: (host: string) => Promise<string[]>;
+  /**
+   * Accept client ids on http://localhost and on private addresses. Only for
+   * a server that itself runs on loopback (development, tests): otherwise
+   * a client id could make the server fetch from the internal network.
+   */
+  allowLocalClients?: boolean;
 }
 
-interface Client { name?: string; uri?: string; redirectUris: string[] }
+interface Client {
+  name?: string;
+  uri?: string;
+  redirectUris: string[];
+  /** Identified by a metadata document at its client_id URL (else registered dynamically). */
+  document?: boolean;
+}
 
 interface StoredToken {
   kind: 'access' | 'refresh';
@@ -106,6 +126,77 @@ export function canonicalProfile(input: string): string {
 
 const isLoopbackHost = (host: string) => host === 'localhost' || host === '[::1]' || host === '::1' || /^127\./.test(host);
 
+/** Addresses a client id must not make the server fetch from: loopback, private, link-local, ... (SSRF). */
+export function isPrivateAddress(ip: string): boolean {
+  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i.exec(ip);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19))
+      || (a === 192 && b === 0 && Number(v4[3]) === 0);
+  }
+  const v6 = ip.toLowerCase();
+  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || /^ff/.test(v6);
+}
+
+/** How long a response may be cached, from Cache-Control and Expires. */
+export function cacheLifetimeMs(headers: Headers, nowMs = Date.now()): number {
+  const cc = (headers.get('cache-control') ?? '').toLowerCase();
+  if (/\b(no-store|no-cache|private)\b/.test(cc)) return 0;
+  const maxAge = /\bmax-age=(\d+)/.exec(cc);
+  let ms: number | undefined;
+  if (maxAge) ms = Number(maxAge[1]) * 1000;
+  else if (headers.get('expires')) {
+    const t = Date.parse(headers.get('expires')!);
+    ms = Number.isNaN(t) ? 0 : t - nowMs;
+  }
+  return Math.max(0, Math.min(ms ?? CLIENT_DOC_DEFAULT_TTL_MS, CLIENT_DOC_MAX_TTL_MS));
+}
+
+/** Checks a Client ID Metadata Document for the URL it was fetched from; returns the client or why not. */
+export function parseClientDocument(clientId: string, text: string): Client {
+  let doc: Record<string, unknown>;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    throw new Error('The client\'s metadata document is not JSON');
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('The client\'s metadata document is not a JSON object');
+  if (doc.client_id !== clientId) throw new Error('The client\'s metadata document names a different client_id');
+  if (typeof doc.client_name !== 'string' || !doc.client_name.trim()) throw new Error('The client\'s metadata document has no client_name');
+  const uris = doc.redirect_uris;
+  if (!Array.isArray(uris) || uris.length === 0 || !uris.every(u => typeof u === 'string')) {
+    throw new Error('The client\'s metadata document has no redirect_uris');
+  }
+  for (const u of uris as string[]) {
+    let url: URL;
+    try {
+      url = new URL(u);
+    } catch {
+      throw new Error(`The client's metadata document lists an invalid redirect URI: ${u}`);
+    }
+    if (url.hash || (url.protocol === 'http:' && !isLoopbackHost(url.hostname))) {
+      throw new Error(`The client's redirect URI ${u} is neither https nor on this computer`);
+    }
+  }
+  const auth = doc.token_endpoint_auth_method;
+  if (auth !== undefined && auth !== 'none') {
+    throw new Error(`The client wants to authenticate with ${String(auth)}; this server only supports public clients (none)`);
+  }
+  if (Array.isArray(doc.grant_types) && !doc.grant_types.includes('authorization_code')) {
+    throw new Error('The client does not use the authorization_code grant');
+  }
+  if (Array.isArray(doc.response_types) && !doc.response_types.includes('code')) {
+    throw new Error('The client does not use response_type code');
+  }
+  return {
+    name: doc.client_name.trim().slice(0, 200),
+    uri: typeof doc.client_uri === 'string' ? doc.client_uri.slice(0, 500) : undefined,
+    redirectUris: uris as string[],
+    document: true,
+  };
+}
+
 /** Redirect URIs match exactly, except that loopback ones may use any port (RFC 8252). */
 export function redirectMatches(registered: string, given: string): boolean {
   if (registered === given) return true;
@@ -124,6 +215,25 @@ function pkceMatches(verifier: string, challenge: string): boolean {
   const a = Buffer.from(computed);
   const b = Buffer.from(challenge);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** A response body as text, or undefined once it passes `limit` bytes (stops reading there). */
+async function readLimited(res: Response, limit: number): Promise<string | undefined> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      void reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' })[c]!);
@@ -207,7 +317,7 @@ export class OAuthServer {
   private readonly pending = new Map<string, Pending>();
   private readonly byIndieAuthState = new Map<string, string>();
   private readonly codes = new Map<string, Code>();
-  private readonly clientDocs = new Map<string, { client: Client; fetched: number }>();
+  private readonly clientDocs = new Map<string, { client: Client; expires: number }>();
   private readonly fetch: typeof fetch;
 
   constructor(private readonly options: OAuthOptions) {
@@ -321,28 +431,47 @@ export class OAuthServer {
     } catch {
       throw new Error('Unknown client_id');
     }
-    if (!(url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHost(url.hostname))) || url.pathname === '/' || url.hash) {
+    const local = this.options.allowLocalClients === true;
+    if (!(url.protocol === 'https:' || (local && url.protocol === 'http:' && isLoopbackHost(url.hostname)))
+      || url.pathname === '/' || url.hash || url.username || url.password) {
       throw new Error('client_id must be a registered id or an https URL with a path (a Client ID Metadata Document)');
     }
     const cached = this.clientDocs.get(clientId);
-    if (cached && Date.now() - cached.fetched < CLIENT_DOC_TTL_MS) return cached.client;
-    const res = await this.fetch(clientId, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`Could not fetch the client's metadata document (${res.status})`);
-    const text = await res.text();
-    if (text.length > MAX_DOC_BYTES) throw new Error('The client\'s metadata document is too large');
-    let doc: { client_id?: string; client_name?: string; client_uri?: string; redirect_uris?: unknown };
+    if (cached && Date.now() < cached.expires) return cached.client;
+
+    // The URL comes from anyone: don't let it point the server at its own network.
+    if (!local) {
+      const host = url.hostname.replace(/^\[|\]$/g, '');
+      let addresses: string[];
+      try {
+        addresses = isIP(host) ? [host] : await (this.options.lookup ?? (async (h: string) => (await lookup(h, { all: true })).map(a => a.address)))(host);
+      } catch {
+        throw new Error(`Could not find the client's host ${url.hostname}`);
+      }
+      if (addresses.length === 0 || addresses.some(isPrivateAddress)) {
+        throw new Error(`The client's metadata document is on a private address (${url.hostname})`);
+      }
+    }
+
+    let res: Response;
     try {
-      doc = JSON.parse(text);
-    } catch {
-      throw new Error('The client\'s metadata document is not JSON');
+      res = await this.fetch(clientId, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      throw new Error(`Could not fetch the client's metadata document: ${(err as Error).message}`);
     }
-    if (doc.client_id !== clientId) throw new Error('The client\'s metadata document names a different client_id');
-    if (!Array.isArray(doc.redirect_uris) || !doc.redirect_uris.every(u => typeof u === 'string')) {
-      throw new Error('The client\'s metadata document has no redirect_uris');
+    if (!res.ok) throw new Error(`Could not fetch the client's metadata document (${res.status})`);
+    const declared = Number(res.headers.get('content-length') ?? 0);
+    if (declared > MAX_CLIENT_DOC_BYTES) throw new Error('The client\'s metadata document is too large');
+    const text = await readLimited(res, MAX_CLIENT_DOC_BYTES);
+    if (text === undefined) throw new Error('The client\'s metadata document is too large');
+    const client = parseClientDocument(clientId, text);
+    const ttl = cacheLifetimeMs(res.headers);
+    if (ttl > 0) {
+      if (this.clientDocs.size >= MAX_PENDING) this.clientDocs.delete(this.clientDocs.keys().next().value!);
+      this.clientDocs.set(clientId, { client, expires: Date.now() + ttl });
+    } else {
+      this.clientDocs.delete(clientId);
     }
-    const client = { name: doc.client_name, uri: doc.client_uri, redirectUris: doc.redirect_uris as string[] };
-    if (this.clientDocs.size >= MAX_PENDING) this.clientDocs.delete(this.clientDocs.keys().next().value!);
-    this.clientDocs.set(clientId, { client, fetched: Date.now() });
     return client;
   }
 
@@ -434,14 +563,26 @@ export class OAuthServer {
   }
 
   private consentPage(id: string, p: Pending, problem?: string): Response {
-    const app = p.client.name || new URL(p.clientId.startsWith('http') ? p.clientId : p.redirectUri).host || p.clientId;
-    const back = (() => {
+    const hostOf = (u: string) => {
       try {
-        return new URL(p.redirectUri).host || p.redirectUri;
+        return new URL(u).host || u;
       } catch {
-        return p.redirectUri;
+        return u;
       }
-    })();
+    };
+    const back = hostOf(p.redirectUri);
+    // Names are self-declared; where the client comes from is what can be trusted.
+    const from = p.client.document
+      ? `Its details come from <code>${escapeHtml(hostOf(p.clientId))}</code>.`
+      : 'It registered itself with this server, so its name is unverified.';
+    const app = p.client.name || (p.client.document ? hostOf(p.clientId) : 'An unnamed app');
+    const loopbackOnly = p.client.redirectUris.every(u => {
+      try {
+        return isLoopbackHost(new URL(u).hostname);
+      } catch {
+        return false;
+      }
+    });
     const what: Record<string, string> = {
       read: 'Read and search your notes, and see who is in them',
       edit: 'Change your notes',
@@ -451,8 +592,11 @@ export class OAuthServer {
     return page('Allow access to HedgeDoc notes', `
 <h1>Allow ${escapeHtml(app)} to use your HedgeDoc notes?</h1>
 ${problem ? `<p><strong>${escapeHtml(problem)}</strong></p>` : ''}
+<p class="muted">${from}</p>
 <ul>${p.scopes.map(s => `<li>${escapeHtml(what[s] ?? s)}</li>`).join('')}</ul>
-<p class="muted">It acts as the HedgeDoc account this server is signed in with. Afterwards you are sent back to <code>${escapeHtml(back)}</code>.</p>
+<p>Afterwards you are sent to <code>${escapeHtml(back)}</code>.</p>
+${loopbackOnly ? '<p><strong>The app receives access on your own computer.</strong> Any program there could pose as it: only allow this if you just started signing in from that app.</p>' : ''}
+<p class="muted">It acts as the HedgeDoc account this server is signed in with.</p>
 <form method="post" action="/oauth/authorize">
 <input type="hidden" name="request" value="${escapeHtml(id)}">
 <label for="me">Sign in with your website</label>
