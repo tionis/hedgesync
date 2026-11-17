@@ -1185,6 +1185,14 @@ hedgesync agent install              # ~/.claude/skills and/or ~/.agents/skills
 hedgesync agent config codex         # MCP setup for claude, codex, cursor, gemini, vscode
 ```
 
+In Claude Code, the plugin brings the skill and the MCP server in one go (it
+asks for your server URL; the `hedgesync` binary must be installed):
+
+```sh
+claude plugin marketplace add tionis/hedgesync
+claude plugin install hedgesync@hedgesync
+```
+
 #### MCP
 
 `hedgesync mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)

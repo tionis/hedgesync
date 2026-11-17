@@ -4,7 +4,7 @@
  *   hedgesync agent install | status | path | uninstall   the bundled skill
  *   hedgesync agent config <client>                      MCP server config
  *
- * The skill (skills/hedgesync, the Agent Skills format) is embedded at build
+ * The skill (plugin/skills/hedgesync, the Agent Skills format) is embedded at build
  * time like the Neovim plugin, and installed the same way: a marker records
  * what was written, so updates replace it and local edits are kept.
  */
@@ -98,9 +98,10 @@ THE SKILL:
   current directory instead, to share it with a repository. Copies you
   edited are not overwritten or removed without --force.
 
-  The skill is also in the repository (skills/hedgesync) and in its Claude
-  Code plugin:  claude plugin marketplace add tionis/hedgesync
-                claude plugin install hedgesync@hedgesync
+  The skill is also in the repository (plugin/skills/hedgesync). Claude Code
+  users can install it as a plugin, which also registers the MCP server:
+    claude plugin marketplace add tionis/hedgesync
+    claude plugin install hedgesync@hedgesync
 
 MCP CONFIG:
   config prints how to register "hedgesync mcp" with a client: a command to

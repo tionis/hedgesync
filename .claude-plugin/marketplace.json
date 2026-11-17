@@ -1,0 +1,13 @@
+{
+  "name": "hedgesync",
+  "owner": { "name": "tionis", "url": "https://github.com/tionis" },
+  "description": "HedgeDoc notes for AI agents",
+  "plugins": [
+    {
+      "name": "hedgesync",
+      "source": "./plugin",
+      "description": "Read and edit HedgeDoc notes live, alongside the people typing in them: a skill for the hedgesync CLI and its MCP server.",
+      "category": "productivity"
+    }
+  ]
+}

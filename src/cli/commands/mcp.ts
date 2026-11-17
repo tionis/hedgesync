@@ -10,10 +10,11 @@ import { TOOL_GROUPS, type ToolGroup, type ToolOptions } from '../mcp/tool-group
 
 /** The tool options from --server, --read-only, --tools and --note. */
 export function mcpToolOptions(ctx: Context): ToolOptions {
-  const server = ctx.str('server');
+  // Empty means unset (e.g. an unset plugin option).
+  const server = ctx.str('server') || undefined;
   let groups: ToolGroup[] = [...TOOL_GROUPS];
   const tools = ctx.str('tools');
-  if (tools !== undefined) {
+  if (tools) {
     const wanted = tools.split(',').map(s => s.trim()).filter(Boolean);
     const unknown = wanted.filter(g => !(TOOL_GROUPS as readonly string[]).includes(g));
     if (unknown.length) throw new CliError(`Unknown tool group: ${unknown.join(', ')}`, `Groups: ${TOOL_GROUPS.join(', ')}`);

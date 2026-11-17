@@ -49,6 +49,18 @@ describe('the agent skill', () => {
   });
 });
 
+describe('the Claude Code plugin', () => {
+  test('its version follows package.json, and it registers the MCP server', async () => {
+    const pkg = await Bun.file(join(import.meta.dir, '../../package.json')).json();
+    const plugin = await Bun.file(join(import.meta.dir, '../../plugin/.claude-plugin/plugin.json')).json();
+    expect(plugin.version).toBe(pkg.version);
+    expect(plugin.license).toBe(pkg.license);
+    expect(plugin.mcpServers.hedgesync.args.slice(0, 1)).toEqual(['mcp']);
+    const market = await Bun.file(join(import.meta.dir, '../../.claude-plugin/marketplace.json')).json();
+    expect(market.plugins[0]).toMatchObject({ name: 'hedgesync', source: './plugin' });
+  });
+});
+
 describe('MCP client configs', () => {
   const args = ['--server', 'https://md.example.com'];
   test('per client', () => {

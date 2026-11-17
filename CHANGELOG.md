@@ -19,12 +19,16 @@
   take requests written into a note.
 - MCP: `--read-only`, `--tools <groups>` (read, edit, create) and
   `--note <url>` (repeatable) limit what an agent can do.
-- An Agent Skill for HedgeDoc notes (`skills/hedgesync`, the open SKILL.md
+- An Agent Skill for HedgeDoc notes (`plugin/skills/hedgesync`, the open SKILL.md
   format): when to use hedgesync, how to edit safely while people type, and
   how to set up the MCP server. `hedgesync agent install` installs the copy
   bundled with the binary for Claude Code (`~/.claude/skills`) and agents
   that read `~/.agents/skills` (Codex and others), or into a project with
   `--project`; `status` and `uninstall` as for the Neovim plugin.
+- A Claude Code plugin and marketplace in the repository (`plugin/`):
+  `claude plugin marketplace add tionis/hedgesync`, then
+  `claude plugin install hedgesync@hedgesync` installs the skill and
+  registers the MCP server, asking for the HedgeDoc server and tool groups.
 - `hedgesync agent config <client>` prints how to register the MCP server
   with Claude Code, Codex, Cursor, Gemini CLI or VS Code.
 - `hedgesync mcp --http [<host>:]<port>` serves MCP over Streamable HTTP:

@@ -27,7 +27,7 @@
     "dist",
     "src",
     "deno.json",
-    "skills",
+    "plugin",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

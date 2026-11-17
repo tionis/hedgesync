@@ -1,0 +1,32 @@
+{
+  "name": "hedgesync",
+  "displayName": "HedgeDoc (hedgesync)",
+  "version": "2.6.0",
+  "description": "Read and edit HedgeDoc notes live, alongside the people typing in them: a skill for the hedgesync CLI and its MCP server.",
+  "author": { "name": "tionis", "url": "https://github.com/tionis" },
+  "homepage": "https://github.com/tionis/hedgesync",
+  "repository": "https://github.com/tionis/hedgesync",
+  "license": "AGPL-3.0-only",
+  "keywords": ["hedgedoc", "codimd", "markdown", "notes", "collaboration", "mcp"],
+  "userConfig": {
+    "server": {
+      "type": "string",
+      "title": "HedgeDoc server",
+      "description": "Your HedgeDoc server's URL, e.g. https://md.example.com, for listing, searching and creating notes. Sign in once with: hedgesync login <server> --from-browser firefox --save",
+      "default": ""
+    },
+    "tools": {
+      "type": "string",
+      "title": "Tools",
+      "description": "Which tool groups the agent gets",
+      "options": ["read,edit,create", "read,edit", "read"],
+      "default": "read,edit,create"
+    }
+  },
+  "mcpServers": {
+    "hedgesync": {
+      "command": "hedgesync",
+      "args": ["mcp", "--server", "${user_config.server}", "--tools", "${user_config.tools}"]
+    }
+  }
+}

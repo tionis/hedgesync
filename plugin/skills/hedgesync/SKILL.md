@@ -1,7 +1,7 @@
 ---
 name: hedgesync
 description: Read, edit and collaborate live in HedgeDoc notes (collaborative Markdown, also known as CodiMD) with the hedgesync CLI or its MCP server. Use when the user shares a HedgeDoc note URL (e.g. https://md.example.com/abc123), asks to read, update, summarize, search or create HedgeDoc notes, or wants an agent to work in a note alongside people, e.g. answering requests written into it.
-license: MIT
+license: AGPL-3.0-only
 compatibility: Needs the hedgesync CLI (npm install -g hedgesync, or a release binary) and network access to the HedgeDoc server.
 metadata:
   homepage: https://github.com/tionis/hedgesync
