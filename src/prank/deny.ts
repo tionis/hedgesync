@@ -5,24 +5,8 @@
 import type { Prank, PrankEdit, PrankUser } from './engine.js';
 
 export interface DenyOptions {
-  /** Whose edits are reverted. */
+  /** Whose edits are reverted (see userMatcher). The engine's `except` still applies. */
   targets: (user?: PrankUser) => boolean;
-}
-
-/**
- * A matcher for --deny style specs: a HedgeDoc account id (exact) or a
- * display-name regex (case-insensitive).
- */
-export function userMatcher(specs: string[]): (user?: PrankUser) => boolean {
-  const patterns = specs.map(spec => {
-    try {
-      return new RegExp(spec, 'i');
-    } catch {
-      return null;
-    }
-  });
-  return (user) => specs.some((spec, i) =>
-    (!!user?.userid && user.userid === spec) || (!!patterns[i] && patterns[i]!.test(user?.name ?? '')));
 }
 
 /** Revert every edit by the targets: inserts are deleted, deletions restored. */

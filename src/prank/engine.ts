@@ -67,7 +67,8 @@ export interface Prank {
   name: string;
   /**
    * Whose edits this prank reacts to. When set, it replaces the engine's
-   * target filter for this prank.
+   * `only`, `allowedUserIds` and `userFilter` for this prank; `except`
+   * still applies.
    */
   targets?: (user?: PrankUser) => boolean;
   /** When this prank answers an edit, later pranks leave that edit alone. Runs first. */
@@ -119,13 +120,51 @@ export interface PrankApi {
   report(event: Omit<PrankEvent, 'prank'> & { prank?: string }): void;
 }
 
+/**
+ * Picks users: a predicate, or specs as for userMatcher() (account ids, or
+ * case-insensitive display-name regexes).
+ */
+export type UserSelector = string[] | ((user?: PrankUser) => boolean);
+
+/**
+ * Who is pranked. A user is a victim when they match none of `except` and,
+ * if given, `only`, `allowedUserIds` and `userFilter` (all of them).
+ * Users the engine cannot identify never match a selector: with `only` set
+ * they are spared, with just `except` they are pranked.
+ */
 export interface PrankEngineOptions {
-  /** Only edits by these HedgeDoc account ids are pranked. */
+  /** Only these users are pranked. */
+  only?: UserSelector;
+  /** These users are never pranked, by any prank. Wins over everything else. */
+  except?: UserSelector;
+  /** Only edits by these HedgeDoc account ids are pranked (exact ids). */
   allowedUserIds?: string[];
   /** Only edits by users whose display name matches are pranked. */
   userFilter?: RegExp;
+  /** Random numbers in [0, 1); replace for deterministic tests. */
   random?: () => number;
 }
+
+/**
+ * A predicate matching users by spec: a spec matches a user whose HedgeDoc
+ * account id equals it exactly, or whose display name matches it as a
+ * case-insensitive regex (so `bob` also matches "Bobby"; use `^bob$` for
+ * exactly Bob). Names can be changed by their owners; ids cannot.
+ */
+export function userMatcher(specs: string[]): (user?: PrankUser) => boolean {
+  const patterns = specs.map(spec => {
+    try {
+      return new RegExp(spec, 'i');
+    } catch {
+      return null;
+    }
+  });
+  return (user) => specs.some((spec, i) =>
+    (!!user?.userid && user.userid === spec) || (!!patterns[i] && !!user?.name && patterns[i]!.test(user.name)));
+}
+
+const toMatcher = (sel?: UserSelector) =>
+  sel === undefined ? undefined : typeof sel === 'function' ? sel : userMatcher(sel);
 
 /** Something a prank did, for logging. */
 export interface PrankEvent {
@@ -178,6 +217,8 @@ export class PrankEngine {
   private readonly pranks: Prank[] = [];
   private readonly allowedUserIds?: Set<string>;
   private readonly userFilter?: RegExp;
+  private readonly only?: (user?: PrankUser) => boolean;
+  private readonly except?: (user?: PrankUser) => boolean;
   private readonly random: () => number;
   private readonly listeners = new Set<(event: PrankEvent) => void>();
   private readonly changeHandler = (event: ChangeEvent) => this.onChange(event);
@@ -197,6 +238,8 @@ export class PrankEngine {
   constructor(private readonly client: PrankClientLike, options: PrankEngineOptions = {}) {
     if (options.allowedUserIds?.length) this.allowedUserIds = new Set(options.allowedUserIds);
     this.userFilter = options.userFilter;
+    this.only = toMatcher(options.only);
+    this.except = toMatcher(options.except);
     this.random = options.random ?? Math.random;
     this.api = this.makeApi();
   }
@@ -243,7 +286,15 @@ export class PrankEngine {
     this.victim = null;
   }
 
+  /** Whether `except` spares this user from every prank. */
+  isExcluded(user?: PrankUser): boolean {
+    return !!this.except?.(user);
+  }
+
+  /** Whether this user's edits are pranked (by pranks without their own `targets`). */
   isTarget(user?: PrankUser): boolean {
+    if (this.isExcluded(user)) return false;
+    if (this.only && !this.only(user)) return false;
     if (this.allowedUserIds && !(user?.userid && this.allowedUserIds.has(user.userid))) return false;
     if (this.userFilter && !this.userFilter.test(user?.name ?? '')) return false;
     return true;
@@ -287,7 +338,8 @@ export class PrankEngine {
     const fired: PrankEvent[] = [];
     for (const prank of this.pranks) {
       if (!prank.react) continue;
-      if (!(prank.targets ? prank.targets(event.user) : this.isTarget(event.user))) continue;
+      const targeted = prank.targets ? !this.isExcluded(event.user) && prank.targets(event.user) : this.isTarget(event.user);
+      if (!targeted) continue;
       // Each prank sees the document as left by the previous one.
       const edits = prank.react(pieces, {
         document, user: event.user, operation, previous, random: this.random, api: this.api,

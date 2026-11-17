@@ -290,67 +290,96 @@ ${c('yellow', 'SECURITY NOTE:')}
   prank: () => `
 ${c('bold', 'hedgesync prank')} - Annoy people typing in a note
 
-Watches a note and reacts to what people type in it. Everyone is fair game,
-your own browser included, unless you pick victims with --allow-user or -U.
-Combine as many pranks as you like. Percentages are per typed character
-unless noted; pastes are left alone.
+Connects to a note and reacts to what people type in it, in real time.
+Pick one or more pranks; they combine. Runs until Ctrl+C.
 
 ${c('yellow', 'USAGE:')}
-  hedgesync prank <url> [pranks] [options]
+  hedgesync prank <url> <pranks...> [--only <user>] [--except <user>] [options]
 
-${c('yellow', 'TYPING:')}
-  ${c('cyan', '--stutter')} <%>         Characters come out twice ("hhello")
-  ${c('cyan', '--stutter-deletes')}     ...and backspaces sometimes eat one more character
-  ${c('cyan', '--fat-fingers')} <%>     A neighbouring key is hit instead ("hrllo")
-  ${c('cyan', '--keyboard')} <layout>   For --fat-fingers: qwerty (default) or qwertz
-  ${c('cyan', '--transpose')} <%>       A letter swaps with the one before it ("teh")
-  ${c('cyan', '--sticky-caps')} <%>     Shift gets stuck for a few letters: CAPS or SpOnGe case
-  ${c('cyan', '--echo')} <%>            Per finished word: it is repeated ("the the")
-  ${c('cyan', '--homoglyphs')} <%>      Letters become identical-looking Cyrillic ones
-                        (invisible, but search and spell checking break)
+${c('yellow', 'TYPING PRANKS:')} ${c('dim', '(<%> is the chance per typed character, 0-100)')}
+  ${c('cyan', '--stutter')} <%>         The character comes out twice: "hhello"
+  ${c('cyan', '--stutter-deletes')}     ...and a backspace may eat one more character
+  ${c('cyan', '--fat-fingers')} <%>     A neighbouring key is hit instead: "hrllo"
+  ${c('cyan', '--keyboard')} <layout>   Neighbours for --fat-fingers: qwerty (default), qwertz
+  ${c('cyan', '--transpose')} <%>       A letter swaps with the letter before it: "teh"
+  ${c('cyan', '--sticky-caps')} <%>     Shift gets stuck for 3-12 letters: "HELLo" or "hElLo"
+  ${c('cyan', '--echo')} <%>            Per finished word (on space): it is doubled: "the the"
+  ${c('cyan', '--homoglyphs')} <%>      A letter becomes its Cyrillic twin (a -> а): looks the
+                        same, but search, links and spell checking break
 
-${c('yellow', 'OVER TIME:')}
-  ${c('cyan', '--haunt')} <%>           Per burst of typing: a few seconds after they stop,
-                        it quietly disappears again
-  ${c('cyan', '--ghost')} <seconds>     About this often, our cursor shows up next to a victim,
-                        types a remark on a new line and erases it again
-  ${c('cyan', '--ghost-message')} <t>   What the ghost types (repeatable; default: a few)
-  ${c('cyan', '--bombs')} <%>           Per edit: a ticking bomb (💣15) is planted near the
-                        victim. Delete it to defuse it, or it explodes and
-                        turns the text around it into a crater
+  Pastes (more than 10 characters at once) are left alone.
+
+${c('yellow', 'PRANKS OVER TIME:')}
+  ${c('cyan', '--haunt')} <%>           Per burst of typing: 3-10 s after they stop, what they
+                        typed quietly disappears again
+  ${c('cyan', '--ghost')} <seconds>     About this often (while a victim is active), your cursor
+                        appears on a new line below the victim, types a remark,
+                        waits, and erases it again
+  ${c('cyan', '--ghost-message')} <t>   What the ghost types (repeatable; default: "hmm",
+                        "are you sure about this?", "👀", ...)
+  ${c('cyan', '--bombs')} <%>           Per edit: a bomb with a countdown (💣15) appears within
+                        two lines of the victim. Deleting any part of it defuses
+                        it; otherwise it explodes into 💥 and turns the text around
+                        it into ░ rubble (line breaks survive). At most 3 at once.
   ${c('cyan', '--fuse')} <seconds>      Bomb countdown (default 15, at most 99)
   ${c('cyan', '--blast')} <chars>       Characters destroyed on each side (default 25)
 
 ${c('yellow', 'CONTROL:')}
   ${c('cyan', '--deny')} <user>         Revert everything this user types, instantly
-                        (account id, or a case-insensitive display-name
-                        regex; repeatable; ignores --allow-user and -U)
-  ${c('cyan', '--rule')} <text>         An AI agent rewrites what victims write to follow
-                        this rule (repeatable), e.g. "write like a pirate" or
-                        "no work is ever scheduled for Eric". Needs an agent:
-  ${c('cyan', '-a, --agent')} <a>       claude, llm, ollama:<model> or any command
-                        (prompt on stdin), as for hedgesync assistant
-  ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API, with
+                        (repeatable). Picks its own targets: --only and the
+                        other filters don't apply, but --except and --spare-me do.
+  ${c('cyan', '--rule')} <text>         An AI agent rewrites what victims write so it follows
+                        the rule (repeatable): "write everything in pirate speak",
+                        "no work is ever scheduled for Eric"
+
+  How --rule works: once a victim pauses typing (--settle), each paragraph
+  they touched is sent to the agent on its own, with up to 3000 characters
+  of the note on either side as context. The answer is applied as a minimal
+  edit, and only if the paragraph is still unchanged; if they kept writing,
+  it is tried again at the next pause. The agent's response time is the
+  delay people notice, so pick a fast model.
+
+  ${c('cyan', '-a, --agent')} <a>       claude, llm, ollama:<model>, or any command that reads
+                        the prompt on stdin and prints the rewrite
+  ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API (…/v1), with
   ${c('cyan', '-m, --model')} <m>       the model and
-  ${c('cyan', '--api-key-env')} <var>   the key's variable (default OPENAI_API_KEY)
+  ${c('cyan', '--api-key-env')} <var>   the variable holding the key (default OPENAI_API_KEY)
   ${c('cyan', '--timeout')} <s>         Give up on one rewrite after this long (default 60)
   ${c('cyan', '--settle')} <s>          Typing pause before paragraphs are checked (default 1.5)
 
-  Rules are checked per paragraph, once the victim pauses, so they stay
-  quick and cheap; a fast model (Haiku, gpt-4o-mini, a local 8B) works best.
-  A rewrite is dropped if they edited the paragraph meanwhile.
+${c('yellow', 'WHO GETS PRANKED:')}
+  Without these options: everyone who edits the note, ${c('bold', 'your own browser included')}.
+  Edits hedgesync itself makes are never pranked.
 
-${c('yellow', 'TARGETING:')}
-  ${c('cyan', '--allow-user')} <id>     Only prank this HedgeDoc account id (repeatable)
-  ${c('cyan', '-U, --user-filter')} <re> Only prank users whose display name matches
-                        (names can be faked; ids cannot)
+  ${c('cyan', '--only')} <user>         Only prank these users (repeatable)
+  ${c('cyan', '--except')} <user>       Never prank these users, with any prank, --deny
+                        included (repeatable). Wins over everything else.
+  ${c('cyan', '--spare-me')}            Never prank the account you are logged in as, i.e.
+                        you in your browser (same as --except <your account id>)
+  ${c('cyan', '--allow-user')} <id>     Only prank this account id (exact; repeatable)
+  ${c('cyan', '-U, --user-filter')} <re> Only prank users whose display name matches this
+                        (case-sensitive) regex
+
+  A <user> is an account id (matched exactly) or a display-name regex
+  (case-insensitive: "bob" also matches "Bobby", "^bob$" only Bob). People
+  can rename themselves, so ids are safer; anonymous guests have no id.
+  The online users and their ids are listed at start (victims highlighted);
+  "hedgesync users <url>" lists them too. A user must pass every filter
+  given: --only, --allow-user and -U all have to match, and --except must not.
 
 ${c('yellow', 'EXAMPLES:')}
-  hedgesync prank https://md.example.com/abc123 --stutter 15
-  hedgesync prank https://md.example.com/abc123 --fat-fingers 5 --transpose 5 --echo 10 -U '^Bob'
-  hedgesync prank https://md.example.com/abc123 --bombs 3 --ghost 90 --haunt 20
-  hedgesync prank https://md.example.com/abc123 --deny alice
-  hedgesync prank https://md.example.com/abc123 --rule 'Everything is written in pirate speak' \\
+  ${c('dim', '# Light typos for everyone but you')}
+  hedgesync prank https://md.example.com/abc --stutter 5 --fat-fingers 3 --spare-me
+
+  ${c('dim', '# Make Bob\'s afternoon interesting')}
+  hedgesync prank https://md.example.com/abc --only '^bob$' --transpose 5 --echo 10 --bombs 3 --ghost 90
+
+  ${c('dim', '# Lock Mallory out of the note without changing its permissions')}
+  hedgesync prank https://md.example.com/abc --deny mallory
+
+  ${c('dim', '# Pirate speak for everyone except Alice and you')}
+  hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \\
+    --except alice --spare-me \\
     --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
 `,
 

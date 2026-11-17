@@ -15,6 +15,9 @@
   ticking bomb by deleting it, or it leaves a crater), `--deny <user>`
   (reverts everything they type) and `--rule <text>` (an AI agent rewrites
   paragraphs to follow rules, using the same agents as `assistant`).
+- `hedgesync prank --only <user>`, `--except <user>` and `--spare-me` pick
+  who is pranked, by account id or display-name regex; `--except` also
+  protects from `--deny`. The online users and their ids are listed at start.
 
 ## 2.5.0 (2026-11-16)
 

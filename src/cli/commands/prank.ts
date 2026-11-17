@@ -58,6 +58,9 @@ export const prank: Command = {
     { name: 'rule', type: 'multi' },
     ...agentOptions,
     { name: 'settle', type: 'value' },
+    { name: 'only', type: 'multi' },
+    { name: 'except', type: 'multi' },
+    { name: 'spare-me', type: 'flag' },
     { name: 'allow-user', type: 'multi' },
     { name: 'user-filter', short: 'U', type: 'value' },
   ],
@@ -117,28 +120,68 @@ export const prank: Command = {
       }
     }
     const allowedUserIds = ctx.list('allow-user');
+    const only = ctx.list('only');
+    const except = ctx.list('except');
+    for (const spec of [...only, ...except, ...denied]) {
+      try {
+        new RegExp(spec, 'i');
+      } catch {
+        // Still usable as an account id; say so, since a name was probably meant.
+        ctx.warn(`'${spec}' is not a valid regex, so it only matches the account id '${spec}'`);
+      }
+    }
 
     const client = await ctx.connect(0);
     try {
       assertEditable(client);
+      if (ctx.flag('spare-me')) {
+        const profile = await ctx.api(client.serverUrl, true).getProfile();
+        if (profile.status !== 'ok' || !profile.id) {
+          throw new CliError('--spare-me needs a login', 'Log in (hedgesync login) or pass --except <your name>');
+        }
+        except.push(profile.id);
+        ctx.info(c('dim', `  Sparing you (${profile.name}, ${profile.id})`));
+      }
     } catch (err) {
       client.disconnect();
       throw err;
     }
 
-    const engine = new PrankEngine(client, { allowedUserIds, userFilter });
+    const engine = new PrankEngine(client, {
+      only: only.length ? only : undefined,
+      except: except.length ? except : undefined,
+      allowedUserIds,
+      userFilter,
+    });
     for (const p of pranks) engine.add(p);
     engine.onPrank(e => ctx.info(`${c('dim', new Date().toLocaleTimeString())} ${c('magenta', e.prank)} ${describe(e)}`));
     engine.start();
 
     const targets = [
-      ...allowedUserIds.map(id => `user id ${id}`),
+      ...only,
+      ...allowedUserIds.map(id => `account ${id}`),
       ...(userFilter ? [`names matching /${filter}/`] : []),
     ];
-    ctx.info(`${c('green', '✓ Pranking')} ${targets.length ? targets.join(', ') : 'everyone'} `
-      + c('dim', `with ${engine.list().join(', ')} (Ctrl+C stops)`));
-    if (denied.length) ctx.info(c('dim', `  Denying edits by: ${denied.join(', ')}`));
+    const pranked = engine.list().filter(n => n !== 'deny');
+    if (pranked.length) {
+      ctx.info(`${c('green', '✓ Pranking')} ${targets.length ? targets.join(' + ') : 'everyone'}`
+        + `${except.length ? ` except ${except.join(', ')}` : ''} `
+        + c('dim', `with ${pranked.join(', ')} (Ctrl+C stops)`));
+    }
+    if (denied.length) {
+      ctx.info(`${c('green', '✓ Denying')} edits by ${denied.join(', ')}`
+        + `${except.length ? ` except ${except.join(', ')}` : ''} ${c('dim', '(Ctrl+C stops)')}`);
+    }
     if (agentDescription) ctx.info(c('dim', `  Rules enforced by ${agentDescription}: ${rules.join('; ')}`));
+
+    // Who is here, so you can pick victims by name or account id next time.
+    const online = client.getOnlineUsers().filter(u => u.id !== client.socket?.id);
+    if (online.length) {
+      ctx.info(c('dim', `  Online: ${online.map(u => {
+        const who = engine.isTarget(u) ? c('magenta', u.name ?? '?') : u.name ?? '?';
+        return `${who}${u.userid ? ` (${u.userid})` : ''}`;
+      }).join(', ')}`));
+    }
 
     await new Promise<void>((resolve) => {
       const stop = async () => {

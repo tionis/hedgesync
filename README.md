@@ -1038,58 +1038,98 @@ Everyone who can edit the note can use it; `--allow <user>` limits that.
 
 ### Pranks
 
-`hedgesync prank` reacts to what people type in a note. Combine any of:
+`hedgesync prank` connects to a note and reacts to what people type in it,
+in real time, until Ctrl+C. Combine any of:
 
 | Option | What happens |
 |---|---|
-| `--stutter <%>` | typed characters come out twice (`--stutter-deletes`: backspaces too) |
-| `--fat-fingers <%>` | a neighbouring key is hit instead (`--keyboard qwertz` for German keyboards) |
-| `--transpose <%>` | a letter swaps with the one before it ("teh") |
-| `--sticky-caps <%>` | shift gets stuck: a run of CAPS or SpOnGe case |
-| `--echo <%>` | a finished word is repeated ("the the") |
-| `--homoglyphs <%>` | letters turn into identical-looking Cyrillic ones |
-| `--haunt <%>` | a burst of typing quietly disappears a few seconds after it ends |
-| `--ghost <seconds>` | our cursor shows up next to the victim, types a remark and erases it |
-| `--bombs <%>` | a ticking `💣15` appears near the victim; delete it, or it blows a crater into the text (`--fuse`, `--blast`) |
+| `--stutter <%>` | a typed character comes out twice: "hhello" (`--stutter-deletes`: a backspace may eat one more) |
+| `--fat-fingers <%>` | a neighbouring key is hit instead: "hrllo" (`--keyboard qwertz` for German keyboards) |
+| `--transpose <%>` | a letter swaps with the one before it: "teh" |
+| `--sticky-caps <%>` | shift gets stuck for 3-12 letters: "HELLo" or "hElLo" |
+| `--echo <%>` | a finished word is doubled: "the the" |
+| `--homoglyphs <%>` | letters become identical-looking Cyrillic ones; search and spell checking break |
+| `--haunt <%>` | a burst of typing quietly disappears 3-10 s after it ends |
+| `--ghost <seconds>` | about this often, your cursor appears below the victim, types a remark (`--ghost-message`) and erases it |
+| `--bombs <%>` | a ticking `💣15` appears near the victim; deleting it defuses it, otherwise it explodes into a crater of `░` (`--fuse`, `--blast`) |
 | `--deny <user>` | everything that user types is reverted at once |
 | `--rule <text>` | an AI agent rewrites what victims write to follow the rule |
 
-Percentages are per typed character (per word for `--echo`, per edit for
-`--bombs`, per burst for `--haunt`); pastes are left alone. Everyone is fair
-game, your own browser included, unless you pick victims with
-`--allow-user <id>` or `-U <name-regex>`.
+`<%>` is a chance from 0 to 100: per typed character, per finished word for
+`--echo`, per edit for `--bombs`, per burst of typing for `--haunt`. Pastes
+(more than 10 characters at once) are left alone.
+
+#### Who gets pranked
+
+By default, everyone who edits the note, **your own browser included**
+(edits hedgesync itself makes are never pranked). Narrow it down with:
+
+| Option | Effect |
+|---|---|
+| `--only <user>` | only prank these users (repeatable) |
+| `--except <user>` | never prank these users, with any prank, `--deny` included (repeatable); wins over everything |
+| `--spare-me` | never prank the account you are logged in as (your browser) |
+| `--allow-user <id>` | only prank this account id (exact) |
+| `-U, --user-filter <regex>` | only prank users whose display name matches (case-sensitive) |
+
+A `<user>` is a HedgeDoc account id (matched exactly) or a display-name
+regex (case-insensitive: `bob` also matches "Bobby", `^bob$` only Bob).
+People can rename themselves, so ids are the safer choice; anonymous guests
+have no id. The online users and their ids are printed at start, and
+`hedgesync users <url>` lists them too. `--deny` picks its own targets, so
+`--only` doesn't limit it, but `--except` and `--spare-me` still protect.
 
 ```sh
-hedgesync prank https://md.example.com/abc --fat-fingers 5 --transpose 5 --echo 10 -U '^Bob'
-hedgesync prank https://md.example.com/abc --bombs 3 --ghost 90 --haunt 20
+hedgesync prank https://md.example.com/abc --stutter 5 --fat-fingers 3 --spare-me
+hedgesync prank https://md.example.com/abc --only '^bob$' --transpose 5 --echo 10 --bombs 3 --ghost 90
+hedgesync prank https://md.example.com/abc --deny mallory
 hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \
-  --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
+  --except alice --spare-me --agent claude --model haiku
 ```
 
-`--rule` takes the same agents as `hedgesync assistant` (`--agent claude`,
-`ollama:<model>`, any command, or `--api`). To stay fast and cheap it works
-on paragraphs: once a victim pauses (`--settle`, default 1.5 s), each
-paragraph they touched goes to the agent with some of the note around it,
-and the answer is applied as a minimal diff, unless they changed the
-paragraph meanwhile, in which case it is tried again at the next pause. A
-fast model is what makes it feel live.
+#### Rules enforced by an AI agent
 
-From code, `PrankEngine` runs any `Prank`: `react` answers a remote edit
-with edits of its own, `start` gets an API with timers, anchors that follow
-edits, and the victim's position.
+`--rule` takes the same agents as `hedgesync assistant`: `--agent claude`,
+`--agent llm`, `--agent ollama:<model>`, any command reading the prompt on
+stdin, or `--api <url> --model <model>` for an OpenAI-compatible API.
+`--model` also picks the model for `claude` and `llm`.
+
+It is built to be fast and cheap: once a victim pauses (`--settle`, default
+1.5 s), each paragraph they touched goes to the agent on its own, with up to
+3000 characters of the note on either side as context. The answer is applied
+as a minimal edit, and only if the paragraph is still unchanged; if they kept
+writing, it is tried again at the next pause. The agent's response time is
+the delay people notice, so a small model (Haiku, gpt-4o-mini, a local 8B)
+works best. A rule that depends on a distant part of the note may be missed.
+
+#### From code
+
+`PrankEngine` runs any `Prank`. `react` answers a remote edit with edits of
+its own; `start` receives a `PrankApi` with timers, anchors (ranges that
+follow edits), tracked operations, the victim's position and your cursor.
 
 ```ts
-import { PrankEngine, stutter, bombs } from 'hedgesync';
+import { PrankEngine, stutter, bombs, deny, userMatcher } from 'hedgesync';
 
-const pranks = new PrankEngine(client, { userFilter: /^Bob/ });
+const pranks = new PrankEngine(client, {
+  only: ['^bob$'],            // account ids or name regexes, or a predicate
+  except: ['my-account-id'],  // never pranked, by anything
+});
 pranks.add(stutter({ probability: 0.15 })).add(bombs({ probability: 0.03 }));
+pranks.add(deny({ targets: userMatcher(['mallory']) }));
 pranks.add({
   name: 'shout',
   react: (pieces) => pieces.flatMap(p =>
     p.type === 'insert' && p.text === '.' ? [{ type: 'insert' as const, index: p.index + 1, text: '!!' }] : []),
 });
+pranks.onPrank(e => console.log(e.prank, e.message ?? e.edits));
 pranks.start();
 ```
+
+Pranks answer inside the client's change event, but the engine applies
+their edits right after it: editing a `HedgeDocClient` synchronously from a
+remote `change` handler corrupts its OT state. Timers and anchors are
+cleaned up by `pranks.stop()`.
 
 ### Writing into notes over HTTP
 

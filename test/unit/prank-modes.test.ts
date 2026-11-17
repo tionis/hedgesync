@@ -159,6 +159,84 @@ describe('typing pranks', () => {
   });
 });
 
+describe('scoping', () => {
+  test('only pranks the chosen users', async () => {
+    const { server, human, other, engine, sync, identify } = await setup('', { only: ['^victim$'] });
+    identify(human, 'v-id', 'Victim');
+    identify(other, 'b-id', 'Bystander');
+    engine.add(stutter({ probability: 1 })).start();
+    human.insert(0, 'a');
+    await sync();
+    other.insert(0, 'b');
+    await sync();
+    expect(server.document).toBe('baa');
+  });
+
+  test('except spares users, by name or account id', async () => {
+    const { server, human, other, engine, sync, identify } = await setup('', { except: ['b-id'] });
+    identify(human, 'v-id', 'Victim');
+    identify(other, 'b-id', 'Bystander');
+    engine.add(stutter({ probability: 1 })).start();
+    human.insert(0, 'a');
+    await sync();
+    other.insert(0, 'b');
+    await sync();
+    expect(server.document).toBe('baa');
+  });
+
+  test('except wins over only', async () => {
+    const { server, human, engine, sync, identify } = await setup('', { only: ['.'], except: ['victim'] });
+    identify(human, 'v-id', 'Victim');
+    engine.add(stutter({ probability: 1 })).start();
+    human.insert(0, 'a');
+    await sync();
+    expect(server.document).toBe('a');
+  });
+
+  test('except also protects from deny', async () => {
+    const { server, human, engine, sync, identify } = await setup('', { except: ['^me$'] });
+    identify(human, 'me-id', 'Me');
+    engine.add(deny({ targets: () => true })).start();
+    human.insert(0, 'mine');
+    await sync();
+    expect(server.document).toBe('mine');
+  });
+
+  test('unidentified users are spared by only, pranked without it', async () => {
+    const a = await setup('', { only: ['anyone'] });
+    a.engine.add(stutter({ probability: 1 })).start();
+    a.human.insert(0, 'x');
+    await a.sync();
+    expect(a.server.document).toBe('x');
+    const b = await setup('', { except: ['someone'] });
+    b.engine.add(stutter({ probability: 1 })).start();
+    b.human.insert(0, 'x');
+    await b.sync();
+    expect(b.server.document).toBe('xx');
+  });
+
+  test('a predicate works as a selector', async () => {
+    const { server, human, engine, sync, identify } = await setup('', { only: u => u?.name?.length === 3 });
+    identify(human, 'id', 'Bob');
+    engine.add(stutter({ probability: 1 })).start();
+    human.insert(0, 'y');
+    await sync();
+    expect(server.document).toBe('yy');
+  });
+
+  test('timed pranks follow only the chosen victims', async () => {
+    const { server, human, other, engine, sync, identify } = await setup('one\ntwo', { only: ['victim'] });
+    identify(human, 'v', 'Victim');
+    identify(other, 'b', 'Bystander');
+    engine.add(bombs({ probability: 1, fuseSeconds: 5 })).start();
+    other.insert(0, 'x');
+    await sync();
+    await new Promise(r => setTimeout(r, 30));
+    await sync();
+    expect(server.document).not.toContain(BOMB);
+  });
+});
+
 describe('deny', () => {
   test('reverts inserts and deletes of the denied user only', async () => {
     const { server, human, other, engine, sync, identify } = await setup('hello');
@@ -176,10 +254,13 @@ describe('deny', () => {
     expect(server.document).toBe('hello!');
   });
 
-  test('matches account ids exactly', () => {
-    const m = userMatcher(['abc-123']);
+  test('userMatcher: exact account ids, case-insensitive name regexes', () => {
+    const m = userMatcher(['abc-123', '^bob$']);
     expect(m({ userid: 'abc-123', name: 'X' })).toBe(true);
     expect(m({ userid: 'abc-1234', name: 'X' })).toBe(false);
+    expect(m({ name: 'Bob' })).toBe(true);
+    expect(m({ name: 'Bobby' })).toBe(false);
+    expect(m(undefined)).toBe(false);
   });
 
   test('ignores the engine filter and pre-empts other pranks', async () => {
