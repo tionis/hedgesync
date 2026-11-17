@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { HedgeDocClient } from '../../src/hedgedoc-client.js';
-import { PrankEngine, stutter, type PrankEngineOptions, type PrankEvent } from '../../src/prank.js';
+import { PrankEngine, stutter, type PrankEngineOptions, type PrankEvent } from '../../src/prank/index.js';
 import { SimServer } from '../sim/sim-server.js';
 import { connectClient, settle, stopAll } from './helpers.js';
 

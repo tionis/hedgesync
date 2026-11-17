@@ -130,8 +130,17 @@ export type {
 } from './browser-cookies.js';
 
 // Note mirroring
-export { PrankEngine, stutter, editPieces } from './prank.js';
-export type { Prank, PrankContext, PrankEdit, PrankEvent, EditPiece, PrankEngineOptions, StutterOptions, PrankClientLike } from './prank.js';
+export {
+  PrankEngine, Anchor, editPieces, editsToOperation,
+  stutter, fatFingers, transposer, stickyCaps, echo, homoglyphs, keyNeighbours, keyboardLayouts, HOMOGLYPHS,
+  hauntedUndo, ghostTypist, bombs, GHOST_MESSAGES,
+  deny, userMatcher, rulesKeeper, paragraphAt,
+} from './prank/index.js';
+export type {
+  Prank, PrankApi, PrankContext, PrankEdit, PrankEvent, PrankUser, EditPiece, PrankEngineOptions, PrankClientLike,
+  TrackedOperation, StutterOptions, ChanceOptions, FatFingersOptions, KeyboardLayout, StickyCapsOptions,
+  HauntedUndoOptions, GhostTypistOptions, BombOptions, DenyOptions, RulesOptions,
+} from './prank/index.js';
 export { NoteMirror, mergeText, createMirrorTransform } from './mirror.js';
 export type { MirrorClient, MirrorOptions, MirrorSyncEvent, MirrorDirection, MirrorTransformOptions } from './mirror.js';
 

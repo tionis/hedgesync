@@ -8,6 +8,13 @@
   doubles typed characters at random (`--stutter-deletes` doubles
   backspaces too); `--allow-user` and `-U` pick the victims. The library
   exports `PrankEngine` for writing your own.
+- More pranks: `--fat-fingers` (qwerty or `--keyboard qwertz`),
+  `--transpose`, `--sticky-caps`, `--echo`, `--homoglyphs`, `--haunt`
+  (typing disappears again a few seconds later), `--ghost` (a cursor types
+  remarks next to the victim and erases them), `--bombs` (defuse the
+  ticking bomb by deleting it, or it leaves a crater), `--deny <user>`
+  (reverts everything they type) and `--rule <text>` (an AI agent rewrites
+  paragraphs to follow rules, using the same agents as `assistant`).
 
 ## 2.5.0 (2026-11-16)
 

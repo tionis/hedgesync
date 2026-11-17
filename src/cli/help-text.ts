@@ -292,15 +292,53 @@ ${c('bold', 'hedgesync prank')} - Annoy people typing in a note
 
 Watches a note and reacts to what people type in it. Everyone is fair game,
 your own browser included, unless you pick victims with --allow-user or -U.
+Combine as many pranks as you like. Percentages are per typed character
+unless noted; pastes are left alone.
 
 ${c('yellow', 'USAGE:')}
   hedgesync prank <url> [pranks] [options]
 
-${c('yellow', 'PRANKS:')}
-  ${c('cyan', '--stutter')} <percent>   Each typed character has this chance of appearing
-                        twice ("hello" -> "hhello"). Pastes are left alone.
-  ${c('cyan', '--stutter-deletes')}     With --stutter: each backspace has the same chance
-                        of eating one more character.
+${c('yellow', 'TYPING:')}
+  ${c('cyan', '--stutter')} <%>         Characters come out twice ("hhello")
+  ${c('cyan', '--stutter-deletes')}     ...and backspaces sometimes eat one more character
+  ${c('cyan', '--fat-fingers')} <%>     A neighbouring key is hit instead ("hrllo")
+  ${c('cyan', '--keyboard')} <layout>   For --fat-fingers: qwerty (default) or qwertz
+  ${c('cyan', '--transpose')} <%>       A letter swaps with the one before it ("teh")
+  ${c('cyan', '--sticky-caps')} <%>     Shift gets stuck for a few letters: CAPS or SpOnGe case
+  ${c('cyan', '--echo')} <%>            Per finished word: it is repeated ("the the")
+  ${c('cyan', '--homoglyphs')} <%>      Letters become identical-looking Cyrillic ones
+                        (invisible, but search and spell checking break)
+
+${c('yellow', 'OVER TIME:')}
+  ${c('cyan', '--haunt')} <%>           Per burst of typing: a few seconds after they stop,
+                        it quietly disappears again
+  ${c('cyan', '--ghost')} <seconds>     About this often, our cursor shows up next to a victim,
+                        types a remark on a new line and erases it again
+  ${c('cyan', '--ghost-message')} <t>   What the ghost types (repeatable; default: a few)
+  ${c('cyan', '--bombs')} <%>           Per edit: a ticking bomb (💣15) is planted near the
+                        victim. Delete it to defuse it, or it explodes and
+                        turns the text around it into a crater
+  ${c('cyan', '--fuse')} <seconds>      Bomb countdown (default 15, at most 99)
+  ${c('cyan', '--blast')} <chars>       Characters destroyed on each side (default 25)
+
+${c('yellow', 'CONTROL:')}
+  ${c('cyan', '--deny')} <user>         Revert everything this user types, instantly
+                        (account id, or a case-insensitive display-name
+                        regex; repeatable; ignores --allow-user and -U)
+  ${c('cyan', '--rule')} <text>         An AI agent rewrites what victims write to follow
+                        this rule (repeatable), e.g. "write like a pirate" or
+                        "no work is ever scheduled for Eric". Needs an agent:
+  ${c('cyan', '-a, --agent')} <a>       claude, llm, ollama:<model> or any command
+                        (prompt on stdin), as for hedgesync assistant
+  ${c('cyan', '--api')} <url>           ...or an OpenAI-compatible API, with
+  ${c('cyan', '-m, --model')} <m>       the model and
+  ${c('cyan', '--api-key-env')} <var>   the key's variable (default OPENAI_API_KEY)
+  ${c('cyan', '--timeout')} <s>         Give up on one rewrite after this long (default 60)
+  ${c('cyan', '--settle')} <s>          Typing pause before paragraphs are checked (default 1.5)
+
+  Rules are checked per paragraph, once the victim pauses, so they stay
+  quick and cheap; a fast model (Haiku, gpt-4o-mini, a local 8B) works best.
+  A rewrite is dropped if they edited the paragraph meanwhile.
 
 ${c('yellow', 'TARGETING:')}
   ${c('cyan', '--allow-user')} <id>     Only prank this HedgeDoc account id (repeatable)
@@ -309,7 +347,11 @@ ${c('yellow', 'TARGETING:')}
 
 ${c('yellow', 'EXAMPLES:')}
   hedgesync prank https://md.example.com/abc123 --stutter 15
-  hedgesync prank https://md.example.com/abc123 --stutter 30 --stutter-deletes -U '^Bob'
+  hedgesync prank https://md.example.com/abc123 --fat-fingers 5 --transpose 5 --echo 10 -U '^Bob'
+  hedgesync prank https://md.example.com/abc123 --bombs 3 --ghost 90 --haunt 20
+  hedgesync prank https://md.example.com/abc123 --deny alice
+  hedgesync prank https://md.example.com/abc123 --rule 'Everything is written in pirate speak' \\
+    --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
 `,
 
   watch: () => `

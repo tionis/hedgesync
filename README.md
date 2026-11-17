@@ -165,6 +165,7 @@ hedgesync macro https://md.example.com/abc123 --config macros.json --watch
 # Pranks (Ctrl+C to stop)
 hedgesync prank https://md.example.com/abc123 --stutter 15            # tthat's annoying
 hedgesync prank https://md.example.com/abc123 --stutter 30 --stutter-deletes -U '^Bob'
+hedgesync prank https://md.example.com/abc123 --bombs 3 --ghost 90 --deny mallory
 
 # Mirror one note into another (Ctrl+C to stop)
 hedgesync mirror https://md.example.com/source https://md.example.com/target
@@ -1037,20 +1038,51 @@ Everyone who can edit the note can use it; `--allow <user>` limits that.
 
 ### Pranks
 
-`hedgesync prank` reacts to what people type in a note. `--stutter <percent>`
-gives each typed character that chance of appearing twice; with
-`--stutter-deletes` a backspace may also eat one character too many. Pastes
-are left alone. Everyone is fair game, your own browser included, unless
-you pick victims with `--allow-user <id>` or `-U <name-regex>`.
+`hedgesync prank` reacts to what people type in a note. Combine any of:
 
-From code, `PrankEngine` runs any `Prank`: a function from the pieces of a
-remote edit to edits of its own.
+| Option | What happens |
+|---|---|
+| `--stutter <%>` | typed characters come out twice (`--stutter-deletes`: backspaces too) |
+| `--fat-fingers <%>` | a neighbouring key is hit instead (`--keyboard qwertz` for German keyboards) |
+| `--transpose <%>` | a letter swaps with the one before it ("teh") |
+| `--sticky-caps <%>` | shift gets stuck: a run of CAPS or SpOnGe case |
+| `--echo <%>` | a finished word is repeated ("the the") |
+| `--homoglyphs <%>` | letters turn into identical-looking Cyrillic ones |
+| `--haunt <%>` | a burst of typing quietly disappears a few seconds after it ends |
+| `--ghost <seconds>` | our cursor shows up next to the victim, types a remark and erases it |
+| `--bombs <%>` | a ticking `💣15` appears near the victim; delete it, or it blows a crater into the text (`--fuse`, `--blast`) |
+| `--deny <user>` | everything that user types is reverted at once |
+| `--rule <text>` | an AI agent rewrites what victims write to follow the rule |
+
+Percentages are per typed character (per word for `--echo`, per edit for
+`--bombs`, per burst for `--haunt`); pastes are left alone. Everyone is fair
+game, your own browser included, unless you pick victims with
+`--allow-user <id>` or `-U <name-regex>`.
+
+```sh
+hedgesync prank https://md.example.com/abc --fat-fingers 5 --transpose 5 --echo 10 -U '^Bob'
+hedgesync prank https://md.example.com/abc --bombs 3 --ghost 90 --haunt 20
+hedgesync prank https://md.example.com/abc --rule 'Everything is written in pirate speak' \
+  --api https://api.anthropic.com/v1 --model claude-haiku-5-5 --api-key-env ANTHROPIC_API_KEY
+```
+
+`--rule` takes the same agents as `hedgesync assistant` (`--agent claude`,
+`ollama:<model>`, any command, or `--api`). To stay fast and cheap it works
+on paragraphs: once a victim pauses (`--settle`, default 1.5 s), each
+paragraph they touched goes to the agent with some of the note around it,
+and the answer is applied as a minimal diff, unless they changed the
+paragraph meanwhile, in which case it is tried again at the next pause. A
+fast model is what makes it feel live.
+
+From code, `PrankEngine` runs any `Prank`: `react` answers a remote edit
+with edits of its own, `start` gets an API with timers, anchors that follow
+edits, and the victim's position.
 
 ```ts
-import { PrankEngine, stutter } from 'hedgesync';
+import { PrankEngine, stutter, bombs } from 'hedgesync';
 
 const pranks = new PrankEngine(client, { userFilter: /^Bob/ });
-pranks.add(stutter({ probability: 0.15, deletes: true }));
+pranks.add(stutter({ probability: 0.15 })).add(bombs({ probability: 0.03 }));
 pranks.add({
   name: 'shout',
   react: (pieces) => pieces.flatMap(p =>
